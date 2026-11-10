@@ -8,7 +8,7 @@ import { CommitInput, Toggle } from "./controls";
 function FontPicker() {
   const [font, setCurrent] = useState(savedFont);
   return (
-    <section className="border-[3px] border-ink bg-white p-3">
+    <section className="border-[3px] border-line bg-card p-3">
       <SectionTitle>Font</SectionTitle>
       <Field label="Font style" hint="For panels, drawers, settings and agent terminals. The office stays pixel. Saved in this browser only.">
         <select
@@ -37,7 +37,7 @@ export function ProjectSettings() {
   return (
     <div className="flex flex-col gap-5">
       <FontPicker />
-      <section className="grid grid-cols-2 gap-3 border-[3px] border-ink bg-white p-3">
+      <section className="grid grid-cols-2 gap-3 border-[3px] border-line bg-card p-3">
         <div className="col-span-2">
           <SectionTitle>Project</SectionTitle>
         </div>

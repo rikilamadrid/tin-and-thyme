@@ -46,7 +46,7 @@ function AgentCard({ a, focused, n, now }: { a: AgentView; focused: boolean; n: 
       </div>
       <div className={`col-span-2 mt-1 truncate text-[13px] ${task || needs ? "" : "text-muted"}`}>
         {needs ? (
-          <span className="text-red">{a.status.note}</span>
+          <span className="text-[#ff7a9c]">{a.status.note}</span>
         ) : task ? (
           <>
             <span className="mr-1 font-term text-[16px] text-muted">{task.id}</span>
@@ -69,7 +69,7 @@ export function TeamPanel() {
 
   return (
     <section aria-label="Team" className="fixed bottom-[250px] left-4 top-[74px] z-10 flex w-[280px] flex-col gap-2">
-      <div className="flex items-center justify-between px-1 text-[13px] font-semibold uppercase tracking-[0.12em] text-cream [text-shadow:0_2px_0_#241a2e]">
+      <div className="flex items-center justify-between px-1 text-[13px] font-semibold uppercase tracking-[0.12em] text-ink [text-shadow:0_2px_0_#241a2e]">
         <span>
           Team · {team.length}
           {needs > 0 && <span className="ml-2 text-yellow">{needs} need you</span>}

@@ -52,7 +52,7 @@ export function StackSettings() {
           <section>
             <SectionTitle>What agents read</SectionTitle>
             <p className="mb-2 text-[13px] text-muted">Added to every agent's ROLE.md the next time it starts.</p>
-            <pre className="m-0 whitespace-pre-wrap border-[3px] border-ink bg-navy-2 p-3 font-term text-[16px] leading-tight text-[#dfe6ff]">{stackRoleMd(stack)}</pre>
+            <pre className="m-0 whitespace-pre-wrap border-[3px] border-line bg-navy-2 p-3 font-term text-[16px] leading-tight text-[#dfe6ff]">{stackRoleMd(stack)}</pre>
           </section>
           <div>
             <button className="btn text-[13px]" onClick={() => officeActions.updateStack(null)}>
@@ -85,7 +85,7 @@ function Frameworks({ stack, save }: { stack: StackConfig; save: (s: StackConfig
       {stack.frameworks.length > 0 && (
         <div className="flex flex-col gap-2">
           {stack.frameworks.map((f, i) => (
-            <div key={f.id} className="grid grid-cols-[150px_1fr_1fr] items-end gap-2 border-[3px] border-ink bg-white px-3 py-2">
+            <div key={f.id} className="grid grid-cols-[150px_1fr_1fr] items-end gap-2 border-[3px] border-line bg-card px-3 py-2">
               <b className="pb-2 text-[15px]">{f.id === "other" ? "Other" : stackTool(f.id)?.name}</b>
               {f.id === "other" ? (
                 <Field label="Name">
@@ -121,7 +121,7 @@ function ToolRow({ category, label, hint, stack, save }: { category: StackCatego
     save({ ...stack, tools });
   };
   return (
-    <div className="grid grid-cols-[150px_220px_1fr] items-center gap-3 border-[3px] border-ink bg-white px-3 py-2">
+    <div className="grid grid-cols-[150px_220px_1fr] items-center gap-3 border-[3px] border-line bg-card px-3 py-2">
       <div>
         <b className="text-[15px]">{label}</b>
         <div className="text-[12px] text-muted">{hint}</div>
@@ -198,7 +198,7 @@ function Access({ stack, sandboxed }: { stack: StackConfig; sandboxed: string[] 
       <p className="mb-2 text-[13px] text-muted">
         Sandboxes block most docs sites and APIs. Allow these for every sandboxed agent, or leave them: an agent that needs a site asks you first (<i>request_access</i>).
       </p>
-      <div className="border-[3px] border-ink bg-white">
+      <div className="border-[3px] border-line bg-card">
         {domains.map((d) => {
           const done = allowedForAll(d.domain);
           return (
@@ -216,7 +216,7 @@ function Access({ stack, sandboxed }: { stack: StackConfig; sandboxed: string[] 
               />
               <span className="font-term text-[17px]">{d.domain}</span>
               <span className="text-[12px] text-muted">{d.for.join(", ")}</span>
-              {done && <span className="ml-auto text-[12px] font-semibold" style={{ color: "#00a83a" }}>allowed</span>}
+              {done && <span className="ml-auto text-[12px] font-semibold" style={{ color: "#4fe07a" }}>allowed</span>}
             </label>
           );
         })}

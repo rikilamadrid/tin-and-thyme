@@ -35,7 +35,7 @@ export function PortBanner({ agent, status }: { agent: AgentConfig; status: Agen
   if (!port) return null;
   const done = forwarded.some((p) => p.sandbox === port);
   return (
-    <div className={`flex items-center gap-2 border-b-[3px] border-ink px-3 py-1.5 text-[13px] ${done ? "bg-[#dcf7e3]" : "bg-[#fff3cf]"}`}>
+    <div className={`flex items-center gap-2 border-b-[3px] border-line px-3 py-1.5 text-[13px] ${done ? "bg-okay" : "bg-notice"}`}>
       <span className="min-w-0 flex-1">
         {done ? (
           <>
@@ -128,7 +128,7 @@ export function PortsRow({ agent, running }: { agent: AgentConfig; running: bool
         }}
       >
         <input
-          className="w-[90px] border-2 border-ink bg-white px-1.5 py-0.5 font-term text-[16px]"
+          className="w-[90px] border-2 border-line bg-card px-1.5 py-0.5 font-term text-[16px]"
           inputMode="numeric"
           placeholder="3000"
           aria-label="Port to forward"

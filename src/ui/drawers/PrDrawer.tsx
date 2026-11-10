@@ -15,7 +15,7 @@ export function PrDrawer() {
   const Row = ({ pr }: { pr: PullRequest }) => {
     const author = snap.config.team.find((a) => a.id === pr.authorId);
     return (
-      <li className="grid grid-cols-[52px_1fr_auto] items-center gap-2.5 border-[3px] border-ink bg-white px-2.5 py-1.5 shadow-[0_3px_0_rgba(36,26,46,0.35)]">
+      <li className="grid grid-cols-[52px_1fr_auto] items-center gap-2.5 border-[3px] border-line bg-card px-2.5 py-1.5 shadow-[0_3px_0_rgba(36,26,46,0.35)]">
         <span className="font-term text-[24px] leading-none">#{pr.number}</span>
         <div className="min-w-0">
           <div className="truncate text-[15px] font-semibold">{pr.title}</div>
@@ -27,7 +27,7 @@ export function PrDrawer() {
             · {ago(pr.openedAt, now)} ago
             {!pr.merged && <> · {pr.openComments} open comment{pr.openComments === 1 ? "" : "s"}{pr.conflict ? " · merge conflict" : ""}</>}
           </div>
-          {pr.reviewNote && !pr.merged && <div className="text-[12px] text-[#a35d00]">{pr.reviewNote}</div>}
+          {pr.reviewNote && !pr.merged && <div className="text-[12px] text-[#ffb35c]">{pr.reviewNote}</div>}
         </div>
         <div className="flex flex-col items-end gap-1">
           <ReviewChip review={pr.review} merged={pr.merged} />

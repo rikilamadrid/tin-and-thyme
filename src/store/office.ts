@@ -2,6 +2,7 @@
 // Components and the PixiJS scene read from here.
 
 import { create } from "zustand";
+import { createFixtureSource, FIXTURES, type FixtureName } from "../data/fixture/busyFixture";
 import { createMockSource } from "../data/mock/mockSource";
 import type { ConnectionStatus, DataPreset, OfficeDataSource, OfficeEvent, SimSpeed } from "../data/source";
 import { createWsSource } from "../data/ws/wsSource";
@@ -23,6 +24,8 @@ interface OfficeState {
   speed: SimSpeed;
   presets: DataPreset[] | null;
   live: boolean; // connected to a real HQ server (vs. the demo mock)
+  /** A fixed sample scene (`?fixture=…`), shown with a label; null for live or demo data. */
+  fixture: FixtureName | null;
   workspaceInfo: Record<string, WorkspaceInfo>; // answers to inspectWorkspace
   connection: ConnectionStatus;
   source: OfficeDataSource;
@@ -52,8 +55,15 @@ function hqToken(): string | null {
   }
 }
 
-const token = hqToken();
-const source: OfficeDataSource = token ? createWsSource(token) : createMockSource();
+/** `?fixture=busy`: a fixed, labelled sample scene for layout checks. It never connects to a server. */
+function fixtureName(): FixtureName | null {
+  const v = new URL(location.href).searchParams.get("fixture");
+  return (FIXTURES as readonly string[]).includes(v ?? "") ? (v as FixtureName) : null;
+}
+
+const fixture = fixtureName();
+const token = fixture ? null : hqToken();
+const source: OfficeDataSource = fixture ? createFixtureSource(fixture) : token ? createWsSource(token) : createMockSource();
 
 export const useOffice = create<OfficeState>(() => ({
   snap: null,
@@ -63,6 +73,7 @@ export const useOffice = create<OfficeState>(() => ({
   speed: 1,
   presets: source.dev?.presets ?? null,
   live: token !== null,
+  fixture,
   workspaceInfo: {},
   connection: "connecting",
   source,
@@ -112,6 +123,8 @@ function reduce(snap: OfficeSnapshot, e: OfficeEvent): OfficeSnapshot {
       return { ...snap, activity: [e.event, ...snap.activity].slice(0, 50) };
     case "terminal.output":
       return snap;
+    case "workflow.updated":
+      return { ...snap, workflow: e.workflow };
     case "action.updated":
       return { ...snap, actionItems: upsert(snap.actionItems ?? [], e.item, (i) => i.id === e.item.id) };
     case "mcp.updated":
@@ -192,6 +205,10 @@ export const officeActions = {
   completeWelcome: (input: WelcomeInput) => source.completeWelcome(input),
   updateStack: (stack: StackConfig | null) => source.updateStack(stack),
   resolveActionItem: (id: string, decision: "done" | "dismissed", note?: string) => source.resolveActionItem(id, decision, note),
+  setContextAlert: (pct: number) => source.setContextAlert?.(pct),
+  ackContextAlert: (id: string) => source.ackContextAlert?.(id),
+  checkpointFresh: (id: string) => source.checkpointFresh?.(id),
+  retryHandoff: (key: string) => source.retryHandoff?.(key),
   refreshMcp: () => source.refreshMcp(),
   addMcp: (input: NewMcpServer) => source.addMcp(input),
   authMcp: (name: string) => source.authMcp(name),

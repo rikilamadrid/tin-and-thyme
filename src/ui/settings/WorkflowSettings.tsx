@@ -17,7 +17,7 @@ export function WorkflowSettings() {
   const live = useOffice((s) => s.live);
   if (!wf) return null;
   const stage = (name: string, on: boolean, detail: string) => (
-    <span className={`border-[3px] border-ink px-2 py-0.5 ${on ? "bg-white" : "bg-cream-2 text-muted line-through"}`}>
+    <span className={`border-[3px] border-line px-2 py-0.5 ${on ? "bg-card" : "bg-cream-2 text-muted line-through"}`}>
       <b>{name}</b> <span className="text-[12px]">{detail}</span>
     </span>
   );
@@ -34,7 +34,7 @@ export function WorkflowSettings() {
           {stage("Merge", true, wf.merge.by === "lead" ? "by the lead" : "by you")}
           <span>→</span>
           {live ? (
-            <span className="border-[3px] border-dashed border-ink bg-cream-2 px-2 py-0.5 text-muted">
+            <span className="border-[3px] border-dashed border-line bg-cream-2 px-2 py-0.5 text-muted">
               <b>Deploy</b> <span className="text-[12px]">coming soon</span>
             </span>
           ) : (
@@ -44,7 +44,7 @@ export function WorkflowSettings() {
         <p className="mt-2 text-[13px] text-muted">One task = one branch = one PR. HQ only reads results from these tools; it never merges or deploys itself.</p>
       </section>
 
-      <section className="border-[3px] border-ink bg-white p-3">
+      <section className="border-[3px] border-line bg-card p-3">
         <div className="mb-3 flex items-center justify-between">
           <SectionTitle>Review</SectionTitle>
           <Toggle checked={wf.review.enabled} onChange={(v) => officeActions.updateWorkflow({ review: { enabled: v } })} label={wf.review.enabled ? "On" : "Off"} />
@@ -73,7 +73,7 @@ export function WorkflowSettings() {
         <p className="mt-2 text-[12px] text-muted">When a review finishes with comments, HQ tells the PR's author to fix them.</p>
       </section>
 
-      <section className="border-[3px] border-ink bg-white p-3">
+      <section className="border-[3px] border-line bg-card p-3">
         <SectionTitle>Merge</SectionTitle>
         <div className="flex gap-2" role="radiogroup" aria-label="Who merges">
           {(["human", "lead"] as const).map((by) => (
@@ -86,7 +86,7 @@ export function WorkflowSettings() {
       </section>
 
       {live ? (
-        <section className="border-[3px] border-dashed border-ink bg-cream-2 p-3">
+        <section className="border-[3px] border-dashed border-line bg-cream-2 p-3">
           <div className="mb-1 flex items-center justify-between">
             <SectionTitle>Deploy</SectionTitle>
             <span className="chip text-[12px]">Coming soon</span>
@@ -97,7 +97,7 @@ export function WorkflowSettings() {
           </p>
         </section>
       ) : (
-      <section className="border-[3px] border-ink bg-white p-3">
+      <section className="border-[3px] border-line bg-card p-3">
         <div className="mb-3 flex items-center justify-between">
           <SectionTitle>Deploy</SectionTitle>
           <Toggle checked={wf.deploy.enabled} onChange={(v) => officeActions.updateWorkflow({ deploy: { enabled: v } })} label={wf.deploy.enabled ? "On" : "Off"} />

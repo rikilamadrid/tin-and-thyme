@@ -32,7 +32,7 @@ export function BoardsDrawer({ initialBoardId }: { initialBoardId?: string }) {
         <b className="text-[18px]">Boards</b>
         <span className="text-[14px] text-muted">{boards.length} in {snap.config.project.name}</span>
       </DrawerHeader>
-      <div className="flex flex-wrap gap-1.5 border-b-[3px] border-ink px-3 py-2">
+      <div className="flex flex-wrap gap-1.5 border-b-[3px] border-line px-3 py-2">
         {boards.map((b) => (
           <button key={b.id} className="btn px-2 text-[13px]" aria-pressed={b.id === boardId} onClick={() => setBoardId(b.id)}>
             {b.status === "active" && <span className="mr-1 text-blue">●</span>}
@@ -41,7 +41,7 @@ export function BoardsDrawer({ initialBoardId }: { initialBoardId?: string }) {
         ))}
       </div>
       {board && (
-        <div className="flex items-center gap-2 border-b-[3px] border-ink bg-cream-2 px-3 py-1.5 text-[14px]">
+        <div className="flex items-center gap-2 border-b-[3px] border-line bg-cream-2 px-3 py-1.5 text-[14px]">
           <span className="text-muted">Status</span>
           <select
             className="field w-[120px] py-0 text-[14px]"
@@ -60,7 +60,7 @@ export function BoardsDrawer({ initialBoardId }: { initialBoardId?: string }) {
           </button>
         </div>
       )}
-      <div className="scroll-thin grid min-h-0 flex-1 auto-cols-[minmax(200px,1fr)] grid-flow-col gap-2 overflow-auto bg-[#f7f3ea] p-3">
+      <div className="scroll-thin grid min-h-0 flex-1 auto-cols-[minmax(200px,1fr)] grid-flow-col gap-2 overflow-auto bg-cream-2 p-3">
         {cols.map((c) => {
           const list = tasks.filter((t) => t.status === c.id);
           if (c.id === "done") list.reverse();
@@ -89,7 +89,7 @@ function TaskCard({ task }: { task: Task }) {
   const workers = snap?.config.team.filter((a) => !a.isLead) ?? [];
   const blockedBy = task.needs.filter((n) => snap?.tasks.find((t) => t.id === n)?.status !== "done");
   return (
-    <div className={`border-2 border-ink px-2 py-1.5 shadow-[0_3px_0_rgba(36,26,46,0.35)] ${task.status === "done" ? "bg-[#e8e1d2] text-muted" : "bg-white"}`}>
+    <div className={`border-2 border-line px-2 py-1.5 shadow-[0_3px_0_rgba(36,26,46,0.35)] ${task.status === "done" ? "bg-done text-muted" : "bg-card"}`}>
       <div className="font-term text-[16px] leading-none text-muted">
         {task.id}
         {task.prNumber && <span className="ml-1.5">#{task.prNumber}</span>}
@@ -100,7 +100,7 @@ function TaskCard({ task }: { task: Task }) {
       >
         {task.title}
       </div>
-      {task.status === "blocked" && task.note && <div className="text-[12px] text-red">{task.note}</div>}
+      {task.status === "blocked" && task.note && <div className="text-[12px] text-[#ff7a9c]">{task.note}</div>}
       <div className="mt-1 flex items-center gap-1.5 text-[12px]">
         {owner ? (
           <>
@@ -110,7 +110,7 @@ function TaskCard({ task }: { task: Task }) {
           <span className="text-muted">Unassigned</span>
         )}
       </div>
-      {blockedBy.length > 0 && task.status === "todo" && <div className="text-[12px] text-red">Waits on {blockedBy.join(", ")}</div>}
+      {blockedBy.length > 0 && task.status === "todo" && <div className="text-[12px] text-[#ff7a9c]">Waits on {blockedBy.join(", ")}</div>}
       {task.status === "todo" && (
         <select
           className="field mt-1 py-0 text-[12px]"

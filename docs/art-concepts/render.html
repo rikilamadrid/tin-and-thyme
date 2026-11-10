@@ -1,0 +1,403 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Controlroom art concepts</title>
+<style>html,body{margin:0;background:#000}canvas{display:block;image-rendering:pixelated}</style></head>
+<body><canvas id="c"></canvas>
+<script>
+// Controlroom concept renderer. One floor plan, one moment, three settings.
+// Logical canvas 336 x 300 px, drawn pixel by pixel, scaled 4x with no smoothing.
+const S = 4, W = 336, H = 304, OY = 22; // scene starts at y=22
+const cv = document.getElementById("c"); cv.width = W * S; cv.height = H * S;
+const ctx = cv.getContext("2d"); ctx.imageSmoothingEnabled = false;
+let oy = 0;
+const R = (x, y, w, h, c) => { if (!c) return; ctx.fillStyle = c; ctx.fillRect(x * S, (y + oy) * S, w * S, h * S); };
+const P = (x, y, c) => R(x, y, 1, 1, c);
+
+// ---------------------------------------------------------------- 3x5 pixel font
+const F = {A:"010101111101101",B:"110101110101110",C:"011100100100011",D:"110101101101110",E:"111100110100111",F:"111100110100100",G:"011100101101011",H:"101101111101101",I:"111010010010111",J:"001001001101010",K:"101101110101101",L:"100100100100111",M:"101111111101101",N:"110101101101101",O:"010101101101010",P:"110101110100100",Q:"010101101110011",R:"110101110101101",S:"011100010001110",T:"111010010010010",U:"101101101101111",V:"101101101101010",W:"101101111111101",X:"101101010101101",Y:"101101010010010",Z:"111001010100111",
+"0":"111101101101111","1":"010110010010111","2":"110001010100111","3":"110001010001110","4":"101101111001001","5":"111100110001110","6":"011100111101111","7":"111001010010010","8":"111101111101111","9":"111101111001110",
+".":"000000000000010","-":"000000111000000",":":"000010000010000","!":"010010010000010","?":"110001010000010","/":"001001010100100",">":"100010001010100","<":"001010100010001","+":"000010111010000","'":"010010000000000",",":"000000000010100","·":"000000010000000"," ":"000000000000000","^":"010101000000000","&":"010101010101011",";":"000010000010100","#":"101111101111101"};
+const tw = (s) => s.length * 4 - 1;
+function text(x, y, s, c, shadow) {
+  s = s.toUpperCase();
+  for (let i = 0; i < s.length; i++) {
+    const g = F[s[i]] ?? F["?"];
+    for (let j = 0; j < 15; j++) if (g[j] === "1") { if (shadow) P(x + i * 4 + (j % 3) + 1, y + ((j / 3) | 0) + 1, shadow); }
+    for (let j = 0; j < 15; j++) if (g[j] === "1") P(x + i * 4 + (j % 3), y + ((j / 3) | 0), c);
+  }
+}
+const ctext = (cx, y, s, c, sh) => text(Math.round(cx - tw(s) / 2), y, s, c, sh);
+function label(x, y, s, fg, bg) { R(x - 1, y - 1, tw(s) + 2, 7, bg); text(x, y, s, fg); }
+
+// ---------------------------------------------------------------- sprites (12 x 16)
+function spr(map, pal, x, y, rows = 16) {
+  map.slice(0, rows).forEach((row, j) => [...row.padEnd(12, ".").slice(0, 12)].forEach((ch, i) => { if (ch !== ".") P(x + i, y + j, pal[ch] ?? "#f0f"); }));
+}
+
+// ---------------------------------------------------------------- icons 5x5
+const ICON = {
+  work: [".....", ".###.", ".###.", ".###.", "....."],
+  review: [".##..", "#..#.", "#..#.", ".##..", "...##"],
+  needs: ["..#..", ".###.", "##.##", ".###.", "..#.."],
+  wait: ["#####", ".#.#.", "..#..", ".#.#.", "#####"],
+  off: [".###.", "#....", "#..#.", "#....", ".###."],
+};
+const icon = (k, x, y, c) => ICON[k].forEach((r, j) => [...r].forEach((ch, i) => ch === "#" && P(x + i, y + j, c)));
+
+// A state tag above an agent or object. Shape + word; colour is secondary.
+function tag(cx, y, kind, s, T) {
+  const w = tw(s) + 10, x = Math.round(cx - w / 2), h = 9;
+  if (kind === "needs") {
+    R(x - 2, y - 2, w + 4, h + 4, T.ink); R(x - 1, y - 1, w + 2, h + 2, T.alert); R(x, y, w, h, T.ink); R(x + 1, y + 1, w - 2, h - 2, T.alert);
+    icon("needs", x + 2, y + 2, T.ink); text(x + 8, y + 2, s, T.ink);
+    // pointer: a solid wedge
+    R(cx - 2, y + h + 2, 5, 1, T.ink); R(cx - 1, y + h + 3, 3, 1, T.ink); P(cx, y + h + 4, T.ink);
+    return;
+  }
+  if (kind === "wait") {
+    R(x, y, w, h, T.tagBg);
+    for (let i = 0; i < w; i += 2) { P(x + i, y, T.muted); P(x + i, y + h - 1, T.muted); }
+    for (let j = 0; j < h; j += 2) { P(x, y + j, T.muted); P(x + w - 1, y + j, T.muted); }
+    icon("wait", x + 2, y + 2, T.muted); text(x + 8, y + 2, s, T.muted);
+    P(cx, y + h, T.muted); P(cx, y + h + 2, T.muted);
+    return;
+  }
+  R(x, y, w, h, T.ink); R(x + 1, y + 1, w - 2, h - 2, T.tagBg);
+  icon(kind, x + 2, y + 2, T.tagFg); text(x + 8, y + 2, s, T.tagFg);
+  R(cx - 1, y + h, 3, 1, T.ink); P(cx, y + h + 1, T.ink);
+}
+const plate = (cx, y, s, T) => { const w = tw(s) + 4, x = Math.round(cx - w / 2); R(x, y, w, 7, T.plateBg); R(x, y + 6, w, 1, T.ink); text(x + 2, y + 1, s, T.plateFg); };
+
+// ---------------------------------------------------------------- belt
+function belt(T) {
+  const y = 184, x0 = 12, xT = 298; // horizontal run, then up the right column into MAIN
+  R(x0, y - 1, xT - x0 + 10, 12, T.ink); R(x0, y, xT - x0 + 10, 10, T.belt); R(x0, y, xT - x0 + 10, 1, T.beltEdge); R(x0, y + 9, xT - x0 + 10, 1, T.beltEdge);
+  R(xT - 1, 92, 12, 102, T.ink); R(xT, 92, 10, 101, T.belt); R(xT, 92, 1, 101, T.beltEdge); R(xT + 9, 92, 1, 101, T.beltEdge);
+  for (let x = x0 + 6; x < xT - 4; x += 10) { const a = T.arrow; P(x, y + 3, a); P(x + 1, y + 4, a); P(x + 2, y + 5, a); P(x + 1, y + 6, a); P(x, y + 7, a); P(x - 1, y + 3, a); P(x, y + 4, a); P(x + 1, y + 5, a); P(x, y + 6, a); P(x - 1, y + 7, a); }
+  for (let yy = 182; yy > 96; yy -= 10) { const a = T.arrow; P(xT + 2, yy + 2, a); P(xT + 3, yy + 1, a); P(xT + 4, yy, a); P(xT + 5, yy + 1, a); P(xT + 6, yy + 2, a); P(xT + 3, yy + 2, a); P(xT + 4, yy + 1, a); P(xT + 5, yy + 2, a); }
+}
+function parcel(x, y, id, T) {
+  R(x - 1, y - 1, 11, 9, T.ink); R(x, y, 9, 7, T.parcel); R(x, y, 9, 1, T.parcelHi); R(x + 4, y, 1, 7, T.tape);
+  label(x + 5 - tw(id) / 2 | 0, y - 9, id, T.panelFg, T.ink);
+}
+
+// ---------------------------------------------------------------- themes
+const THEMES = {};
+
+// ======== 1. NEW OFFICE ========================================================
+THEMES.office = {
+  title: "01 · THE PLAYROOM OFFICE",
+  sentence: ["Warm wood floor with one coloured rug per zone, so every place reads as a", "room; the belt is the only dark stripe, and it points at MAIN."],
+  ink: "#20172a", alert: "#ffd23f", tagBg: "#fff4e0", tagFg: "#20172a", muted: "#7c6f86", plateBg: "#3b2d46", plateFg: "#fff4e0",
+  belt: "#4a3f55", beltEdge: "#6e6280", arrow: "#ffd23f", parcel: "#c98a4b", parcelHi: "#e7b071", tape: "#7b4c2a",
+  bg: "#5fb36a", panelBg: "#2b2135", panelFg: "#fff4e0",
+  ground() { R(0, 0, W, 216, "#5fb36a"); for (let i = 0; i < 70; i++) P((i * 53) % W, (i * 31) % 214, "#4f9d5a"); [[3, 40], [2, 120], [330, 60], [329, 150], [3, 200]].forEach(([x, y]) => { R(x, y, 4, 4, "#2f7a3e"); }); },
+  floor() {
+    R(8, 8, 320, 200, "#3a2a3c"); // outer wall
+    for (let y = 12; y < 204; y += 4) for (let x = 12; x < 282; x += 16) { R(x + ((y / 4) % 2) * 8, y, 16, 4, (y / 4) % 3 ? "#d99a5b" : "#cf8f50"); R(x + ((y / 4) % 2) * 8, y + 3, 16, 1, "#b87a42"); }
+    R(12, 12, 270, 30, "#e9d3b0"); R(12, 41, 270, 2, "#b89c78"); // back wall
+    for (let x = 14; x < 280; x += 8) R(x, 14, 4, 27, "#e2c9a2"); // wallpaper stripes
+    R(282, 12, 42, 192, "#2c2f45"); // MAIN corridor floor
+    for (let y = 92; y < 204; y += 8) R(282, y, 42, 1, "#363a55");
+  },
+  board() {
+    R(16, 15, 92, 26, "#20172a"); R(17, 16, 90, 24, "#fffdf6");
+    ["TODO", "DOING", "CHECK", "DONE"].forEach((h, i) => { text(19 + i * 22, 18, h.slice(0, 5), "#20172a"); if (i) R(17 + i * 22, 17, 1, 22, "#d8cfc0"); });
+    const card = (col, row, id, c, mark) => { const x = 18 + col * 22, y = 25 + row * 7; R(x, y, 20, 6, c); text(x + 1, y + 1, id, "#20172a"); if (mark) icon(mark, x + 15, y, "#20172a"); };
+    card(0, 0, "3.4", "#ffe9a8", "wait"); card(0, 1, "3.5", "#ffe9a8");
+    card(1, 0, "3.2", "#a8e0ff", "work"); card(1, 1, "3.3", "#a8e0ff", "work");
+    card(2, 0, "3.1", "#ffc6d9", "review");
+    card(3, 0, "2.9", "#c6f2b6");
+    label(16, 8 - 0, "TASK BOARD", "#fff4e0", "#20172a");
+  },
+  sign() { R(122, 15, 64, 11, "#7b4c2a"); R(123, 16, 62, 9, "#e7b071"); ctext(154, 18, "CONTROLROOM", "#3a2a3c"); },
+  kitchen() {
+    R(212, 26, 50, 14, "#8f5e3a"); R(212, 26, 50, 2, "#c98a4b"); // counter
+    R(264, 14, 14, 26, "#f4f4f4"); R(264, 14, 14, 1, "#bdbdbd"); R(264, 26, 14, 1, "#bdbdbd"); R(275, 18, 1, 5, "#999"); R(275, 29, 1, 6, "#999"); // fridge
+    R(218, 18, 8, 8, "#20172a"); R(220, 20, 4, 3, "#e05d5d"); R(219, 26, 6, 1, "#555"); // coffee machine
+    R(232, 21, 6, 5, "#5fb36a"); P(234, 20, "#2f7a3e"); P(236, 19, "#2f7a3e"); // fruit bowl
+    R(244, 22, 3, 4, "#ff8f6b"); R(249, 22, 3, 4, "#6bb6ff"); R(254, 22, 3, 4, "#ffd23f"); // mugs
+    R(212, 44, 66, 18, "#f2e6d0"); for (let x = 212; x < 278; x += 6) for (let y = 44; y < 62; y += 6) if (((x + y) / 6) % 2 < 1) R(x, y, 6, 6, "#e2d2b6"); // tiles
+    R(226, 48, 22, 10, "#c98a4b"); R(226, 48, 22, 2, "#e7b071"); // little table
+    label(214, 8, "KITCHEN", "#fff4e0", "#20172a");
+  },
+  lounge() {
+    R(206, 68, 70, 50, "#8f6bd6"); R(208, 70, 66, 46, "#a585e6"); // rug
+    R(212, 74, 58, 12, "#3b2d46"); R(213, 75, 56, 10, "#3fa7a0"); R(213, 75, 56, 2, "#62c7bf"); // sofa back
+    R(212, 84, 6, 12, "#3fa7a0"); R(264, 84, 6, 12, "#3fa7a0"); R(218, 86, 46, 8, "#56bdb5"); // arms + seat
+    R(232, 102, 20, 6, "#8f5e3a"); R(233, 102, 18, 1, "#c98a4b"); // coffee table
+    R(272, 104, 6, 10, "#2f7a3e"); R(273, 101, 4, 4, "#5fb36a"); R(272, 113, 6, 3, "#7b4c2a"); // plant
+    label(208, 120, "LOUNGE", "#fff4e0", "#20172a");
+  },
+  huddle() {
+    // bookshelf + ping-pong table: off the work path, pure personality
+    R(16, 46, 30, 22, "#7b4c2a"); for (let s = 0; s < 3; s++) { R(17, 47 + s * 7, 28, 6, "#5a3820"); for (let b = 0; b < 7; b++) R(18 + b * 4, 48 + s * 7, 3, 5, ["#e05d5d", "#6bb6ff", "#ffd23f", "#5fb36a", "#c38fff", "#ff8f6b", "#fff4e0"][(b + s) % 7]); }
+    R(56, 56, 40, 24, "#2f7a3e"); R(57, 57, 38, 22, "#3e9a52"); R(75, 57, 1, 22, "#fff4e0"); R(57, 67, 38, 1, "#fff4e0"); R(74, 55, 3, 26, "#ddd"); // ping-pong
+    R(64, 84, 4, 4, "#ff8f6b"); P(84, 50, "#fff");
+  },
+  command() {
+    R(116, 46, 76, 40, "#c0392b"); R(118, 48, 72, 36, "#d95545"); // red rug
+    for (let x = 120; x < 188; x += 6) P(x, 49, "#ffd23f");
+  },
+  commandFront() { R(126, 66, 56, 12, "#7b4c2a"); R(126, 66, 56, 2, "#c98a4b"); R(130, 59, 14, 8, "#20172a"); R(131, 60, 12, 5, "#7fd8c4"); R(164, 59, 14, 8, "#20172a"); R(165, 60, 12, 5, "#7fd8c4"); R(148, 62, 10, 4, "#fff4e0"); R(176, 63, 4, 3, "#ffd23f"); },
+  station(x, y, lit) {
+    R(x, y, 44, 40, "#4f78c0"); R(x + 1, y + 1, 42, 38, "#6a93d8"); // carpet
+    R(x, y, 2, 40, "#d0d4e0"); R(x + 42, y, 2, 40, "#d0d4e0"); R(x, y, 44, 2, "#d0d4e0"); // partition
+  },
+  stationFront(x, y, lit, empty) {
+    R(x + 8, y + 20, 28, 8, "#8f5e3a"); R(x + 8, y + 20, 28, 2, "#c98a4b");
+    R(x + 24, y + 13, 10, 7, "#20172a"); R(x + 25, y + 14, 8, 4, lit ? "#7fd8c4" : "#4a4a5a");
+    if (lit) { R(x + 26, y + 15, 4, 1, "#20172a"); R(x + 26, y + 16, 5, 1, "#20172a"); }
+    R(x + 10, y + 18, 5, 2, "#ffd23f"); // sticky
+    if (empty) { R(x + 14, y + 30, 8, 6, "#3b2d46"); R(x + 15, y + 31, 6, 4, "#6e6280"); } // empty chair
+  },
+  gate() {
+    R(194, 170, 4, 26, "#3b2d46"); R(228, 170, 4, 26, "#3b2d46"); R(194, 163, 38, 9, "#20172a"); R(195, 164, 36, 7, "#ff8fb1");
+    ctext(213, 165, "REVIEW", "#20172a");
+  },
+  main() {
+    R(284, 14, 38, 76, "#20172a"); R(286, 16, 34, 72, "#2c2f45");
+    R(288, 40, 30, 48, "#9aa3b8"); for (let y = 42; y < 88; y += 4) R(288, y, 30, 1, "#7d869c"); // roll-up door
+    R(286, 18, 34, 18, "#ffd23f"); R(287, 19, 32, 16, "#ffe57a"); ctext(303, 21, "MAIN", "#20172a"); ctext(303, 28, "SHIP", "#7b4c2a");
+    P(303, 37, "#ffd23f");
+  },
+  sprites: {
+    orch: { name: "MAPLE", role: "ORCHESTRATOR", short: "CLIPBOARD", prop: "HEADSET+CLIPBOARD", map: ["....hhh.....", "...hhhhh....", "..hhhhhhh...", ".ahsssssha..", ".askssskaa..", "..sssssss.a.", "...sssss....", "..ccccccc...", ".cccwwcccc..", "cccccccccwww", "sccccccccwgw", "..ccccccc.ww", "..ddddddd...", "..dd...dd...", "..dd...dd...", ".kkk...kkk.."], pal: { h: "#6b3b23", a: "#20172a", s: "#f1c19a", k: "#20172a", c: "#e05d5d", w: "#fff4e0", g: "#8f5e3a", d: "#3b2d46" } },
+    dev: { name: "BEANS", role: "DEVELOPER", short: "BEANIE", prop: "BEANIE+HEADPHONES+LAPTOP", map: [".....a......", "....ccc.....", "...ccccc....", "..cccccccc..", ".hhsssssshh.", ".hhskssskhh.", "...sssssss..", "....sssss...", "..ddddddddd.", ".dgggggggdd.", "sdgwwwwwgds.", "..ggggggg...", "..ddddddd...", "..kk...kk...", "..kk...kk...", ".kkk...kkk.."], pal: { a: "#fff4e0", c: "#ff8f6b", h: "#20172a", s: "#c98a62", k: "#20172a", d: "#3f6fb5", g: "#9aa3b8", w: "#7fd8c4" } },
+    rev: { name: "LENS", role: "REVIEWER", short: "MAGNIFIER", prop: "ROUND GLASSES+MAGNIFIER", map: ["...hhhhhh...", "..hhhhhhhh..", "..hsssssh...", ".aaasaaas...", ".awasawa....", "..sssssss.kk", "...sssss.kwk", "..ccccccckwk", ".cccccccc.kk", "ccccccccc.k.", "s.ccccccs.k.", "..ccccccc...", "..ddddddd...", "..dd...dd...", "..dd...dd...", ".kkk...kkk.."], pal: { h: "#e7b071", a: "#20172a", w: "#cfefff", s: "#f1c19a", k: "#20172a", c: "#5fb36a", d: "#2f5a3a" } },
+    off: { name: "NAPS", role: "DEVELOPER", pal: { a: "#fff4e0", c: "#c38fff", h: "#20172a", s: "#f1c19a", k: "#20172a", d: "#7a52b5", g: "#9aa3b8", w: "#4a4a5a" } },
+    dev2: { name: "DOT", pal: { a: "#20172a", c: "#ffd23f", h: "#20172a", s: "#8a5a3c", k: "#20172a", d: "#3fa7a0", g: "#9aa3b8", w: "#7fd8c4" } },
+  },
+};
+
+// ======== 2. STARSHIP BRIDGE ===================================================
+THEMES.ship = {
+  title: "02 · STARSHIP CONTROLROOM",
+  sentence: ["Dark deck plates make every console glow like a map pin; hazard stripes", "frame the one cargo belt, and the bridge chair sits on a lit dais."],
+  ink: "#05060f", alert: "#ff9e1b", tagBg: "#0f1a33", tagFg: "#bff4ff", muted: "#5d7093", plateBg: "#bff4ff", plateFg: "#05060f",
+  belt: "#2a2f3d", beltEdge: "#ffcf3a", arrow: "#58f0ff", parcel: "#6c7a96", parcelHi: "#9aa8c4", tape: "#ffcf3a",
+  bg: "#05060f", panelBg: "#0b1022", panelFg: "#bff4ff",
+  ground() { R(0, 0, W, 216, "#05060f"); for (let i = 0; i < 120; i++) P((i * 97 + 13) % W, (i * 57 + 7) % 214, i % 7 ? "#3a4670" : "#d6e6ff"); },
+  floor() {
+    R(6, 6, 324, 204, "#5d6a85"); R(8, 8, 320, 200, "#1b2236");
+    for (let y = 12; y < 204; y += 12) for (let x = 12; x < 282; x += 12) { R(x, y, 12, 12, "#222b44"); R(x, y, 12, 1, "#2c3757"); R(x, y, 1, 12, "#2c3757"); P(x + 2, y + 2, "#3a4670"); }
+    R(12, 12, 270, 30, "#131a2c"); R(12, 41, 270, 2, "#58f0ff");
+    for (let x = 20; x < 280; x += 40) R(x, 14, 2, 26, "#26304d");
+    R(282, 12, 42, 192, "#141824"); for (let y = 92; y < 204; y += 6) R(282, y, 42, 1, "#1d2335");
+    // viewport windows on the back wall
+    [[192, 16], [204, 16]].forEach(([x, y]) => { R(x, y, 10, 10, "#05060f"); P(x + 3, y + 3, "#fff"); P(x + 7, y + 6, "#9ad"); });
+  },
+  board() {
+    R(16, 15, 92, 26, "#58f0ff"); R(17, 16, 90, 24, "#062033");
+    for (let y = 17; y < 40; y += 2) R(17, y, 90, 1, "#08293f");
+    ["QUEUE", "LIVE", "SCAN", "SENT"].forEach((h, i) => { text(19 + i * 22, 18, h.slice(0, 5), "#58f0ff"); if (i) R(17 + i * 22, 17, 1, 22, "#0d4a66"); });
+    const card = (col, row, id, c, mark) => { const x = 18 + col * 22, y = 25 + row * 7; R(x, y, 20, 6, "#05060f"); R(x, y, 1, 6, c); text(x + 2, y + 1, id, c); if (mark) icon(mark, x + 15, y, c); };
+    card(0, 0, "3.4", "#ffcf3a", "wait"); card(0, 1, "3.5", "#ffcf3a");
+    card(1, 0, "3.2", "#58f0ff", "work"); card(1, 1, "3.3", "#58f0ff", "work");
+    card(2, 0, "3.1", "#ff6bd6", "review"); card(3, 0, "2.9", "#7dff8a");
+    label(16, 8, "DISPATCH BOARD", "#05060f", "#58f0ff");
+  },
+  sign() { R(122, 15, 64, 11, "#58f0ff"); R(123, 16, 62, 9, "#05060f"); ctext(154, 18, "CONTROLROOM", "#58f0ff"); },
+  kitchen() {
+    R(212, 14, 66, 28, "#262f4a"); R(212, 14, 66, 1, "#58f0ff");
+    R(216, 18, 14, 18, "#3a4670"); R(218, 20, 10, 8, "#05060f"); R(220, 22, 6, 4, "#ff9e1b"); text(217, 30, "FAB", "#bff4ff"); // replicator
+    R(236, 18, 8, 18, "#3a4670"); R(237, 20, 6, 3, "#7dff8a"); R(237, 25, 6, 3, "#7dff8a"); // nutrient tubes
+    R(250, 22, 24, 12, "#58607a"); R(250, 22, 24, 1, "#9aa8c4"); R(254, 24, 4, 3, "#ff6bd6"); R(262, 24, 4, 3, "#ffcf3a"); // galley table
+    R(212, 44, 66, 18, "#1a2136"); for (let x = 214; x < 278; x += 8) R(x, 52, 4, 1, "#2c3757");
+    R(232, 48, 26, 8, "#58607a"); R(232, 48, 26, 1, "#9aa8c4"); // mess bench
+    label(214, 8, "GALLEY", "#05060f", "#58f0ff");
+  },
+  lounge() {
+    R(206, 68, 72, 50, "#121a30"); R(206, 68, 72, 1, "#ff6bd6"); R(206, 117, 72, 1, "#ff6bd6");
+    R(210, 72, 64, 8, "#05060f"); for (let i = 0; i < 10; i++) P(212 + i * 6, 74 + (i % 3) * 2, i % 2 ? "#fff" : "#9ad"); // big viewport
+    R(214, 84, 56, 10, "#ff6bd6"); R(215, 85, 54, 8, "#c94aa9"); R(215, 85, 54, 1, "#ff9ce4"); // curved lounge couch
+    R(232, 100, 20, 8, "#3a4670"); R(234, 102, 16, 4, "#58f0ff"); // holo table
+    label(208, 120, "REC DECK", "#05060f", "#ff6bd6");
+  },
+  huddle() {
+    R(18, 50, 34, 34, "#0f1a33"); R(20, 52, 30, 30, "#08293f"); for (let r = 4; r < 15; r += 4) { for (let a = 0; a < 40; a++) { const t = a / 40 * 6.283; P(35 + Math.round(Math.cos(t) * r), 67 + Math.round(Math.sin(t) * r), "#1d6a8a"); } } P(40, 62, "#ffcf3a"); P(30, 70, "#7dff8a"); // star chart
+    label(18, 86, "NAV", "#05060f", "#58f0ff");
+    R(60, 52, 30, 20, "#3a4670"); R(61, 53, 28, 18, "#26304d"); for (let i = 0; i < 6; i++) R(63 + i * 4, 60 + (i % 2) * 4, 2, 2, ["#ff9e1b", "#58f0ff", "#7dff8a"][i % 3]); // engineering panel
+  },
+  command() {
+    for (let r = 26; r > 0; r -= 1) { const c = r > 24 ? "#58f0ff" : r > 22 ? "#0d4a66" : "#16223e"; for (let a = 0; a < 120; a++) { const t = a / 120 * 6.283; P(154 + Math.round(Math.cos(t) * r * 1.4), 64 + Math.round(Math.sin(t) * r * 0.75), c); } }
+  },
+  commandFront() { R(130, 68, 48, 8, "#3a4670"); R(130, 68, 48, 1, "#58f0ff"); R(132, 70, 10, 4, "#05060f"); R(133, 71, 8, 2, "#ff9e1b"); R(166, 70, 10, 4, "#05060f"); R(167, 71, 8, 2, "#7dff8a"); R(146, 70, 16, 4, "#05060f"); for (let i = 0; i < 4; i++) P(148 + i * 4, 71, "#58f0ff"); },
+  station(x, y) { R(x, y, 44, 40, "#16223e"); R(x, y, 44, 1, "#58f0ff"); R(x, y + 39, 44, 1, "#58f0ff"); R(x + 2, y + 2, 40, 36, "#1a2a4a"); },
+  stationFront(x, y, lit, empty) {
+    R(x + 6, y + 20, 32, 8, "#3a4670"); R(x + 6, y + 20, 32, 1, "#9aa8c4");
+    R(x + 22, y + 10, 16, 10, "#05060f"); R(x + 23, y + 11, 14, 8, lit ? "#0d4a66" : "#141824");
+    if (lit) for (let i = 0; i < 3; i++) R(x + 25 + i * 4, y + 14 - (i % 2), 3, 2, ["#58f0ff", "#7dff8a", "#ff9e1b"][i % 3]);
+    if (empty) { R(x + 16, y + 30, 12, 6, "#26304d"); R(x + 17, y + 31, 10, 4, "#3a4670"); }
+  },
+  gate() {
+    R(192, 168, 6, 28, "#58607a"); R(228, 168, 6, 28, "#58607a"); R(192, 161, 42, 9, "#05060f"); R(193, 162, 40, 7, "#ff6bd6");
+    ctext(213, 163, "SCAN", "#05060f"); for (let y = 172; y < 194; y += 3) R(198, y, 30, 1, "#ff6bd640");
+  },
+  main() {
+    R(284, 14, 38, 76, "#58607a"); R(286, 16, 34, 72, "#141824");
+    for (let i = 0; i < 9; i++) R(288 + i * 4 - 0, 40, 2, 48, i % 2 ? "#ffcf3a" : "#05060f"); // hazard airlock
+    R(290, 44, 26, 40, "#26304d"); R(302, 44, 2, 40, "#05060f");
+    R(286, 18, 34, 18, "#7dff8a"); R(287, 19, 32, 16, "#05060f"); ctext(303, 21, "MAIN", "#7dff8a"); ctext(303, 28, "CARGO", "#58f0ff");
+  },
+  sprites: {
+    orch: { name: "VEGA", role: "ORCHESTRATOR", short: "CAP+CAPE", prop: "CAPTAIN CAP+CAPE+EPAULETTES", map: ["...kkkkkk...", "..kaaaaaak..", ".kkkkkkkkkk.", "..sssssss...", "..skssskss..", "..sssssss...", "...sssss....", "cccccccccccc", "cccyccccyccc", "ccccaaaacccc", "sccccccccccs", ".cccccccccc.", "..ddddddd...", "..dd...dd...", "..dd...dd...", ".kkk...kkk.."], pal: { k: "#05060f", a: "#ffcf3a", s: "#e8b48f", c: "#d63a3a", y: "#ffcf3a", d: "#2a2f3d" } },
+    dev: { name: "SPARK", role: "DEVELOPER", short: "ANTENNA", prop: "ANTENNA HELMET+GOGGLES+WRENCH", map: ["......a.....", "......a.....", "...ggggg....", "..ggggggg...", "..wwgggww...", "..sssssss...", "..skssskss..", "...sssss....", "..ccccccc.g.", ".cccaccccgg.", "ccccccccc.g.", "s.ccccccs.g.", "..ddddddd...", "..dd...dd...", "..dd...dd...", ".kkk...kkk.."], pal: { a: "#ff9e1b", g: "#9aa8c4", w: "#58f0ff", s: "#c98a62", k: "#05060f", c: "#ffcf3a", d: "#2a2f3d" } },
+    rev: { name: "ORBIT", role: "REVIEWER", short: "VISOR", prop: "VISOR+SCANNER", map: ["....hhhh....", "...hhhhhh...", "..hhhhhhhh..", "..sssssss...", ".aaaaaaaaa..", "..sssssss...", "...sssss..a.", "..ccccccc.a.", ".ccccccccgg.", "cccccccccgwg", "s.ccccccsggg", "..ccccccc...", "..ddddddd...", "..dd...dd...", "..dd...dd...", ".kkk...kkk.."], pal: { h: "#c9d4ff", a: "#ff6bd6", s: "#8ad1c0", k: "#05060f", c: "#3a6df0", g: "#9aa8c4", w: "#ff6bd6", d: "#1b2236" } },
+    off: { name: "DRIFT", role: "DEVELOPER", pal: { a: "#ff9e1b", g: "#9aa8c4", w: "#26304d", s: "#e8b48f", k: "#05060f", c: "#7dff8a", d: "#2a2f3d" } },
+    dev2: { name: "FLUX", pal: { a: "#ff9e1b", g: "#c9d4ff", w: "#58f0ff", s: "#e8b48f", k: "#05060f", c: "#58f0ff", d: "#2a2f3d" } },
+  },
+};
+
+// ======== 3. WILD CARD: THE POTION GUILD ======================================
+THEMES.guild = {
+  title: "03 · WILD CARD: THE POTION GUILD",
+  sentence: ["Each brewer has a bubbling cauldron, the archmage glows on a rune circle,", "and finished potions ride one plank conveyor through the truth mirror."],
+  ink: "#1a1020", alert: "#ff5c8a", tagBg: "#fdf0d5", tagFg: "#1a1020", muted: "#8a7a90", plateBg: "#4a2c55", plateFg: "#fdf0d5",
+  belt: "#6b4a2e", beltEdge: "#3e2a1a", arrow: "#a6ffb0", parcel: "#7de0c8", parcelHi: "#c4fff0", tape: "#4a2c55",
+  bg: "#1f3d2c", panelBg: "#2a1a33", panelFg: "#fdf0d5",
+  ground() { R(0, 0, W, 216, "#1f3d2c"); for (let i = 0; i < 60; i++) { P((i * 47 + 5) % W, (i * 29 + 3) % 214, "#2e5a3e"); } for (let i = 0; i < 14; i++) P((i * 71) % W, (i * 43) % 214, "#ffe680"); },
+  floor() {
+    R(6, 6, 324, 204, "#5a5266"); R(8, 8, 320, 200, "#6e6680");
+    for (let y = 12; y < 204; y += 8) for (let x = 12; x < 282; x += 10) { const o = ((y / 8) % 2) * 5; R(x + o, y, 10, 8, ((x + y) / 2) % 3 ? "#8a8296" : "#7f778c"); R(x + o, y + 7, 10, 1, "#6a6278"); R(x + o, y, 1, 8, "#6a6278"); }
+    R(12, 12, 270, 30, "#4a3f58"); R(12, 41, 270, 2, "#2e2638");
+    for (let x = 14; x < 280; x += 12) R(x, 14, 10, 6, "#554868");
+    R(282, 12, 42, 192, "#3a2f46"); for (let y = 92; y < 204; y += 8) R(282, y, 42, 1, "#43384f");
+    // torches
+    [[112, 18], [190, 18]].forEach(([x, y]) => { R(x, y + 4, 2, 6, "#6b4a2e"); R(x - 1, y, 4, 4, "#ffb347"); P(x, y - 1, "#ffe680"); });
+  },
+  board() {
+    R(16, 15, 92, 26, "#6b4a2e"); R(17, 16, 90, 24, "#c79a63"); for (let i = 0; i < 30; i++) P(18 + (i * 13) % 88, 17 + (i * 7) % 22, "#b5884f"); // cork
+    ["ASKED", "BREW", "TEST", "DONE"].forEach((h, i) => text(19 + i * 22, 18, h, "#3e2a1a"));
+    const card = (col, row, id, mark) => { const x = 18 + col * 22, y = 25 + row * 7; R(x, y, 20, 6, "#fdf0d5"); R(x + 19, y + 5, 1, 1, "#c79a63"); P(x + 10, y, "#ff5c8a"); text(x + 1, y + 1, id, "#1a1020"); if (mark) icon(mark, x + 15, y, "#4a2c55"); };
+    card(0, 0, "3.4", "wait"); card(0, 1, "3.5"); card(1, 0, "3.2", "work"); card(1, 1, "3.3", "work"); card(2, 0, "3.1", "review"); card(3, 0, "2.9");
+    label(16, 8, "QUEST BOARD", "#fdf0d5", "#4a2c55");
+  },
+  sign() { R(122, 14, 64, 12, "#4a2c55"); R(123, 15, 62, 10, "#7a4a8a"); R(123, 15, 62, 1, "#b07ac0"); ctext(154, 18, "CONTROLROOM", "#ffe680"); },
+  kitchen() {
+    R(212, 14, 30, 28, "#3e2a1a"); R(214, 16, 26, 24, "#2a1a10"); R(218, 26, 18, 10, "#ff7a2f"); R(220, 28, 14, 6, "#ffb347"); R(224, 30, 6, 3, "#ffe680"); // hearth fire
+    R(222, 20, 10, 7, "#3a3a46"); R(223, 21, 8, 5, "#55556a"); P(232, 22, "#55556a"); P(226, 18, "#ddd"); P(228, 17, "#ddd"); // kettle + steam
+    R(246, 18, 32, 22, "#6b4a2e"); for (let s = 0; s < 2; s++) { R(247, 20 + s * 10, 30, 1, "#3e2a1a"); for (let j = 0; j < 6; j++) R(249 + j * 5, 15 + s * 10 + 1, 3, 4, ["#a6ffb0", "#ff5c8a", "#ffe680", "#7de0c8", "#b07ac0", "#ffb347"][(j + s) % 6]); } // jar shelf
+    R(212, 44, 66, 18, "#7a6650"); for (let x = 212; x < 278; x += 11) R(x, 44, 1, 18, "#6b5844");
+    R(228, 48, 24, 10, "#6b4a2e"); R(228, 48, 24, 2, "#8f6a44"); R(232, 50, 4, 3, "#fdf0d5"); R(242, 50, 4, 3, "#fdf0d5"); // tea table
+    label(214, 8, "TEA HEARTH", "#fdf0d5", "#4a2c55");
+  },
+  lounge() {
+    R(206, 68, 72, 50, "#7a2f44"); R(208, 70, 68, 46, "#953c55"); for (let x = 210; x < 274; x += 8) { P(x, 72, "#ffe680"); P(x + 4, 113, "#ffe680"); }
+    R(212, 76, 18, 16, "#4a2c55"); R(214, 80, 14, 10, "#7a4a8a"); R(212, 76, 18, 4, "#5c3a68"); // armchair 1
+    R(252, 76, 18, 16, "#4a2c55"); R(254, 80, 14, 10, "#7a4a8a"); R(252, 76, 18, 4, "#5c3a68"); // armchair 2
+    R(234, 98, 18, 14, "#6b4a2e"); R(236, 100, 14, 10, "#c79a63"); R(240, 102, 6, 6, "#7de0c8"); // table with crystal
+    R(272, 100, 6, 14, "#3e2a1a"); R(272, 98, 6, 3, "#a6ffb0"); // lamp
+    label(208, 120, "LOUNGE", "#fdf0d5", "#4a2c55");
+  },
+  huddle() {
+    R(16, 46, 40, 24, "#3e2a1a"); for (let s = 0; s < 3; s++) { R(17, 47 + s * 7, 38, 6, "#2a1a10"); for (let b = 0; b < 9; b++) R(18 + b * 4, 48 + s * 7, 3, 5, ["#7a2f44", "#4a2c55", "#2e5a3e", "#6b4a2e", "#3a4670"][(b + s) % 5]); } // tomes
+    R(64, 52, 20, 20, "#2a1a10"); R(66, 54, 16, 16, "#3a6df0"); R(70, 58, 6, 4, "#5fb36a"); R(72, 64, 5, 3, "#5fb36a"); R(73, 72, 2, 6, "#6b4a2e"); R(68, 77, 12, 2, "#6b4a2e"); // globe
+    R(92, 60, 10, 12, "#fdf0d5"); R(92, 60, 10, 2, "#c79a63"); R(92, 70, 10, 2, "#c79a63"); // scroll
+  },
+  command() {
+    for (let r = 25; r > 18; r--) for (let a = 0; a < 140; a++) { const t = a / 140 * 6.283; P(154 + Math.round(Math.cos(t) * r * 1.4), 64 + Math.round(Math.sin(t) * r * 0.75), r % 3 ? "#5a4a78" : "#b07ac0"); }
+    for (let k = 0; k < 8; k++) { const t = k / 8 * 6.283; R(152 + Math.round(Math.cos(t) * 30), 63 + Math.round(Math.sin(t) * 16), 3, 3, "#ffe680"); }
+  },
+  commandFront() { R(144, 66, 20, 12, "#4a2c55"); R(142, 66, 24, 3, "#7a4a8a"); R(148, 60, 12, 7, "#c4fff0"); R(150, 61, 8, 5, "#7de0c8"); P(152, 62, "#fff"); }, // crystal lectern
+  station(x, y) { R(x, y, 44, 40, "#5a4f6a"); R(x + 2, y + 2, 40, 36, "#655a78"); for (let i = 0; i < 4; i++) P(x + 4 + i * 11, y + 37, "#b07ac0"); },
+  stationFront(x, y, lit, empty) {
+    R(x + 6, y + 22, 32, 7, "#6b4a2e"); R(x + 6, y + 22, 32, 2, "#8f6a44"); // bench
+    R(x + 24, y + 12, 14, 11, "#1a1020"); R(x + 25, y + 13, 12, 6, lit ? "#a6ffb0" : "#3a3a46"); R(x + 23, y + 12, 16, 2, "#3a3a46"); // cauldron
+    if (lit) { P(x + 28, y + 10, "#a6ffb0"); P(x + 32, y + 8, "#a6ffb0"); P(x + 30, y + 6, "#c4fff0"); R(x + 26, y + 23, 10, 2, "#ff7a2f"); }
+    R(x + 10, y + 19, 3, 3, "#7de0c8"); R(x + 15, y + 19, 3, 3, "#ff5c8a");
+    if (empty) { R(x + 12, y + 31, 8, 5, "#4a2c55"); R(x + 13, y + 32, 6, 3, "#7a4a8a"); }
+  },
+  gate() {
+    R(192, 162, 42, 34, "#1a1020"); R(194, 164, 38, 32, "#c4fff0"); R(196, 166, 34, 18, "#7de0c8"); R(198, 168, 30, 14, "#a6f4e4"); R(200, 170, 6, 8, "#e8fffa"); // mirror arch
+    R(192, 158, 42, 7, "#4a2c55"); ctext(213, 159, "MIRROR", "#ffe680");
+  },
+  main() {
+    R(284, 14, 38, 76, "#3e2a1a"); R(286, 16, 34, 72, "#2a1a10");
+    R(288, 40, 30, 48, "#8f6a44"); R(290, 42, 26, 46, "#b5884f"); for (let y = 46; y < 88; y += 8) R(290, y, 26, 2, "#6b4a2e"); R(312, 62, 3, 6, "#ffe680"); // vault door
+    R(286, 18, 34, 18, "#ffe680"); R(287, 19, 32, 16, "#4a2c55"); ctext(303, 21, "MAIN", "#ffe680"); ctext(303, 28, "VAULT", "#fdf0d5");
+  },
+  sprites: {
+    orch: { name: "SAGE", role: "ORCHESTRATOR", short: "STAR HAT", prop: "STAR HAT+BEARD+ORB STAFF", map: [".....a....w.", "....aaa..www", "...aaaaa..k.", "..aaayaaa.k.", ".aaaaaaaaak.", "..sssssss.k.", "..skssskskk.", "..wwwwwww.k.", "..cwwwwwc.k.", ".ccwwwwwcck.", "cccccccccck.", "s.ccccccc.k.", ".ccccccccc..", ".ccccccccc..", "..ccccccc...", ".kkk...kkk.."], pal: { a: "#3a4ad6", y: "#ffe680", w: "#f4f0ff", k: "#6b4a2e", s: "#f1c19a", c: "#5a3ad6" } },
+    dev: { name: "FIZZ", role: "DEVELOPER", short: "PADDLE", prop: "FLOPPY BERET+APRON+PADDLE", map: ["............", "...aaaaaa...", "..aaaaaaaa..", ".aaaaaaaaa..", "..hsssssh...", "..skssskss..", "...sssss....", "..ccccccc..g", ".cccwccccgg.", "ccccwcccg...", "s.ccwcccs...", "..ccwcccc...", "..ddddddd...", "..dd...dd...", "..dd...dd...", ".kkk...kkk.."], pal: { a: "#2e8a5a", h: "#6b3b23", s: "#c98a62", k: "#1a1020", c: "#c0602f", w: "#fdf0d5", g: "#8f6a44", d: "#4a2c55" } },
+    rev: { name: "GLINT", role: "REVIEWER", short: "MIRROR", prop: "HOOD+MONOCLE+HAND MIRROR", map: ["...cccccc...", "..cccccccc..", ".cccsssssc..", ".ccskssawc..", ".ccsssssac..", "..csssssc...", "...sssss.aa.", "..ccccccawwa", ".cccccccawwa", "ccccccccc.aa", "s.ccccccs.k.", "..ccccccc...", "..ddddddd...", "..dd...dd...", "..dd...dd...", ".kkk...kkk.."], pal: { c: "#7a2f44", s: "#f1c19a", k: "#1a1020", a: "#ffe680", w: "#c4fff0", d: "#3e2a1a" } },
+    off: { name: "MOSS", role: "DEVELOPER", pal: { a: "#6b4a2e", h: "#1a1020", s: "#f1c19a", k: "#1a1020", c: "#2e8a5a", w: "#fdf0d5", g: "#8f6a44", d: "#2e5a3e" } },
+    dev2: { name: "PIP", pal: { a: "#b07ac0", h: "#ffe680", s: "#f1c19a", k: "#1a1020", c: "#3a6df0", w: "#fdf0d5", g: "#8f6a44", d: "#4a2c55" } },
+  },
+};
+
+// ---------------------------------------------------------------- the shared moment
+function draw(T) {
+  // header
+  oy = 0; R(0, 0, W, H, T.panelBg);
+  text(6, 6, T.title, T.panelFg); text(W - 6 - tw("SAME MOMENT · SAME SCALE"), 6, "SAME MOMENT · SAME SCALE", T.muted);
+  R(6, 14, W - 12, 1, T.muted);
+
+  oy = OY;
+  T.ground(); T.floor(); T.board(); T.sign(); T.kitchen(); T.lounge(); T.huddle(); T.command();
+
+  // worker stations (bottom-left), feeding the belt
+  const st = [[18, 122], [68, 122], [118, 122]];
+  st.forEach(([x, y]) => T.station(x, y));
+  label(18, 113, "STATIONS", T.panelFg, T.ink);
+  st.forEach(([x, y]) => { for (let yy = y + 40; yy < 183; yy += 3) P(x + 22, yy, T.arrow); });
+
+  belt(T);
+  T.gate(); T.main();
+
+  const sp = T.sprites;
+  const devMap = sp.dev.map, devPal = sp.dev.pal;
+  // orchestrator: NEEDS YOU
+  spr(sp.orch.map, sp.orch.pal, 148, 50, 16); T.commandFront();
+  plate(154, 79, sp.orch.name, T);
+  tag(154, 33, "needs", "NEEDS YOU", T);
+  // stations: two working, one open with a ticket waiting for a worker
+  spr(devMap, devPal, st[0][0] + 6, st[0][1] + 10, 12); T.stationFront(st[0][0], st[0][1], true, false);
+  spr(devMap, sp.dev2.pal, st[1][0] + 6, st[1][1] + 10, 12); T.stationFront(st[1][0], st[1][1], true, false);
+  T.stationFront(st[2][0], st[2][1], false, true);
+  plate(st[0][0] + 22, st[0][1] + 30, sp.dev.name, T); plate(st[1][0] + 22, st[1][1] + 30, sp.dev2.name, T);
+  tag(st[0][0] + 12, st[0][1] - 2, "work", "DEV 3.2", T);
+  tag(st[1][0] + 12, st[1][1] - 2, "work", "DEV 3.3", T);
+  R(st[2][0] + 12, st[2][1] + 17, 9, 6, "#fff4e0"); text(st[2][0] + 13, st[2][1] + 18, "3.4", "#20172a");
+  tag(st[2][0] + 22, st[2][1] - 2, "wait", "3.4 NEEDS WORKER", T);
+  // off duty in the lounge
+  spr(devMap, sp.off.pal, 236, 76, 12); R(216, 86, 2, 0, null);
+  R(246, 86, 4, 4, "#fff"); R(250, 87, 1, 2, "#fff"); // mug
+  plate(242, 96, sp.off.name, T);
+  tag(242, 59, "off", "OFF DUTY", T);
+  // reviewer at the review gate, ticket 3.1 inside it
+  parcel(208, 184, "3.1", T);
+  spr(sp.rev.map, sp.rev.pal, 238, 156, 16);
+  plate(244, 173, sp.rev.name, T);
+  tag(250, 140, "review", "REVIEW 3.1", T);
+  // a parcel on the belt heading to MAIN
+  parcel(270, 184, "2.9", T);
+  label(258, 198, "TO MAIN >", T.panelFg, T.ink);
+
+  // ---------------------------------------------------------------- lineup + legend panel
+  oy = 0; const py = OY + 216;
+  R(0, py, W, H - py, T.panelBg); R(6, py + 3, W - 12, 1, T.muted);
+  text(6, py + 7, "CAST · ACTUAL SPRITE SIZE", T.muted);
+  const cast = [["orch", sp.orch], ["dev", sp.dev], ["rev", sp.rev]];
+  cast.forEach(([, c], i) => {
+    const x = 8 + i * 70, y = py + 16;
+    R(x, y, 16, 20, T.ink); R(x + 1, y + 1, 14, 18, T.bg); spr(c.map, c.pal, x + 2, y + 2, 16);
+    text(x + 19, y + 1, c.name, T.panelFg); text(x + 19, y + 8, c.role, T.alert); text(x + 19, y + 15, c.short, T.muted);
+  });
+  // legend: needs-you vs waiting-for-worker, plus the others
+  const lx = 214, ly = py + 9;
+  text(lx, ly, "STATES", T.muted);
+  const lg = [["needs", "NEEDS YOU"], ["wait", "NEEDS WORKER"], ["work", "WORKING"], ["review", "IN REVIEW"], ["off", "OFF DUTY"]];
+  lg.forEach(([k, s], i) => {
+    const x = lx + (i % 2) * 54, y = ly + 8 + ((i / 2) | 0) * 8;
+    if (k === "needs") { R(x - 1, y - 1, 7, 7, T.ink); R(x, y, 5, 5, T.alert); icon("needs", x, y, T.ink); }
+    else icon(k, x, y, k === "wait" ? T.muted : T.panelFg);
+    text(x + 7, y, s, T.panelFg);
+  });
+  text(6, H - 15, T.sentence[0], T.panelFg); text(6, H - 8, T.sentence[1], T.panelFg);
+}
+
+const theme = new URLSearchParams(location.search).get("t") || "office";
+draw(THEMES[theme]);
+document.title = THEMES[theme].title;
+</script>
+</body></html>

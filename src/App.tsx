@@ -1,5 +1,8 @@
 import { useEffect } from "react";
-import { OfficeCanvas } from "./office/OfficeCanvas";
+import { cueLog, startCues } from "./audio/cues";
+import { beamLog } from "./galley/GalleyCanvas";
+import { FIXTURE_LABEL } from "./data/fixture/busyFixture";
+import { GalleyCanvas } from "./galley/GalleyCanvas";
 import { connectOffice, useOffice } from "./store/office";
 import { ui, useUi } from "./store/ui";
 import { DebugPanel } from "./ui/DebugPanel";
@@ -8,7 +11,8 @@ import { ActivityFeed } from "./ui/hud/ActivityFeed";
 import { ConnectionBanner } from "./ui/hud/ConnectionBanner";
 import { SetupChecklist } from "./ui/setup/SetupChecklist";
 import { WelcomeModal } from "./ui/setup/WelcomeModal";
-import { TeamPanel } from "./ui/hud/TeamPanel";
+import { CREW_W, CrewPanel } from "./ui/hud/CrewPanel";
+import { useDrawerLayout } from "./ui/drawers/dock";
 import { Tooltip } from "./ui/hud/Tooltip";
 import { TopBar } from "./ui/hud/TopBar";
 import { SettingsModal } from "./ui/settings/SettingsModal";
@@ -53,6 +57,8 @@ function useSetupPrompt() {
     let shown = false;
     return useOffice.subscribe((s) => {
       if (shown || !s.live || !s.snap || s.snap.welcome) return;
+      // A workflow project runs its agents in Local mode: sandbox checks are not setup it needs.
+      if (s.snap.workflow) return;
       shown = true;
       const needed = s.snap.setup.checks.some((c) => c.status !== "ok" && c.neededFor !== "github" && c.neededFor !== "local");
       if (needed) ui.openSetup();
@@ -61,7 +67,18 @@ function useSetupPrompt() {
 }
 
 export function App() {
-  useEffect(() => connectOffice(), []);
+  const dock = useDrawerLayout();
+  useEffect(() => {
+    startCues(); // before connecting, so the first snapshot is the silent baseline
+    // Fixtures expose the chosen cues so a check can confirm what played and what stayed silent.
+    const fixture = useOffice.getState().fixture;
+    if (fixture) {
+      (window as unknown as { __thepassCues: typeof cueLog }).__thepassCues = cueLog;
+      (window as unknown as { __thepassBeams: typeof beamLog }).__thepassBeams = beamLog;
+      document.title = `Tin & Thyme · Fixture: ${FIXTURE_LABEL[fixture]}`;
+    }
+    return connectOffice();
+  }, []);
   useKeyboard();
   useSetupPrompt();
   const ready = useOffice((s) => s.snap !== null);
@@ -70,12 +87,12 @@ export function App() {
 
   return (
     <>
-      <OfficeCanvas />
+      <GalleyCanvas left={16 + CREW_W + 16} right={dock.docked ? dock.width + 32 : 16} />
       <ConnectionBanner />
       {ready && (
         <>
           <TopBar />
-          <TeamPanel />
+          <CrewPanel />
           <ActivityFeed />
           <DrawerHost />
           <DebugPanel />

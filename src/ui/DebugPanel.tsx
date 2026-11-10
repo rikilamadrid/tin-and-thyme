@@ -47,6 +47,7 @@ function summary(e: OfficeEvent): string {
     case "action.updated": return `${e.item.fromId} ${e.item.status}: ${e.item.title}`;
     case "mcp.updated": return `${e.mcp.servers.length} MCP servers`;
     case "access.updated": return `${e.request.agentId} ${e.request.domain} ${e.request.status}`;
+    case "workflow.updated": return `context alert ${e.workflow.contextAlertPct ?? "—"}% · ${Object.keys(e.workflow.handoffs ?? {}).length} handoffs`;
   }
 }
 
@@ -61,7 +62,7 @@ export function DebugPanel() {
 
   return (
     <section aria-label="Debug" className="panel-dark fixed bottom-4 left-[312px] z-30 flex h-[360px] w-[560px] flex-col font-term text-[16px] leading-tight">
-      <div className="flex items-center gap-2 border-b-[3px] border-ink px-2 py-1.5 font-ui text-[13px]">
+      <div className="flex items-center gap-2 border-b-[3px] border-line px-2 py-1.5 font-ui text-[13px]">
         <b className="uppercase tracking-[0.12em]">Debug</b>
         {(["events", "snapshot"] as const).map((t) => (
           <button key={t} className="btn px-2 text-[12px] text-ink" aria-pressed={tab === t} onClick={() => setTab(t)}>

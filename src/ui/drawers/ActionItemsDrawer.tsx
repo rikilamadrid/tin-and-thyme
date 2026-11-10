@@ -59,7 +59,7 @@ export function ActionItemsDrawer() {
               ))}
               {a.readyPrs.map((p) =>
                 p.url ? (
-                  <li key={`pr-${p.number}`} className="flex items-center gap-2 border-[3px] border-ink bg-white px-2.5 py-1.5">
+                  <li key={`pr-${p.number}`} className="flex items-center gap-2 border-[3px] border-line bg-card px-2.5 py-1.5">
                     <span className="flex-1">
                       PR <b>#{p.number}</b> {p.title} passed review and is ready to merge
                     </span>
@@ -100,7 +100,7 @@ export function ActionItemsDrawer() {
 
 function Row({ text, color, onOpen }: { text: string; color?: string; onOpen: () => void }) {
   return (
-    <li className="flex items-center gap-2 border-[3px] border-ink bg-white px-2.5 py-1.5">
+    <li className="flex items-center gap-2 border-[3px] border-line bg-card px-2.5 py-1.5">
       {color && <Dot color={color} size={8} />}
       <span className="flex-1">{text}</span>
       <button className="btn px-2 text-[12px]" onClick={onOpen}>
@@ -115,10 +115,10 @@ function Item({ item, from, now }: { item: ActionItem; from?: { id: string; name
   const [expanded, setExpanded] = useState(false);
   const long = item.details.split("\n").length > 6 || item.details.length > 400;
   return (
-    <li className={`border-[3px] border-ink bg-white px-3 py-2 shadow-[0_3px_0_rgba(36,26,46,0.35)] ${item.waiting ? "outline outline-[3px] outline-orange" : ""}`}>
+    <li className={`border-[3px] border-line bg-card px-3 py-2 shadow-[0_3px_0_rgba(36,26,46,0.35)] ${item.waiting ? "outline outline-[3px] outline-[#ff4f7b]" : ""}`}>
       <div className="flex items-start gap-2">
         <b className="flex-1 text-[15px]">{item.title}</b>
-        {item.waiting && <span className="chip shrink-0 text-[11px]" style={{ background: "#fff1d6" }}>waiting</span>}
+        {item.waiting && <span className="chip shrink-0 text-[11px]" style={{ background: "#ff4f7b" }}>◆ waiting</span>}
       </div>
       <div className="mb-1 flex items-center gap-1.5 text-[12px] text-muted">
         {from && <Dot color={from.color} size={8} />}

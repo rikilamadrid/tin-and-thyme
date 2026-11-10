@@ -21,7 +21,7 @@ export function ResourcesSection({ agent, status, team, machine }: { agent: Agen
   const mismatch = session ? sizeMismatch(r, session, machine) : false;
 
   return (
-    <section className="border-[3px] border-ink bg-white p-3">
+    <section className="border-[3px] border-line bg-card p-3">
       <SectionTitle>Resources</SectionTitle>
       <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Sandbox size">
         <button
@@ -73,13 +73,13 @@ export function ResourcesSection({ agent, status, team, machine }: { agent: Agen
         </div>
       )}
 
-      <div className={`mt-3 border-2 px-2.5 py-1.5 text-[13px] ${budget.overMemory ? "border-orange bg-[#fff1d6]" : "border-cream-3 bg-cream"}`}>
+      <div className={`mt-3 border-2 px-2.5 py-1.5 text-[13px] ${budget.overMemory ? "border-orange bg-warn" : "border-cream-3 bg-cream"}`}>
         <b>Team:</b> {budget.count} sandbox{budget.count === 1 ? "" : "es"} · {budget.cpus} CPUs · {fmtGb(budget.memoryGb)} of your {fmtGb(machine.memoryGb)} memory
-        {budget.overMemory && <div className="text-[#a35d00]">That's more memory than this machine has. Give agents less with Custom, or run fewer at once.</div>}
+        {budget.overMemory && <div className="text-[#ffb35c]">That's more memory than this machine has. Give agents less with Custom, or run fewer at once.</div>}
       </div>
 
       {agent.mode === "sandbox" && session?.sandbox && (
-        <div className={`mt-3 flex items-center gap-2 text-[13px] ${mismatch ? "border-2 border-orange bg-[#fff1d6] px-2.5 py-1.5" : "text-muted"}`}>
+        <div className={`mt-3 flex items-center gap-2 text-[13px] ${mismatch ? "border-2 border-orange bg-warn px-2.5 py-1.5" : "text-muted"}`}>
           <span className="flex-1">
             The sandbox now has {session.sandbox.cpus} CPUs · {fmtGb(session.sandbox.memoryGb)}.
             {mismatch && " Size is fixed when a sandbox is created, so recreate it to apply the new size."}

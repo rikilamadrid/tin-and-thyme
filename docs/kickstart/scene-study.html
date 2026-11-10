@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Controlroom Scene Study</title>
+<style>
+  :root{
+    --ground:#16141d; --panel:#211e2b; --ink:#f3ead8; --muted:#a59cb5; --line:#3a3448;
+    --fixture:#ffd166; --gate:#ff7a59;
+    font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--ground);color:var(--ink);padding:16px;padding-block:max(16px,env(safe-area-inset-top)) 32px}
+  main{max-width:480px;margin:0 auto}
+  .fixture{border:2px dashed var(--fixture);color:var(--fixture);padding:8px 10px;font-size:12px;line-height:1.4;margin-bottom:12px}
+  .fixture b{letter-spacing:.08em}
+  h1{font-size:16px;letter-spacing:.12em;margin:0 0 4px}
+  .sub{color:var(--muted);font-size:12px;margin:0 0 12px}
+  .scene{background:#0e0d13;border:2px solid var(--line);image-rendering:pixelated}
+  svg{display:block;width:100%;height:auto}
+  section{background:var(--panel);border:2px solid var(--line);padding:12px;margin-top:12px}
+  h2{font-size:12px;letter-spacing:.14em;margin:0 0 10px;color:var(--muted)}
+  ul{list-style:none;margin:0;padding:0}
+  li{display:flex;gap:10px;align-items:baseline;padding:6px 0;border-top:1px solid var(--line);font-size:13px}
+  li:first-child{border-top:0}
+  .mark{width:4.5em;flex:none;font-weight:700}
+  .who{flex:1}
+  .who small{display:block;color:var(--muted);font-size:11px}
+  .gatecard{border:3px double var(--gate);padding:10px;font-size:13px;line-height:1.45}
+  .gatecard .q{margin:6px 0 10px}
+  .btns{display:flex;flex-wrap:wrap;gap:8px}
+  .btns span{border:2px solid var(--ink);padding:4px 8px;font-size:12px}
+  dl{display:grid;grid-template-columns:auto 1fr;gap:6px 12px;font-size:12px;margin:0}
+  dt{font-weight:700} dd{margin:0;color:var(--muted)}
+  table{border-collapse:collapse;font-size:11px;width:100%}
+  .tw{overflow-x:auto}
+  td,th{border-top:1px solid var(--line);padding:5px 6px;text-align:left;vertical-align:top}
+  th{color:var(--muted);font-weight:400}
+</style>
+</head>
+<body>
+<main>
+  <div class="fixture" role="note"><b>FIXTURE · DESIGN PREVIEW</b><br>Hand-written sample data. Not read from any project and not a replay of a real run. Tickets, names and the gate question are invented to exercise the four states.</div>
+
+  <h1>CONTROLROOM · SCENE STUDY 01</h1>
+  <p class="sub">Mobile portrait office. Each state has a shape, a word and a place, so you can read it without colour or motion.</p>
+
+  <div class="scene">
+    <svg id="scene" viewBox="0 0 100 170" shape-rendering="crispEdges" role="img"
+         aria-label="Office scene. Dax is working on ticket 3.2 at a desk. Tess is reviewing ticket 3.1 at the review bench. Pim is idle in the lounge. Moss is at your desk waiting for your decision on ticket 3.3. Ori is coordinating at the console. No integrator is running."></svg>
+  </div>
+
+  <section aria-labelledby="g">
+    <h2 id="g">AT A GLANCE</h2>
+    <ul>
+      <li><span class="mark">◆ YOU</span><span class="who">Moss · developer · 3.3<small>human-gate at your desk</small></span></li>
+      <li><span class="mark">◎ REV</span><span class="who">Tess · tester · 3.1<small>review bench, evidence: Review: 2 findings, 1 resolved</small></span></li>
+      <li><span class="mark">■ WORK</span><span class="who">Dax · developer · 3.2<small>desk 1, last: tests written</small></span></li>
+      <li><span class="mark">■ WORK</span><span class="who">Ori · orchestrator · round 1<small>console</small></span></li>
+      <li><span class="mark">○ IDLE</span><span class="who">Pim · planner<small>lounge</small></span></li>
+      <li><span class="mark">— OFF</span><span class="who">integrator<small>configured role, not running (hard hat on the hook)</small></span></li>
+    </ul>
+  </section>
+
+  <section aria-labelledby="d">
+    <h2 id="d">DECISIONS WAITING · 1</h2>
+    <div class="gatecard">
+      <b>◆ 3.3 · Persist session tokens</b> · from Moss (developer)
+      <div class="q">Gate: "Store refresh tokens in the OS keychain or an encrypted file? Keychain adds a native dependency."</div>
+      <div class="btns" aria-label="Preview only, not interactive"><span>Answer → resume</span><span>Open terminal</span><span>View ticket</span></div>
+    </div>
+    <p class="sub" style="margin:8px 0 0">The gate text is shown verbatim. Your answer goes to a Pathfinder <code>resume</code> session; Controlroom never interprets it.</p>
+  </section>
+
+  <section aria-labelledby="l">
+    <h2 id="l">STATE MARKS</h2>
+    <dl>
+      <dt>■ WORKING</dt><dd>Solid square tag. Agent seated at a desk with its monitor lit.</dd>
+      <dt>○ IDLE</dt><dd>Hollow circle tag. Agent on the lounge couch, no ticket.</dd>
+      <dt>◎ REVIEW</dt><dd>Magnifier tag. Tester at the review bench with the card on it; the card on the wall also carries a magnifier.</dd>
+      <dt>◆ NEEDS YOU</dt><dd>Diamond tag with a double border. Agent standing at <i>your desk</i> holding a "?" sign; the card on the wall carries a diamond. It is always the bottom zone, nearest your thumb.</dd>
+      <dt>— OFF</dt><dd>A configured role with no session: its prop sits empty in its place.</dd>
+    </dl>
+  </section>
+
+  <section aria-labelledby="s">
+    <h2 id="s">SILHOUETTES (ROLE → SHAPE)</h2>
+    <div class="tw"><table>
+      <tr><th>Role</th><th>Silhouette</th><th>Home place</th></tr>
+      <tr><td>planner</td><td>wide-brim hat, clipboard</td><td>ticket wall / lounge</td></tr>
+      <tr><td>developer</td><td>headphones, hoodie</td><td>desks</td></tr>
+      <tr><td>tester</td><td>goggles, magnifier</td><td>review bench</td></tr>
+      <tr><td>orchestrator</td><td>antenna headset, long coat</td><td>console</td></tr>
+      <tr><td>integrator</td><td>hard hat</td><td>merge dock</td></tr>
+    </table></div>
+  </section>
+
+  <section aria-labelledby="m">
+    <h2 id="m">WHERE EACH MARK WOULD COME FROM (PATHFINDER ADAPTER)</h2>
+    <div class="tw"><table>
+      <tr><th>Scene</th><th>Source</th></tr>
+      <tr><td>Roster / silhouettes</td><td><code>roles/*.md</code> + claim worktrees</td></tr>
+      <tr><td>Ticket wall columns</td><td><code>orchestrate.mjs status --json</code> rows: state + lifecycle</td></tr>
+      <tr><td>■ / ◎ / ◆</td><td>row state <code>working</code> / <code>review</code> / <code>human-gate</code></td></tr>
+      <tr><td>○ idle</td><td>role with no claim</td></tr>
+      <tr><td>Gate text</td><td>worktree <code>current-ticket.md</code> <code>- Gate:</code></td></tr>
+      <tr><td>Evidence line</td><td><code>- Review:</code> / <code>- Resolved findings:</code>, PR checks via branch</td></tr>
+    </table></div>
+  </section>
+
+  <p class="sub" style="margin-top:16px">All sprites and scenery are original to Controlroom. Layout idea (readable zones in a pixel office) is after JSM HQ (MIT); none of its art is used.</p>
+</main>
+
+<script>
+(function(){
+  const NS="http://www.w3.org/2000/svg";
+  const svg=document.getElementById("scene");
+  const el=(t,a,p=svg)=>{const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);p.appendChild(e);return e;};
+  const r=(x,y,w,h,f,p)=>el("rect",{x,y,width:w,height:h,fill:f},p);
+  const txt=(x,y,s,o={},p)=>{const e=el("text",Object.assign({x,y,fill:"#f3ead8","font-size":3,"font-family":"ui-monospace,Menlo,monospace","font-weight":700},o),p);e.textContent=s;return e;};
+
+  // ---- sprites: 10 x 14, one char = one pixel
+  const SPR={
+    developer:["...hhhh...","..hhhhhh..",".ahsssssa.",".askssksa.","..ssssss..","...ssss...","..cccccc..",".cccaaccc.",".cccccccc.","s.cccccc.s","..dddddd..","..dd..dd..","..dd..dd..",".kkk..kkk."],
+    planner:  ["...aaaa...","..aaaaaa..","aaaaaaaaaa","..skssks..","..ssssss..","...ssss...","..cccccc..",".ccccccwww",".cccccswgw",".cccccswww","..dddddd..","..dd..dd..","..dd..dd..",".kkk..kkk."],
+    tester:   ["...hhhh...","..hhhhhh..","..hhhhhh..",".awwaawwa.","..ssssss..","...ssss...","..cccccc..","kkcccccc..","kwkccccc..","kkscccccs.","k.dddddd..","..dd..dd..","..dd..dd..",".kkk..kkk."],
+    orchestrator:["....a.....","....a.....","...hhhh...","..hhhhhha.","..skssksa.","..ssssss..","...ssss...",".cccccccc.","ccccaacccc","sccccccccs",".dddddddd.","..dd..dd..","..dd..dd..",".kkk..kkk."]
+  };
+  const BASE={k:"#1d1b26",s:"#e9b48a",w:"#f3ead8",g:"#8a8398"};
+  function sprite(kind,x,y,pal){
+    const g=el("g",{});
+    SPR[kind].forEach((row,j)=>[...row].forEach((c,i)=>{
+      if(c===".")return; const f=pal[c]||BASE[c]; if(f) r(x+i,y+j,1,1,f,g);
+    }));
+    return g;
+  }
+
+  // ---- state tags: shape + word (never colour alone)
+  function tag(cx,y,kind,label){
+    const w=label.length*1.85+7, x=cx-w/2, g=el("g",{});
+    const gate=kind==="gate";
+    r(x,y,w,6,"#0e0d13",g);
+    el("rect",{x:x+.5,y:y+.5,width:w-1,height:5,fill:"none",stroke:gate?"#ff7a59":"#f3ead8","stroke-width":gate?.6:.4},g);
+    if(gate) el("rect",{x:x-.7,y:y-.7,width:w+1.4,height:7.4,fill:"none",stroke:"#ff7a59","stroke-width":.4},g);
+    const ix=x+3, iy=y+3;
+    if(kind==="work") r(ix-1.4,iy-1.4,2.8,2.8,"#f3ead8",g);
+    if(kind==="idle") el("circle",{cx:ix,cy:iy,r:1.3,fill:"none",stroke:"#f3ead8","stroke-width":.5},g);
+    if(kind==="review"){el("circle",{cx:ix-.3,cy:iy-.3,r:1.1,fill:"none",stroke:"#f3ead8","stroke-width":.5},g);el("line",{x1:ix+.5,y1:iy+.5,x2:ix+1.6,y2:iy+1.6,stroke:"#f3ead8","stroke-width":.6},g);}
+    if(gate) el("polygon",{points:`${ix},${iy-1.8} ${ix+1.8},${iy} ${ix},${iy+1.8} ${ix-1.8},${iy}`,fill:"#ff7a59"},g);
+    // pointer
+    el("polygon",{points:`${cx-1},${y+6} ${cx+1},${y+6} ${cx},${y+7.4}`,fill:gate?"#ff7a59":"#f3ead8"},g);
+    txt(x+5.2,y+4.3,label,{"font-size":2.9},g);
+  }
+  function zoneLabel(x,y,s){ r(x,y,s.length*1.6+2,4,"#0e0d13"); txt(x+1,y+3.1,s,{"font-size":2.6,fill:"#a59cb5"}); }
+
+  // ---- room
+  r(0,0,100,170,"#2a2535");                         // walls
+  r(0,0,100,8,"#3b3450"); r(0,8,100,1,"#1d1b26");   // top trim
+  r(30,1.5,40,5,"#1d1b26"); txt(50,5.2,"CONTROLROOM",{"text-anchor":"middle","font-size":3.2,fill:"#ffd166"});
+  // floor tiles
+  for(let y=40;y<170;y+=6) for(let x=0;x<100;x+=6) r(x,y,6,6,((x+y)/6)%2?"#332d40":"#2f2a3b");
+
+  // ---- ticket wall
+  r(3,10,94,28,"#5a4632"); r(4,11,92,26,"#e8dcc0");
+  const cols=[["READY",4],["DOING",27],["REVIEW",50],["DONE",73]];
+  cols.forEach(([n,x])=>{ txt(x+11.5,14.5,n,{"text-anchor":"middle","font-size":2.7,fill:"#1d1b26"}); if(x>4) r(x-.5,12,.5,24,"#b9a882"); });
+  function card(x,y,key,mark){
+    r(x+1,y,21,6,"#fffaf0"); el("rect",{x:x+1.25,y:y+.25,width:20.5,height:5.5,fill:"none",stroke:"#1d1b26","stroke-width":.5});
+    txt(x+3,y+4.2,key,{"font-size":2.8,fill:"#1d1b26"});
+    const mx=x+18.5,my=y+3;
+    if(mark==="work") r(mx-1.2,my-1.2,2.4,2.4,"#1d1b26");
+    if(mark==="review"){el("circle",{cx:mx-.3,cy:my-.3,r:1,fill:"none",stroke:"#1d1b26","stroke-width":.5});el("line",{x1:mx+.4,y1:my+.4,x2:mx+1.4,y2:my+1.4,stroke:"#1d1b26","stroke-width":.6});}
+    if(mark==="gate") el("polygon",{points:`${mx},${my-1.8} ${mx+1.8},${my} ${mx},${my+1.8} ${mx-1.8},${my}`,fill:"#ff7a59",stroke:"#1d1b26","stroke-width":.3});
+    if(mark==="done") el("polyline",{points:`${mx-1.3},${my} ${mx-.3},${my+1} ${mx+1.4},${my-1.2}`,fill:"none",stroke:"#1d1b26","stroke-width":.6});
+  }
+  card(4,17,"3.4"); card(4,24,"3.5");
+  card(27,17,"3.2","work"); card(27,24,"3.3","gate");
+  card(50,17,"3.1","review");
+  card(73,17,"2.6","done"); card(73,24,"2.7","done"); card(73,31,"3.0","done");
+
+  // ---- desks zone
+  zoneLabel(2,41,"DESKS"); zoneLabel(62,41,"CONSOLE");
+  function desk(x,y,lit){
+    r(x,y,22,8,"#7a5a3c"); r(x,y,22,1.5,"#9b774f"); r(x+1,y+8,2,4,"#5a4230"); r(x+19,y+8,2,4,"#5a4230");
+    r(x+12,y-7,9,6,"#1d1b26"); r(x+13,y-6,7,4,lit?"#7fd8c4":"#3a3448"); r(x+15.5,y-1,2,1,"#1d1b26");
+    if(lit){ r(x+14,y-5,4,.6,"#1d1b26"); r(x+14,y-3.8,5,.6,"#1d1b26"); r(x+14,y-2.6,3,.6,"#1d1b26"); }
+  }
+  // Dax working, seated behind desk 1 (monitor beside him)
+  sprite("developer",4,54,{h:"#4b2e1e",a:"#f3ead8",c:"#3f7cac",d:"#22344a"});
+  desk(2,62,true);
+  tag(15,47,"work","WORKING 3.2");
+  // desk 2 empty, sticky note says where its worker went
+  desk(28,62,false); r(30,55,10,6,"#ffd166"); txt(30.6,58.8,"\u2192 YOU",{"font-size":2.2,fill:"#1d1b26"});
+
+  // orchestrator console
+  r(62,54,34,12,"#1d1b26"); r(63,55,32,5,"#2f5b57");
+  for(let i=0;i<5;i++) r(64+i*6,55.5,4,4,i===1?"#ffd166":"#7fd8c4");
+  r(63,61,32,4,"#3b3450"); for(let i=0;i<8;i++) r(64+i*4,62,2,2,"#a59cb5");
+  sprite("orchestrator",74,60,{h:"#2b2b2b",a:"#ffd166",c:"#6b4fa0",d:"#3d2c5e"});
+  tag(79,47,"work","WORKING R1");
+
+  // ---- review bench + lounge
+  zoneLabel(2,79,"REVIEW BENCH"); zoneLabel(60,79,"LOUNGE");
+  r(3,103,40,6,"#6f6a80"); r(3,103,40,1.5,"#8f89a3"); r(5,109,2,5,"#4a4558"); r(39,109,2,5,"#4a4558");
+  r(20,100.5,12,3,"#fffaf0"); txt(21,102.9,"3.1",{"font-size":2.4,fill:"#1d1b26"});
+  r(34,98,4,5,"#1d1b26"); r(34.5,98.5,3,2,"#7fd8c4"); // test runner
+  sprite("tester",8,92,{h:"#b35c2e",a:"#1d1b26",c:"#3c8a5a",d:"#24533a"});
+  tag(16,85,"review","REVIEW 3.1");
+  txt(3,118,"evidence: 2 findings \u00b7 1 resolved",{"font-size":2.3,fill:"#a59cb5","font-weight":400});
+
+  r(60,100,36,5,"#8c3b4a"); r(60,94,4,11,"#8c3b4a"); r(92,94,4,11,"#8c3b4a"); r(64,96,28,4,"#a8495b"); // couch
+  sprite("planner",70,88,{a:"#c9a227",c:"#a0622d",d:"#5e3a1c"});
+  r(64,100,28,5,"#8c3b4a"); // couch front covers legs
+  tag(75,84,"idle","IDLE");
+  r(50,104,6,8,"#3c8a5a"); r(51,112,4,3,"#7a5a3c"); // plant
+
+  // ---- your desk (decision counter), the zone nearest your thumb
+  r(0,123,100,1,"#ff7a59");
+  zoneLabel(2,127,"YOUR DESK"); zoneLabel(68,127,"MERGE DOCK");
+  r(2,148,62,10,"#7a5a3c"); r(2,148,62,2,"#c9a227"); // counter
+  r(8,145,4,3,"#ffd166"); r(9.5,144,1,1,"#ffd166"); // bell
+  r(46,144,11,4,"#fffaf0"); el("polygon",{points:"55,145 56.5,146.2 55,147.4 53.5,146.2",fill:"#ff7a59"}); txt(47,147,"3.3",{"font-size":2.2,fill:"#1d1b26"});
+  sprite("developer",26,134,{h:"#1d1b26",a:"#ffd166",c:"#c4553f",d:"#6a2e22"});
+  r(36,131,7,7,"#fffaf0"); el("rect",{x:36.25,y:131.25,width:6.5,height:6.5,fill:"none",stroke:"#1d1b26","stroke-width":.5}); txt(38,136.4,"?",{"font-size":4,fill:"#1d1b26"}); r(36,138,1,6,"#5a4230");
+  tag(36,124.5,"gate","NEEDS YOU 3.3");
+
+  // merge dock: integrator configured but not running
+  r(68,142,30,16,"#3b3450"); r(68,142,30,1.5,"#5a5370");
+  r(78,134,1,8,"#a59cb5"); r(76,133,5,1,"#a59cb5");
+  r(75,136,7,3,"#ffd166"); r(74,138.5,9,1,"#c9a227"); // hard hat on hook
+  txt(70,148,"integrator",{"font-size":2.3,fill:"#a59cb5","font-weight":400});
+  txt(70,151.5,"\u2014 not running",{"font-size":2.3,fill:"#a59cb5","font-weight":400});
+
+  // fixture watermark inside the scene
+  r(0,164,100,6,"#0e0d13"); txt(50,168.2,"FIXTURE \u00b7 not live data",{"text-anchor":"middle","font-size":2.6,fill:"#ffd166"});
+})();
+</script>
+</body>
+</html>

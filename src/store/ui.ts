@@ -10,7 +10,7 @@ export type DrawerState =
   | null;
 
 export type AgentTab = "terminal" | "shell" | "task" | "sandbox" | "messages";
-export type SettingsTab = "team" | "workflow" | "stack" | "mcp" | "sandbox" | "boards" | "project";
+export type SettingsTab = "appearance" | "audio" | "context" | "team" | "workflow" | "stack" | "mcp" | "sandbox" | "boards" | "project";
 
 /** Something in the office the camera can fly to. */
 export type FocusTarget =

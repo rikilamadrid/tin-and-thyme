@@ -15,3 +15,8 @@ prototypes/
 docs/archive/
 docs/initial-idea.md
 *.tsbuildinfo
+
+# Pathfinder: transient per-session state (context/coding-standards.md) and machine-local worktrees
+context/current-ticket.md
+context/handoff.md
+/.pathfinder/

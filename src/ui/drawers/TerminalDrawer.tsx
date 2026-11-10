@@ -44,13 +44,13 @@ export function TerminalDrawer() {
           <div className="truncate text-[13px] text-muted">Your own shell on this machine, not in a sandbox.</div>
         </div>
       </DrawerHeader>
-      <div className="flex flex-wrap items-center gap-2 border-b-[3px] border-ink bg-cream-2 px-3 py-1.5 text-[13px]">
+      <div className="flex flex-wrap items-center gap-2 border-b-[3px] border-line bg-cream-2 px-3 py-1.5 text-[13px]">
         <label className="text-muted" htmlFor="host-term-dir">
           Folder
         </label>
         <select
           id="host-term-dir"
-          className="min-w-0 max-w-full flex-1 border-2 border-ink bg-white px-1 py-0.5 text-[13px]"
+          className="min-w-0 max-w-full flex-1 border-2 border-line bg-card px-1 py-0.5 text-[13px]"
           value={picking || !known ? OTHER : dir}
           onChange={(e) => {
             if (e.target.value === OTHER) {
@@ -80,7 +80,7 @@ export function TerminalDrawer() {
           >
             <input
               autoFocus
-              className="min-w-0 flex-1 border-2 border-ink bg-white px-1.5 py-0.5 font-term text-[16px]"
+              className="min-w-0 flex-1 border-2 border-line bg-card px-1.5 py-0.5 font-term text-[16px]"
               placeholder="~/developer/my-app"
               aria-label="Folder path"
               value={other}
@@ -96,7 +96,7 @@ export function TerminalDrawer() {
         )}
       </div>
       {inAgent?.running && (
-        <div className="border-b-[3px] border-ink bg-[#fff3cf] px-3 py-1.5 text-[13px]">
+        <div className="border-b-[3px] border-line bg-notice px-3 py-1.5 text-[13px]">
           {inAgent.agent.name} is working in this folder. Switching branches or committing here can break {inAgent.agent.name}'s work.
         </div>
       )}

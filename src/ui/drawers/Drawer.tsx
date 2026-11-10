@@ -1,5 +1,7 @@
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { useRef, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { useEffect, useRef, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { CREW_W } from "../hud/CrewPanel";
+import { useDrawerLayout } from "./dock";
 import { DRAWER_DEFAULT, ui, useUi } from "../../store/ui";
 import { AgentDrawer } from "./AgentDrawer";
 import { BoardsDrawer } from "./BoardsDrawer";
@@ -10,7 +12,7 @@ import { TerminalDrawer } from "./TerminalDrawer";
 
 export function DrawerHeader({ children }: { children: ReactNode }) {
   return (
-    <div className="flex items-center gap-2.5 border-b-[3px] border-ink px-3 py-2">
+    <div className="flex items-center gap-2.5 border-b-[3px] border-line px-3 py-2">
       <div className="flex min-w-0 flex-1 items-center gap-2.5">{children}</div>
       <MaximizeButton />
       <button className="btn px-2.5" aria-label="Close" onClick={() => ui.closeDrawer()}>
@@ -84,6 +86,19 @@ export function DrawerHost() {
   const reduce = useReducedMotion();
   const width = useUi((s) => s.drawerWidth);
   const maximized = useUi((s) => s.drawerMaximized);
+  const { docked } = useDrawerLayout();
+  // Escape closes an overlay drawer, except while typing in a terminal or a field (Escape belongs to them).
+  useEffect(() => {
+    if (!drawer || docked || drawer.kind === "boards") return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      const t = e.target as HTMLElement | null;
+      if (t?.closest(".xterm, input, textarea, select, [contenteditable]")) return;
+      ui.closeDrawer();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [drawer, docked]);
   const key = drawer ? (drawer.kind === "agent" ? `agent:${drawer.id}` : drawer.kind === "env" ? `env:${drawer.name}` : drawer.kind) : null;
 
   // The task board needs room for its columns: it opens as a large centered modal, not a side drawer.
@@ -108,6 +123,11 @@ export function DrawerHost() {
     );
 
   return (
+    <>
+      {/* Overlay mode (narrow window or maximized): a dim backdrop over the scene; click it or press Escape to close. */}
+      {drawer && !docked && (
+        <div className="fixed bottom-0 right-0 top-[66px] z-[15] bg-[rgba(5,7,15,0.55)]" style={{ left: 16 + CREW_W }} aria-hidden onMouseDown={() => ui.closeDrawer()} />
+      )}
     <AnimatePresence mode="wait">
       {drawer && (
         <motion.aside
@@ -129,5 +149,6 @@ export function DrawerHost() {
         </motion.aside>
       )}
     </AnimatePresence>
+    </>
   );
 }

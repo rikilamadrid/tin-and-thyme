@@ -12,12 +12,19 @@
 @import "@fontsource/jetbrains-mono/700.css";
 @import "@xterm/xterm/css/xterm.css";
 
+/*
+ * The Pass palette. Panels, drawers and settings are dark galley surfaces with light text:
+ *   ink = foreground text, line = borders and frames, cream* = panel surfaces, card = cards and inputs.
+ * (The token names are inherited from JSM HQ; their values are The Pass's.)
+ */
 @theme {
-  --color-ink: #241a2e;
-  --color-cream: #fff6e9;
-  --color-cream-2: #f0dfc2;
-  --color-cream-3: #e2cba6;
-  --color-muted: #7d6b73;
+  --color-ink: #eef6ff;
+  --color-line: #26335c;
+  --color-cream: #0c1226;
+  --color-cream-2: #111a35;
+  --color-cream-3: #26335c;
+  --color-card: #141d3a;
+  --color-muted: #a8b8d8;
   --color-navy: #1d2b53;
   --color-navy-2: #16213f;
   --color-blue: #29adff;
@@ -28,11 +35,21 @@
   --color-yellow: #ffec27;
   --color-pink: #ff77a8;
   --color-grass: #4a8f3d;
+  /* tinted notice surfaces */
+  --color-warn: #3a2a12;
+  --color-notice: #2f2a14;
+  --color-danger: #3a1426;
+  --color-okay: #123325;
+  --color-done: #10162c;
+  --font-ui: system-ui, -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --font-term: "JetBrains Mono", ui-monospace, Menlo, monospace;
+}
+
+/* Font styles (Settings → Project → Font). The default is the roster's system font with a readable mono for data. */
+html[data-font="pixel"] {
   --font-ui: "Pixelify Sans", "Trebuchet MS", system-ui, sans-serif;
   --font-term: "VT323", ui-monospace, Menlo, Consolas, monospace;
 }
-
-/* Font styles (Settings → Project → Font). The office canvas and terminal keep their pixel fonts. */
 html[data-font="clean"] {
   --font-ui: "Inter", system-ui, sans-serif;
   --font-term: "JetBrains Mono", ui-monospace, Menlo, monospace;
@@ -41,9 +58,24 @@ html[data-font="mono"] {
   --font-ui: "JetBrains Mono", ui-monospace, Menlo, monospace;
   --font-term: "JetBrains Mono", ui-monospace, Menlo, monospace;
 }
-/* VT323 is small for its size; keep data text the same visual size in the other fonts. */
-html[data-font] .font-term {
+/* Sizes were set for VT323, which is small for its size; keep data text the same visual size in the other fonts. */
+html:not([data-font="pixel"]) .font-term {
   font-size-adjust: 0.42;
+}
+
+/* Corners and shadows follow the art style (Settings → Appearance). */
+html,
+html[data-art="pixel"] {
+  --r-panel: 4px;
+  --r-ctl: 3px;
+  --shadow-panel: 0 4px 0 #05070f;
+  --shadow-ctl: 0 2px 0 #05070f;
+}
+html[data-art="cel"] {
+  --r-panel: 10px;
+  --r-ctl: 8px;
+  --shadow-panel: 0 10px 32px rgba(0, 0, 0, 0.5);
+  --shadow-ctl: 0 1px 6px rgba(0, 0, 0, 0.35);
 }
 
 @layer base {
@@ -56,7 +88,8 @@ html[data-font] .font-term {
   }
 
   body {
-    background: var(--color-grass);
+    background: #0b0e1a;
+    color-scheme: dark;
     color: var(--color-ink);
     font-family: var(--font-ui);
     min-width: 1280px;
@@ -69,48 +102,43 @@ html[data-font] .font-term {
 }
 
 @layer components {
-  /* Chunky game panel: ink outline, light bevel, hard drop shadow (no blur) */
+  /* Galley panel: the roster's dark surface, a thin frame, corners per art style. */
   .panel {
     background: var(--color-cream);
-    border: 3px solid var(--color-ink);
-    box-shadow:
-      inset -3px -3px 0 var(--color-cream-2),
-      inset 3px 3px 0 #fff,
-      0 4px 0 rgba(36, 26, 46, 0.45);
+    color: var(--color-ink);
+    border: 1px solid var(--color-line);
+    border-radius: var(--r-panel);
+    box-shadow: var(--shadow-panel);
   }
   .panel-dark {
-    background: rgba(29, 43, 83, 0.94);
-    color: var(--color-cream);
-    border: 3px solid var(--color-ink);
-    box-shadow:
-      inset -3px -3px 0 rgba(0, 0, 0, 0.25),
-      inset 3px 3px 0 rgba(255, 255, 255, 0.08),
-      0 4px 0 rgba(36, 26, 46, 0.45);
+    background: #0c1226;
+    color: var(--color-ink);
+    border: 1px solid var(--color-line);
+    border-radius: var(--r-panel);
+    box-shadow: var(--shadow-panel);
   }
   .btn {
     cursor: pointer;
-    border: 3px solid var(--color-ink);
-    background: var(--color-cream);
-    padding: 1px 10px;
-    font-weight: 600;
-    box-shadow:
-      inset -2px -2px 0 var(--color-cream-3),
-      0 3px 0 var(--color-ink);
+    border: 1px solid var(--color-line);
+    border-radius: var(--r-ctl);
+    background: var(--color-card);
+    color: var(--color-ink);
+    padding: 2px 10px;
+    font-weight: 800;
+    box-shadow: var(--shadow-ctl);
     transition: transform 0.06s;
     white-space: nowrap;
   }
   .btn:hover {
-    background: #fff;
+    background: #1a2448;
   }
-  .btn:active,
-  .btn[aria-pressed="true"] {
-    transform: translateY(3px);
-    box-shadow:
-      inset -2px -2px 0 var(--color-cream-3),
-      0 0 0 var(--color-ink);
+  .btn:active {
+    transform: translateY(1px);
   }
   .btn[aria-pressed="true"] {
-    background: var(--color-yellow);
+    background: #26335c;
+    border-color: #ffc93a;
+    color: #ffc93a;
   }
   .btn:disabled {
     cursor: not-allowed;
@@ -118,35 +146,49 @@ html[data-font] .font-term {
     transform: none;
   }
   .btn:focus-visible,
-  .field:focus-visible {
-    outline: 3px solid var(--color-blue);
-    outline-offset: 1px;
+  .field:focus-visible,
+  [role="tab"]:focus-visible {
+    outline: 2px solid #ffc93a;
+    outline-offset: 2px;
   }
+  /* Status chips: light tags with dark text, like the roster's badges; --c tints them. */
   .chip {
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    font-size: 13px;
-    font-weight: 600;
-    padding: 0 6px 1px;
-    border: 2px solid var(--color-ink);
-    background: var(--c, var(--color-cream-2));
-    color: var(--color-ink);
+    font-size: 12px;
+    font-weight: 800;
+    padding: 0 6px;
+    line-height: 18px;
+    border-radius: 3px;
+    background: var(--c, #c9d3e0);
+    color: #141a2e;
     white-space: nowrap;
   }
   .chip-dot::before {
     content: "";
     width: 6px;
     height: 6px;
-    background: var(--color-ink);
+    background: #141a2e;
   }
   .field {
-    border: 3px solid var(--color-ink);
-    background: #fff;
+    border: 1px solid var(--color-line);
+    border-radius: var(--r-ctl);
+    background: var(--color-card);
+    color: var(--color-ink);
     padding: 2px 8px;
     font-size: 15px;
     width: 100%;
     min-width: 0;
+  }
+  .field::placeholder,
+  input::placeholder,
+  textarea::placeholder {
+    color: #7f8bb5;
+  }
+  select option {
+    background: var(--color-card);
+    color: var(--color-ink);
   }
   /* Inputs and dropdowns share one height so labels in a row line up. */
   input.field,
@@ -156,9 +198,10 @@ html[data-font] .font-term {
   .kbd {
     font-family: var(--font-term);
     font-size: 16px;
-    border: 2px solid var(--color-ink);
+    border: 1px solid var(--color-line);
+    border-radius: 3px;
     padding: 0 4px;
-    background: #fff;
+    background: var(--color-card);
   }
 }
 
@@ -174,7 +217,7 @@ html[data-font] .font-term {
   width: 8px;
   height: 8px;
   background: var(--color-green);
-  box-shadow: 0 0 0 2px var(--color-ink);
+  box-shadow: 0 0 0 2px #05070f;
   animation: blink 1s steps(1) infinite;
 }
 

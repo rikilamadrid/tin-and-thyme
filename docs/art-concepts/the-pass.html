@@ -1,0 +1,376 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>The Pass — kitchen concepts</title>
+<style>html,body{margin:0;background:#0d0c10}#out{display:flex}svg{display:block}</style></head>
+<body><div id="out"></div>
+<script>
+// "The Pass" (working title): two kitchen themes, one busy shift, one floor plan.
+//   ?t=fantasy|space|all   &s=<whole-number scale>
+// Frame 640 x 360 logical units: kitchen on the left (0–440), crew roster and
+// agent drawer on the right (440–640). Vector art; text is emitted at its real
+// pixel size under an inverse scale so letters never spread at small sizes.
+const q = new URLSearchParams(location.search);
+const S = Math.max(1, Math.round(Number(q.get("s") || 3)));
+const FW = 640, FH = 360;
+const UIF = "system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif";
+
+// ------------------------------------------------------------ the busy shift (sample data)
+const CREW = [
+  { id: "basil", name: "Basil", job: "Head Chef", role: "Orchestrator", state: "needs", ticket: null, status: "Needs you" },
+  { id: "dash", name: "Dash", job: "Expediter", role: "Reviewer", state: "review", ticket: "3.1", status: "at the pass" },
+  { id: "pepper", name: "Pepper", job: "Sous Chef", role: "Developer", state: "work", ticket: "3.2", status: "cooking" },
+  { id: "roux", name: "Roux", job: "Saucier", role: "Developer", state: "work", ticket: "3.3", status: "cooking", ctx: 37, selected: true },
+  { id: "ember", name: "Ember", job: "Grill Cook", role: "Developer", state: "work", ticket: "3.5", status: "cooking" },
+  { id: "sprig", name: "Sprig", job: "Garde Manger", role: "Developer", state: "work", ticket: "3.6", status: "cooking" },
+  { id: "crumb", name: "Crumb", job: "Pastry Chef", role: "Developer", state: "off", ticket: null, status: "On break" },
+  { id: "mochi", name: "Mochi", job: "Line Cook", role: "Developer", state: "off", ticket: null, status: "On break" },
+];
+const by = Object.fromEntries(CREW.map((c) => [c.id, c]));
+const STATIONS = [ // x of each station on the line; the last one is open
+  { x: 16, who: "pepper", kind: "sous" }, { x: 72, who: "roux", kind: "sauce" }, { x: 128, who: "ember", kind: "grill" }, { x: 184, who: "sprig", kind: "garde" }, { x: 240, who: null, kind: "open", ticket: "3.4" },
+];
+const KIND = { basil: "chef", dash: "expo", pepper: "sous", roux: "sauce", ember: "grill", sprig: "garde", crumb: "pastry", mochi: "line" };
+
+// ------------------------------------------------------------ themes
+const THEMES = {
+  fantasy: {
+    sub: "Fantasy Kitchen", note: "tavern kitchen · busy shift · sample data",
+    ink: "#21160f", alert: "#ffc93a", tag: "#fbf1dc", tagSub: "#6f5a48", plate: "#2c1d14", plateFg: "#fbf1dc", plateSub: "#e6c79a",
+    panel: "#1f1611", panelCard: "#2c2019", panelLine: "#4a372b", panelFg: "#fbf1dc", panelMuted: "#c9ae8e", accent: "#ffc93a",
+    floor: "#7a6d60", floorLo: "#6e6256", wall: "#5d5248", wallLo: "#4e443b", base: "#2a1d16", outside: "#17100c",
+    wood: "#8a5a34", woodHi: "#a8723f", woodLo: "#5e3a20", metal: "#c0703c", metalHi: "#f2b27a", steel: "#9aa0a6",
+    rail: "#5e3a20", railEdge: "#c79a5a", arrow: "#ffc93a", zone: "#2c1d14", zoneFg: "#fbf1dc",
+    skin: ["#f0c09a", "#c98a62", "#8a5a3c", "#e8b48f"],
+  },
+  space: {
+    sub: "Space Galley", note: "shipboard galley · busy shift · sample data",
+    ink: "#0a0f20", alert: "#ffc93a", tag: "#eef6ff", tagSub: "#4b6182", plate: "#101a36", plateFg: "#eef6ff", plateSub: "#9fe7ff",
+    panel: "#0c1226", panelCard: "#141d3a", panelLine: "#26335c", panelFg: "#eef6ff", panelMuted: "#a8b8d8", accent: "#ffc93a",
+    floor: "#26314f", floorLo: "#222c48", wall: "#1a2342", wallLo: "#151d38", base: "#0e1530", outside: "#04060f",
+    wood: "#c9d1dc", woodHi: "#eef2f7", woodLo: "#8e98a8", metal: "#38d9c9", metalHi: "#a6fff4", steel: "#c9d1dc",
+    rail: "#1b2238", railEdge: "#ffc93a", arrow: "#38d9c9", zone: "#101a36", zoneFg: "#eef6ff",
+    skin: ["#f0c09a", "#c98a62", "#8a5a3c", "#9fd0c0"],
+  },
+};
+
+function render(themeId, s) {
+  const T = THEMES[themeId], F = themeId === "fantasy";
+  const out = [], late = [];
+  const A = (o) => Object.entries(o).filter(([, v]) => v !== undefined).map(([k, v]) => `${k}="${v}"`).join(" ");
+  const el = (t, o, inner = "") => out.push(`<${t} ${A(o)}>${inner}</${t}>`);
+  const g0 = (o = {}) => out.push(`<g ${A(o)}>`), g1 = () => out.push("</g>");
+  const rect = (x, y, w, h, fill, o = {}) => el("rect", { x, y, width: w, height: h, fill, ...o });
+  const circ = (cx, cy, r, fill, o = {}) => el("circle", { cx, cy, r, fill, ...o });
+  const ell = (cx, cy, rx, ry, fill, o = {}) => el("ellipse", { cx, cy, rx, ry, fill, ...o });
+  const path = (d, fill, o = {}) => el("path", { d, fill, ...o });
+  const line = (x1, y1, x2, y2, stroke, w = 1, o = {}) => el("line", { x1, y1, x2, y2, stroke, "stroke-width": w, "stroke-linecap": "round", ...o });
+  const text = (x, y, t, fill, size, weight = 600, o = {}) => { const { transform, ...rest } = o; el("text", { x: x * s, y: y * s, fill, "font-size": size * s, "font-weight": weight, "font-family": UIF, "dominant-baseline": "hanging", ...rest, transform: `${transform ?? ""} scale(${1 / s})` }, String(t).replace(/&/g, "&amp;")); };
+  const mctx = document.createElement("canvas").getContext("2d");
+  const tw = (t, size, weight = 600) => { mctx.font = `${weight} ${size * 10}px ${UIF}`; return (mctx.measureText(t).width / 10) * 1.05; };
+  const SH = { filter: "url(#sh)" }, SHS = { filter: "url(#shs)" };
+
+  out.push(`<defs>
+    <filter id="sh" x="-30%" y="-30%" width="160%" height="170%"><feDropShadow dx="1" dy="1.8" stdDeviation="1.2" flood-color="#000" flood-opacity=".42"/></filter>
+    <filter id="shs" x="-30%" y="-30%" width="160%" height="170%"><feDropShadow dx=".5" dy=".9" stdDeviation=".5" flood-color="#000" flood-opacity=".45"/></filter>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="3"/></filter>
+    <radialGradient id="warm" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#ffb347" stop-opacity=".55"/><stop offset="1" stop-color="#ffb347" stop-opacity="0"/></radialGradient>
+    <radialGradient id="teal" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#38d9c9" stop-opacity=".35"/><stop offset="1" stop-color="#38d9c9" stop-opacity="0"/></radialGradient>
+    <radialGradient id="vig" cx=".45" cy=".42" r=".75"><stop offset=".55" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity="${F ? ".5" : ".42"}"/></radialGradient>
+    <linearGradient id="copper" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f2b27a"/><stop offset=".5" stop-color="#c0703c"/><stop offset="1" stop-color="#7a3e1c"/></linearGradient>
+    <linearGradient id="steel" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f4f7fa"/><stop offset=".5" stop-color="#c9d1dc"/><stop offset="1" stop-color="#8e98a8"/></linearGradient>
+    <linearGradient id="woodg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#a8723f"/><stop offset="1" stop-color="#6e4426"/></linearGradient>
+    <linearGradient id="fire" x1="0" y1="1" x2="0" y2="0"><stop offset="0" stop-color="#ff6a1a"/><stop offset=".6" stop-color="#ffb347"/><stop offset="1" stop-color="#fff1a8"/></linearGradient>
+    <linearGradient id="space" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#05081a"/><stop offset="1" stop-color="#1a1440"/></linearGradient>
+    <radialGradient id="planet" cx=".35" cy=".35" r=".7"><stop offset="0" stop-color="#ffd59a"/><stop offset=".6" stop-color="#e0784a"/><stop offset="1" stop-color="#5a2a3a"/></radialGradient>
+    <pattern id="flag" width="24" height="16" patternUnits="userSpaceOnUse"><rect width="24" height="16" fill="${T.floorLo}"/><rect x=".6" y=".6" width="13" height="7" rx="1.2" fill="${T.floor}"/><rect x="14.4" y=".6" width="9" height="7" rx="1.2" fill="#80735f"/><rect x=".6" y="8.4" width="8" height="7" rx="1.2" fill="#80735f"/><rect x="9.4" y="8.4" width="14" height="7" rx="1.2" fill="${T.floor}"/></pattern>
+    <pattern id="deck" width="20" height="20" patternUnits="userSpaceOnUse"><rect width="20" height="20" fill="${T.floor}"/><rect x=".5" y=".5" width="19" height="19" rx="2" fill="#28345a"/><circle cx="2.5" cy="2.5" r=".5" fill="#3a4a78"/><circle cx="17.5" cy="17.5" r=".5" fill="#3a4a78"/></pattern>
+    <pattern id="stone" width="16" height="9" patternUnits="userSpaceOnUse"><rect width="16" height="9" fill="${T.wallLo}"/><rect x=".5" y=".5" width="9" height="3.6" rx=".8" fill="${T.wall}"/><rect x="10.5" y=".5" width="5" height="3.6" rx=".8" fill="#675b50"/><rect x=".5" y="5" width="4" height="3.6" rx=".8" fill="#675b50"/><rect x="5.5" y="5" width="10" height="3.6" rx=".8" fill="${T.wall}"/></pattern>
+  </defs>`);
+
+  // ------------------------------------------------------------ header
+  rect(0, 0, FW, FH, T.panel);
+  text(8, 6, "THE PASS", T.accent, 11, 900, { "letter-spacing": 0.6 * s });
+  text(8 + tw("THE PASS", 11, 900) + 8, 7.6, T.sub, T.panelFg, 9, 800);
+  text(8 + tw("THE PASS", 11, 900) + 8 + tw(T.sub, 9, 800) + 8, 10, "working title", T.panelMuted, 5, 600);
+  text(FW - 8 - tw(T.note, 5.5, 600), 10, T.note, T.panelMuted, 5.5, 600);
+
+  // ------------------------------------------------------------ the room
+  rect(0, 24, 440, 336, T.outside);
+  if (!F) for (let i = 0; i < 70; i++) circ((i * 97 + 13) % 440, 24 + ((i * 57 + 7) % 336), i % 6 ? .4 : .8, "#9fb4ff", { opacity: .6 });
+  rect(6, 28, 428, 326, T.base, { rx: F ? 3 : 8, ...SH });
+  rect(12, 34, 380, 314, F ? "url(#flag)" : "url(#deck)");
+  // back wall
+  rect(12, 34, 380, 30, F ? "url(#stone)" : T.wall); rect(12, 63, 380, 1.5, F ? "#3a312a" : "#38d9c9", { opacity: F ? 1 : .7 });
+  // right service column (rail + MAIN)
+  rect(392, 34, 38, 314, F ? "#3a2e26" : "#121a33");
+  if (!F) for (let x = 24; x < 392; x += 40) rect(x, 64, .6, 284, "#2f3c66");
+
+  // ---- order board (top left)
+  rect(16, 32, 136, 60, T.ink, { rx: 2, ...SH });
+  rect(17.5, 33.5, 133, 57, F ? "#d8b98a" : "#0b1836", { rx: 1.6 });
+  rect(17.5, 33.5, 133, 14, T.ink, { rx: 1.6 }); rect(17.5, 42, 133, 5.5, T.ink);
+  text(22, 35.4, "ORDERS", T.alert, 10, 900, { "letter-spacing": 0.5 * s });
+  text(80, 38.6, F ? "pinned with tiny daggers" : "live ticket board", F ? "#c9ae8e" : "#7fa6d8", 4.6, 600);
+  const cols = ["New", "Cooking", "At the pass", "Served"];
+  cols.forEach((h, i) => { text(20 + i * 33, 49.5, h, F ? "#4a3626" : "#9fe7ff", 4.8, 800); if (i) rect(17.5 + i * 33, 48, .6, 41, F ? "#b8996a" : "#26335c"); });
+  const slip = (col, k, id, mark) => {
+    const x = 19.5 + col * 33 + (k % 2) * 15.6, y = 57 + Math.floor(k / 2) * 12.5;
+    if (F) { rect(x, y, 14.6, 10.5, "#fbf1dc", { ...SHS, transform: `rotate(${(k % 2 ? 2 : -2)} ${x + 7} ${y})` }); path(`M${x + 6.4} ${y - 2} l1.2 0 l-.2 3.4 l-.4 .8 l-.4 -.8z`, "#9aa0a6"); }
+    else { rect(x, y, 14.6, 10.5, "#0f2550", { rx: 1, stroke: "#38d9c9", "stroke-width": .5 }); }
+    text(x + 1.4, y + 1.6, id, F ? T.ink : "#eef6ff", 6.6, 900);
+    if (mark) icon(mark, x + 10.4, y + 6, 3.6, F ? T.ink : "#ffc93a");
+  };
+  ["3.4", "3.7", "3.8"].forEach((id, k) => slip(0, k, id, id === "3.4" ? "wait" : null));
+  ["3.2", "3.3", "3.5", "3.6"].forEach((id, k) => slip(1, k, id, "work"));
+  slip(2, 0, "3.1", "review");
+  ["2.9", "2.8"].forEach((id, k) => slip(3, k, id, null));
+
+  // ---- Head Chef: hearth / galley hood (top centre)
+  if (F) {
+    rect(184, 30, 82, 36, "url(#stone)", { rx: 2, ...SH }); path("M196 66 v-20 q0 -12 29 -12 q29 0 29 12 v20z", "#2a1d16");
+    circ(225, 58, 22, "url(#warm)"); path("M210 66 q4 -14 9 -6 q3 -12 7 -2 q4 -10 7 1 q3 -6 6 7z", "url(#fire)"); rect(206, 63, 38, 3, "#3a2a20");
+    path("M219 52 q6 -10 12 0 v6 h-12z", "url(#copper)", SHS); line(225, 34, 225, 46, "#3a312a", .8); // cauldron hanging in the hearth
+  } else {
+    rect(184, 34, 82, 22, "url(#steel)", { rx: 3, ...SH }); rect(190, 40, 70, 3, "#38d9c9", { opacity: .8 }); rect(196, 56, 58, 6, "#8e98a8", { rx: 2 });
+  }
+  rect(172, 70, 106, 54, F ? "#8a3a2a" : "#3a1d2f", { rx: 4, opacity: .9 }); // chef's floor: the one warm-red zone
+  circ(225, 96, 46, F ? "url(#warm)" : "url(#teal)", { opacity: .7 });
+
+  // ---- staff corner / crew lounge (right middle): seating grouped, room for more
+  if (F) {
+    rect(292, 70, 98, 112, "#5a3a2a", { rx: 3 }); rect(294, 72, 94, 108, "#6e4630", { rx: 2.4 });
+    rect(350, 34, 36, 30, "url(#stone)", { rx: 1.5, ...SHS }); path("M356 64 v-14 q0 -8 12 -8 q12 0 12 8 v14z", "#2a1d16"); path("M360 64 q3 -9 6 -3 q2 -8 5 0 q3 -5 5 3z", "url(#fire)"); circ(368, 72, 26, "url(#warm)");
+    rect(300, 88, 58, 8, "url(#woodg)", { rx: 2, ...SH }); rect(300, 148, 58, 8, "url(#woodg)", { rx: 2, ...SH }); rect(296, 96, 8, 52, "url(#woodg)", { rx: 2, ...SH }); // U bench
+    rect(310, 104, 40, 34, "#8a5a34", { rx: 3, ...SH }); rect(312, 106, 36, 30, "#9c6a3e", { rx: 2.4 }); // table
+    [[318, 112], [340, 112], [326, 126], [344, 128]].forEach(([x, y]) => { rect(x, y, 4.4, 5, "#c9b28a", { rx: .8, ...SHS }); ell(x + 2.2, y + .4, 2, .7, "#fff8e0"); });
+    ell(372, 160, 8, 3.4, "#d08a4a", SHS); path("M366 160 q2 -5 6 -3 q4 -3 6 2", "#d08a4a"); circ(379, 158.5, 1.8, "#d08a4a"); // the cat
+    late.push(() => pill(296, 74, "Staff corner"));
+  } else {
+    rect(292, 70, 98, 112, "#2a2346", { rx: 6 }); rect(294, 72, 94, 108, "#332a52", { rx: 5 });
+    rect(296, 36, 92, 27, "url(#space)", { rx: 4, stroke: "#8e98a8", "stroke-width": 1.4 }); for (let i = 0; i < 18; i++) circ(300 + (i * 23) % 86, 39 + (i * 7) % 22, .5, "#fff"); circ(370, 56, 10, "url(#planet)"); // big viewport
+    circ(342, 120, 50, "url(#warm)", { opacity: .75 });
+    path("M302 98 q0 -10 10 -10 h60 q10 0 10 10 v6 h-8 v-4 q0 -4 -4 -4 h-56 q-4 0 -4 4 v40 q0 4 4 4 h56 q4 0 4 -4 v-4 h8 v6 q0 10 -10 10 h-60 q-10 0 -10 -10z", "#d98a52", SH); // curved sofa
+    ell(342, 122, 16, 10, "#c9d1dc", SH); ell(342, 121, 13, 7.6, "#eef2f7");
+    [[334, 118], [348, 120]].forEach(([x, y]) => rect(x, y, 4, 4.4, "#ffd59a", { rx: .8, ...SHS }));
+    rect(374, 160, 8, 10, "#3a7a5a", { rx: 3 }); circ(378, 158, 5, "#4fae7a"); text(371, 171, "Gerald", "#c9d1dc", 3.4, 700); // plant
+    late.push(() => pill(296, 74, "Crew lounge"));
+  }
+
+  // ---- MAIN · SERVICE (top right)
+  rect(394, 34, 36, 30, T.ink, { rx: 2, ...SH }); rect(396, 36, 32, 26, T.alert, { rx: 1.6 });
+  text(412, 38.5, "MAIN", T.ink, 10.5, 900, { "text-anchor": "middle", "letter-spacing": 0.3 * s }); text(412, 52, "SERVICE", T.ink, 4.8, 900, { "text-anchor": "middle", "letter-spacing": 0.4 * s });
+  if (F) { path("M396 140 v-62 q0 -12 16 -12 q16 0 16 12 v62z", "url(#woodg)", SH); line(412, 70, 412, 140, "#4a2e1c", .8); circ(406, 108, 1.4, "#ffc93a"); circ(418, 108, 1.4, "#ffc93a"); }
+  else { rect(396, 68, 32, 72, "#2a3456", { rx: 4, ...SH }); for (let y = 72; y < 136; y += 6) rect(399, y, 26, 4, "#c9d1dc", { rx: 1.6, opacity: .9 }); rect(396, 104, 32, 2, "#38d9c9"); }
+
+  // ---- delivery lane to MAIN
+  const ry = 300;
+  rect(14, ry - 1, 398, 14, T.ink, { rx: 3, ...SH }); rect(16, ry + 1, 394, 10, T.rail, { rx: 2 }); rect(16, ry + 1, 394, 1, T.railEdge); rect(16, ry + 10, 394, 1, T.railEdge);
+  rect(399, 140, 14, 172, T.ink, { rx: 3, ...SH }); rect(401, 140, 10, 170, T.rail, { rx: 2 }); rect(401, 140, 1, 170, T.railEdge); rect(410, 140, 1, 170, T.railEdge);
+  if (!F) { for (let x = 22; x < 400; x += 16) rect(x, ry + 4.5, 6, 1.6, "#ffc93a", { opacity: .35 }); }
+  for (let x = 24; x < 396; x += 14) path(`M${x - 1.6} ${ry + 3.2} l3.4 2.8 l-3.4 2.8`, "none", { stroke: T.arrow, "stroke-width": 1.5, "stroke-linecap": "round", "stroke-linejoin": "round" });
+  for (let y = 296; y > 146; y -= 14) path(`M${403.2} ${y + 3} l2.8 -3.2 l2.8 3.2`, "none", { stroke: T.arrow, "stroke-width": 1.5, "stroke-linecap": "round", "stroke-linejoin": "round" });
+  late.push(() => { const t = F ? "delivery lane → MAIN · SERVICE" : "CARGO RAIL → MAIN · SERVICE"; const w = tw(t, 5.2, 800) + 6; rect(150, 316, w, 9, T.zone, { rx: 2 }); text(153, 317.6, t, T.zoneFg, 5.2, 800); });
+
+  // ---- the pass (review) on the lane
+  if (F) { path("M298 316 v-30 q0 -14 28 -14 q28 0 28 14 v30z", "url(#stone)", SH); path("M306 316 v-24 q0 -9 20 -9 q20 0 20 9 v24z", "#2a1d16"); [[312, 290], [340, 290]].forEach(([x, y]) => { circ(x, y + 4, 7, "url(#warm)"); rect(x - 2, y, 4, 6, "#ffc93a", { rx: 1 }); }); }
+  else { rect(298, 274, 56, 42, "#2a3456", { rx: 5, ...SH }); rect(302, 278, 48, 16, "#d6dde8", { rx: 3 }); for (let x = 304; x < 350; x += 5) rect(x, 279, 3, 14, "#bcc6d4", { rx: 1 }); circ(306, 300, 1.6, "#4fe07a"); circ(346, 300, 1.6, "#ffc93a"); }
+  rect(296, 264, 60, 9, F ? "#7a2a1e" : "#c0304a", { rx: 2, ...SHS }); text(326, 265.6, "The pass · review", "#fff4e6", 5.2, 800, { "text-anchor": "middle" });
+  const dish = (cx, cy) => { ell(cx, cy, 5.4, 3.2, "#ffffff", SHS); ell(cx, cy, 3.6, 2, F ? "#efe0c4" : "#dfe8f3"); circ(cx - .6, cy - .2, 1.4, "#d0503a"); circ(cx + 1.2, cy - .7, .8, "#6f8f4e"); };
+  dish(326, 306); dish(406, 214);
+
+  // ---- the line: five stations with breathing room
+  const LY = 196;
+  if (F) { rect(14, LY + 28, 282, 12, "url(#woodg)", { rx: 2, ...SH }); rect(14, LY + 28, 282, 2, "#c08a52"); } // one long wooden prep table
+  STATIONS.forEach((st, i) => {
+    const x = st.x;
+    if (F) rect(x, LY, 50, 44, i === 4 ? "#6a5e52" : "#857766", { rx: 3, opacity: .55 }); // floor mat per station
+    else { rect(x, LY, 50, 44, "#1d2748", { rx: 6, stroke: i === 4 ? "#56628a" : "#38d9c9", "stroke-width": .8, "stroke-dasharray": i === 4 ? "2 1.6" : undefined }); }
+    line(x + 25, LY + 62, x + 25, ry - 1, T.arrow, .9, { "stroke-dasharray": "1 2.2", opacity: .9 });
+  });
+  late.push(() => pill(16, 266, F ? "The line · prep table" : "The line · prep pods"));
+
+  // ---- left middle: herbs & stores / hydroponics (kept clear of labels)
+  if (F) {
+    line(20, 102, 156, 102, "#5e3a20", 1.4); for (let i = 0; i < 9; i++) { const x = 26 + i * 15; line(x, 102, x, 110, "#5e3a20", .5); path(`M${x - 4} 110 q4 12 8 0z`, ["#6f8f4e", "#8aa65a", "#5a7a3e"][i % 3]); } // hanging herbs
+    [[24, 128], [42, 132]].forEach(([x, y]) => { ell(x, y + 14, 8, 3, "#3a2a1c"); rect(x - 8, y, 16, 14, "url(#woodg)", { rx: 3, ...SH }); rect(x - 8, y + 4, 16, 1.2, "#3a2a1c"); rect(x - 8, y + 10, 16, 1.2, "#3a2a1c"); });
+    path("M64 146 q-2 -14 8 -16 q10 2 8 16z", "#c9b28a", SH); text(66, 138, "FLOUR", "#6f5a48", 3.2, 900);
+    rect(96, 120, 54, 30, "#efe2c4", { rx: 1.5, ...SHS, transform: "rotate(-2 123 135)" }); text(100, 124, "House rules", T.ink, 4.6, 900, { transform: "rotate(-2 123 135)" }); text(100, 131, "1. No dragons in the larder", "#6f5a48", 3.4, 600, { transform: "rotate(-2 123 135)" }); text(100, 137, "2. Yes, Chef.", "#6f5a48", 3.4, 600, { transform: "rotate(-2 123 135)" });
+  } else {
+    for (let i = 0; i < 3; i++) { rect(20 + i * 22, 104, 18, 40, "#1d2748", { rx: 4, stroke: "#38d9c9", "stroke-width": .6, ...SHS }); for (let k = 0; k < 4; k++) circ(29 + i * 22, 110 + k * 9, 3, ["#4fae7a", "#7fd08a", "#3a8a5a"][(i + k) % 3]); }
+    rect(96, 118, 54, 26, "#eef6ff", { rx: 3, ...SHS }); text(100, 122, "Galley notice", T.ink, 4.6, 900); text(100, 129, "Gravity: optional", "#4b6182", 3.6, 700); text(100, 135, "Spoons: tethered", "#4b6182", 3.6, 700);
+    line(152, 108, 158, 104, "#c9d1dc", 1); circ(158, 104, 1.6, "#c9d1dc"); // floating spoon
+  }
+
+  // ------------------------------------------------------------ people
+  function person(kind, x, y, o = {}) {
+    const k = o.k ?? 1.25, cut = o.cut ?? 20, crew = o.crew;
+    const skin = o.skin ?? T.skin[0];
+    const P = { skin, coat: o.coat ?? (F ? "#efe2c4" : "#eef2f7"), pants: o.pants ?? (F ? "#4a3626" : "#2a3456"), shoe: T.ink, hat: o.hat ?? (F ? "#efe2c4" : "#eef2f7"), acc: o.acc ?? "#c0503a", eye: T.ink };
+    const cid = `c${kind}${Math.round(x)}${Math.round(y)}`;
+    g0({ transform: `translate(${x} ${y}) scale(${k})`, ...SHS });
+    el("clipPath", { id: cid }, `<rect x="-8" y="-10" width="34" height="${cut + 10}"/>`);
+    g0({ "clip-path": `url(#${cid})` });
+    rect(4.6, 15, 2.8, 4.4, P.pants, { rx: .6 }); rect(8.6, 15, 2.8, 4.4, P.pants, { rx: .6 }); rect(4, 18.8, 3.8, 1.4, P.shoe, { rx: .6 }); rect(8.2, 18.8, 3.8, 1.4, P.shoe, { rx: .6 });
+    rect(3.2, 9.4, 9.6, 6.8, P.coat, { rx: 2.4 }); rect(1.6, 10.2, 2.4, 5, P.coat, { rx: 1.2 }); rect(12, 10.2, 2.4, 5, P.coat, { rx: 1.2 });
+    circ(2.8, 15.2, 1.1, P.skin); circ(13.2, 15.2, 1.1, P.skin);
+    circ(8, 6.4, 3.7, P.skin); circ(6.6, 6.4, .5, P.eye); circ(9.4, 6.4, .5, P.eye);
+    const smile = () => path("M6.8 8.4 q1.2 .9 2.4 0", "none", { stroke: P.eye, "stroke-width": .5, "stroke-linecap": "round" });
+    const apron = (c) => rect(4.4, 11, 7.2, 5.6, c, { rx: 1 });
+    switch (kind) {
+      case "chef":
+        rect(4.6, -2.6, 6.8, 5.4, P.hat, { rx: 1 }); circ(5.6, -3.4, 2.1, P.hat); circ(8, -4.6, 2.5, P.hat); circ(10.4, -3.4, 2.1, P.hat); rect(4.4, 1.8, 7.2, 1.4, F ? "#c9b28a" : "#38d9c9", { rx: .5 });
+        if (!F) { line(10.4, -5.4, 11.6, -8, "#8e98a8", .4); circ(11.6, -8.2, .7, "#ffc93a"); } // galley toque has an antenna
+        path("M5.6 8.2 q1.2 -1.2 2.4 -.2 q1.2 -1 2.4 .2 q-1.2 .9 -2.4 .2 q-1.2 .7 -2.4 -.2z", "#5b3a2a");
+        path("M5.6 5.1 l1.8 -.7 M10.4 5.1 l-1.8 -.7", "none", { stroke: P.eye, "stroke-width": .55, "stroke-linecap": "round" });
+        path("M6 9.6 h4 l-2 2.2z", "#c0503a"); [12, 14].forEach((yy) => { circ(6.2, yy, .45, T.ink); circ(9.8, yy, .45, T.ink); });
+        rect(13.4, 1, .9, 14, "#9aa0a6", { rx: .4 }); circ(13.9, 1, 1.8, F ? "url(#copper)" : "#9aa0a6"); break;
+      case "sous":
+        path("M4.2 5.4 q0 -4.8 3.8 -4.8 q3.8 0 3.8 4.8 z", P.hat); path("M11.4 3.6 l3.2 -1.2 l-1 2.6 l1.4 1.6 l-3.4 -.6z", P.hat); smile();
+        rect(13.2, 9, 4.6, 3.4, "#dfe4ea", { rx: .4, stroke: "#8e98a8", "stroke-width": .3 }); rect(14, 12.2, 1.2, 3, T.ink, { rx: .4 }); break; // cleaver
+      case "sauce":
+        rect(4.2, .4, 7.6, 3.6, P.hat, { rx: 1.4 }); for (let i = 0; i < 4; i++) rect(5.2 + i * 1.8, .8, .4, 2.8, "#c9bfae"); rect(4, 3.2, 8, 1.2, P.acc, { rx: .4 }); smile(); apron(P.acc);
+        rect(13.6, 7, .7, 8, "#8e98a8"); ell(14, 6, 1.6, 2.6, "none", { stroke: "#8e98a8", "stroke-width": .5 }); ell(14, 6, .7, 2.6, "none", { stroke: "#8e98a8", "stroke-width": .4 }); break;
+      case "grill":
+        path("M4.2 5.6 q0 -4.2 3.8 -4.2 q3.8 0 3.8 4.2 z", P.hat); rect(4, 4.4, 8, 1.2, "#2a2a2a", { rx: .5 }); smile(); apron(F ? "#5e3a20" : "#3a3a48");
+        line(13.4, 15, 16.6, 6.6, "#8e98a8", .7); line(14.4, 15, 17.6, 7.2, "#8e98a8", .7); break; // tongs
+      case "garde":
+        path("M3.8 6 q0 -5.4 4.2 -5.4 q4.2 0 4.2 5.4 q-1 -2 -4.2 -2 q-3.2 0 -4.2 2z", P.hat); path("M3.8 6 l-1.6 3.6 l2.2 -1z", P.hat); smile(); apron(P.acc);
+        line(13.6, 15, 14.8, 7, "#5a7a3e", .6); [[14.6, 7.4], [16, 8.6], [13.4, 9]].forEach(([cx, cy]) => ell(cx, cy, 1.4, .8, "#7aa65a")); break; // herb bunch
+      case "pastry":
+        circ(5.4, 1.8, 2.2, P.hat); circ(8, 1, 2.6, P.hat); circ(10.6, 1.8, 2.2, P.hat); rect(4.4, 2.6, 7.2, 1.4, P.hat, { rx: .5 }); smile();
+        rect(9.6, 14.2, 9, 1.8, "#c9a06a", { rx: .9 }); rect(8.6, 14.6, 1.4, 1, "#8a5a34"); rect(18.2, 14.6, 1.4, 1, "#8a5a34"); break; // rolling pin
+      case "line":
+        path("M4.2 5 q0 -4.4 3.8 -4.4 q3.8 0 3.8 4.4 z", P.hat); path("M11.4 4.4 q3 -.2 4.2 1.2 l-4.2 .4z", P.hat);
+        path("M5.9 6.4 h1.4 M8.7 6.4 h1.4", "none", { stroke: P.eye, "stroke-width": .55 }); // eyes closed on break
+        ell(15.6, 12.8, 2.6, 1.6, "#3a3a46"); rect(12, 12.4, 2.4, .8, "#3a3a46"); break; // frying pan
+      case "expo":
+        if (F) { path("M4 5 q0 -4.6 4 -4.6 q4 0 4 4.6z", P.hat); path("M11 2 q4 -3 6 -6 q-1 4 -4.6 7z", "#d0503a"); }
+        else { path("M4.2 5 q0 -4.4 3.8 -4.4 q3.8 0 3.8 4.4 z", P.hat); path("M4 6.4 q0 -4 4 -4 q4 0 4 4", "none", { stroke: T.ink, "stroke-width": .7 }); rect(3.2, 5.6, 1.6, 2.6, T.ink, { rx: .5 }); path("M4.2 8 q1.4 2 3.4 1.6", "none", { stroke: T.ink, "stroke-width": .5 }); }
+        smile();
+        rect(12.6, 9.4, 5, 6.4, F ? "#7a2a1e" : "#2a3456", { rx: .6 }); rect(13.2, 10, 3.8, 5.2, F ? "#efe2c4" : "#9fe7ff", { rx: .3 }); // ledger / tablet
+        if (F) line(16.6, 8, 18.6, 4.8, "#efe2c4", .5); break; // quill
+    }
+    g1(); g1();
+  }
+
+  // the Head Chef behind the island
+  person("chef", 214, 66, { coat: F ? "#f4ecdf" : "#ffffff", skin: T.skin[0], k: 1.35 });
+  if (F) { rect(184, 92, 82, 14, "url(#woodg)", { rx: 2, ...SH }); rect(184, 92, 82, 2, "#c08a52"); circ(198, 92, 4.6, "url(#copper)", SHS); rect(232, 86, 16, 7, "#efe2c4", { rx: .6, ...SHS }); line(234, 88.4, 246, 88.4, "#6f5a48", .4); line(234, 90.4, 244, 90.4, "#6f5a48", .4); }
+  else { rect(184, 92, 82, 14, "url(#steel)", { rx: 4, ...SH }); rect(188, 94, 74, 1.4, "#38d9c9"); rect(232, 85, 18, 8, "#0a0f20", { rx: 1.2 }); rect(233.4, 86.2, 15.2, 5.6, "#38d9c9", { opacity: .8, rx: .6 }); circ(198, 90, 4.6, "#c9d1dc", SHS); }
+
+  // stations: cook + counter props
+  const STP = { sous: { coat: F ? "#4a3626" : "#2a3456", hat: "#c0503a", skin: T.skin[1] }, sauce: { skin: T.skin[2], acc: F ? "#3a6db5" : "#38d9c9" }, grill: { skin: T.skin[0], coat: F ? "#efe2c4" : "#eef2f7", hat: "#2a2a2a" }, garde: { skin: T.skin[3], hat: "#6f8f4e", acc: "#6f8f4e" } };
+  STATIONS.forEach((st) => {
+    const x = st.x, cx = x + 25;
+    if (st.who) person(st.kind, x + 13, LY + 1, { cut: 17, ...STP[st.kind] });
+    if (!F) { rect(x + 4, LY + 26, 42, 13, "url(#steel)", { rx: 4, ...SH }); rect(x + 8, LY + 28, 34, 2, st.who ? "#38d9c9" : "#56628a", { rx: 1 }); }
+    // props on the counter
+    if (st.kind === "sous") { rect(x + 28, LY + 21, 16, 7, F ? "#c9a06a" : "#eef2f7", { rx: 1, ...SHS }); ell(x + 33, LY + 24.4, 3, 1, "#f08a2a"); ell(x + 39, LY + 23.6, 2.4, .9, "#f08a2a"); }
+    if (st.kind === "sauce") { rect(x + 29, LY + 15, 14, 12, F ? "url(#copper)" : "#3a4466", { rx: 2, ...SHS }); ell(x + 36, LY + 16, 6.4, 1.8, "#b5552f"); path(`M${x + 33} ${LY + 13} q-2 -2 0 -4 q2 -2 0 -4 M${x + 38} ${LY + 13} q2 -2 0 -4 q-2 -2 0 -4`, "none", { stroke: "#fff", "stroke-width": .8, "stroke-linecap": "round", opacity: .85 }); }
+    if (st.kind === "grill") { rect(x + 28, LY + 18, 16, 9, "#2a2a2a", { rx: 1, ...SHS }); for (let i = 0; i < 4; i++) rect(x + 29, LY + 19.5 + i * 2, 14, .6, "#ff8a3a"); circ(x + 36, LY + 17, 6, "url(#warm)"); }
+    if (st.kind === "garde") { ell(x + 36, LY + 23, 7, 3.6, F ? "#c9a06a" : "#eef2f7", SHS); circ(x + 33.6, LY + 22.4, 1.8, "#6f8f4e"); circ(x + 37, LY + 21.8, 1.6, "#8aa65a"); circ(x + 39, LY + 23.4, 1.2, "#d0503a"); }
+    if (st.kind === "open") { rect(x + 8, LY + 18, 14, 10, F ? "#fbf1dc" : "#0f2550", { rx: .8, ...SHS, transform: `rotate(-4 ${x + 15} ${LY + 22})`, stroke: F ? "none" : "#56628a", "stroke-width": .5 }); text(x + 9.4, LY + 19.6, st.ticket, F ? T.ink : "#a8b8d8", 6, 900, { transform: `rotate(-4 ${x + 15} ${LY + 22})` }); circ(x + 36, LY + 24, 2.6, "#e8c07a", SHS); ell(x + 25, LY + 37, 5, 2, F ? "#5e3a20" : "#3a4466"); }
+  });
+
+  // staff corner: two cooks on break, seated together (room for more)
+  person("pastry", 312, 86, { cut: 13, skin: T.skin[0], k: 1.25 });
+  person("line", 334, 86, { cut: 13, skin: T.skin[1], hat: "#e2a33a", coat: F ? "#7a52b5" : "#7a52b5", k: 1.25 });
+  if (F) { rect(310, 104, 40, 34, "#8a5a34", { rx: 3, ...SH }); rect(312, 106, 36, 30, "#9c6a3e", { rx: 2.4 }); [[318, 112], [340, 112], [326, 126], [344, 128]].forEach(([x, y]) => { rect(x, y, 4.4, 5, "#c9b28a", { rx: .8, ...SHS }); ell(x + 2.2, y + .4, 2, .7, "#fff8e0"); }); }
+  else { ell(342, 122, 16, 10, "#c9d1dc", SH); ell(342, 121, 13, 7.6, "#eef2f7"); [[334, 118], [348, 120]].forEach(([x, y]) => rect(x, y, 4, 4.4, "#ffd59a", { rx: .8, ...SHS })); }
+
+  // expediter beside the pass
+  person("expo", 358, 250, { skin: T.skin[0], hat: F ? "#3a6d4e" : "#38d9c9", coat: F ? "#4a3626" : "#2a3456", k: 1.25 });
+
+  // vignette / lighting over the art, under the labels
+  rect(6, 28, 428, 326, "url(#vig)", { rx: F ? 3 : 8 });
+
+  // ------------------------------------------------------------ labels (after the light, so they stay crisp)
+  late.forEach((f) => f());
+  function pill(x, y, t, size = 5.8) { const w = tw(t, size, 800) + 6; rect(x, y, w, size + 3.4, T.zone, { rx: 2, ...SHS }); text(x + 3, y + 1.6, t, T.zoneFg, size, 800); return w; }
+  function icon(k, x, y, sz, color, o = {}) {
+    const u = sz / 5;
+    if (k === "work") rect(x + u, y + u, u * 3, u * 3, color, { rx: u * .4 });
+    if (k === "review") { circ(x + u * 2, y + u * 2, u * 1.5, "none", { stroke: color, "stroke-width": u * .9 }); line(x + u * 3, y + u * 3, x + u * 4.6, y + u * 4.6, color, u * 1.1); }
+    if (k === "needs") { path(`M${x + u * 2.5} ${y} L${x + u * 5} ${y + u * 2.5} L${x + u * 2.5} ${y + u * 5} L${x} ${y + u * 2.5} Z`, color); rect(x + u * 2.1, y + u * 1, u * .8, u * 2, o.cut ?? "#fff"); rect(x + u * 2.1, y + u * 3.4, u * .8, u * .8, o.cut ?? "#fff"); }
+    if (k === "wait") path(`M${x} ${y} H${x + sz} L${x + u * 3} ${y + u * 2.5} L${x + sz} ${y + sz} H${x} L${x + u * 2} ${y + u * 2.5} Z`, color);
+    if (k === "off") path(`M${x + u * 3.5} ${y + u * .2} A${u * 2.4} ${u * 2.4} 0 1 0 ${x + u * 3.5} ${y + u * 4.8} A${u * 1.8} ${u * 1.8} 0 1 1 ${x + u * 3.5} ${y + u * .2} Z`, color);
+  }
+  /** Name on its own bold line, kitchen job on a smaller line. */
+  function nameplate(cx, y, c) { const w = Math.max(tw(c.name, 6.6, 800), tw(c.job, 4.8, 700)) + 8, x = cx - w / 2; rect(x, y, w, 15, T.plate, { rx: 2.2, ...SHS }); text(cx, y + 1.4, c.name, T.plateFg, 6.6, 800, { "text-anchor": "middle" }); text(cx, y + 9, c.job, T.plateSub, 4.8, 700, { "text-anchor": "middle" }); }
+  /** Ticket + work status, its own badge (never the name or job). */
+  function badge(cx, y, kind, id, status) { const idW = id ? tw(id, 8, 900) : 0, w = 10 + idW + (id ? 2.4 : 0) + tw(status, 5, 700) + 4, x = cx - w / 2; rect(x, y, w, 12, T.tag, { rx: 2.2, stroke: T.ink, "stroke-width": 1, ...SHS }); icon(kind, x + 3, y + 3.6, 4.8, T.ink); if (id) text(x + 10, y + 1.6, id, T.ink, 8, 900); text(x + 10 + idW + (id ? 2.4 : 0), y + 3.6, status, T.tagSub, 5, 700); path(`M${cx - 2} ${y + 12} h4 l-2 2.4z`, T.ink); }
+  function waitBadge(cx, y, id) { const t = "waiting for a cook", fg = F ? "#fbf1dc" : "#a8b8d8", w = tw(t, 4.6, 600) + 6, x = cx - w / 2; rect(x, y, w, 17, F ? "#857766" : "#1d2748", { rx: 2, stroke: F ? "#2c1d14" : "#a8b8d8", "stroke-width": .9, "stroke-dasharray": "1.8 1.4" }); icon("wait", x + 3, y + 2.6, 4.6, fg); text(x + 10, y + 1.2, id, fg, 7, 900); text(x + 3, y + 10, t, fg, 4.6, 600); line(cx, y + 17, cx, y + 21, F ? "#2c1d14" : "#a8b8d8", .8, { "stroke-dasharray": "1 1" }); }
+  function needsFlag(cx, y) { const t = "NEEDS YOU", w = tw(t, 11, 900) + 22, h = 17, x = cx - w / 2; rect(x - 2.2, y - 2.2, w + 4.4, h + 4.4, T.ink, { rx: 3.4, ...SH }); rect(x - 1, y - 1, w + 2, h + 2, T.alert, { rx: 2.8 }); rect(x, y, w, h, T.ink, { rx: 2.4 }); rect(x + 1.1, y + 1.1, w - 2.2, h - 2.2, T.alert, { rx: 2 }); icon("needs", x + 3.4, y + 3.2, 10.6, T.ink, { cut: T.alert }); text(x + 17, y + 3, t, T.ink, 11, 900, { "letter-spacing": 0.4 * s }); path(`M${cx - 4} ${y + h + 2.2} h8 l-4 4.4z`, T.ink); }
+
+  needsFlag(225, 40);
+  nameplate(225, 108, by.basil);
+  STATIONS.forEach((st) => {
+    const cx = st.x + 25;
+    if (st.who) { const c = by[st.who]; badge(cx, LY - 20, "work", c.ticket, c.status); nameplate(cx, LY + 44, c); }
+    else waitBadge(cx, LY - 22, st.ticket);
+  });
+  nameplate(321, 150, by.crumb); nameplate(345, 166, by.mochi);
+  badge(366, 74, "off", null, "2 on break");
+  badge(368, 232, "review", "3.1", "at the pass");
+  nameplate(368, 278, by.dash);
+  badge(384, 196, "work", "2.9", "to MAIN");
+
+  // ------------------------------------------------------------ roster + agent drawer
+  const PX = 446;
+  text(PX, 30, "CREW · 8 ON SHIFT", T.panelMuted, 5.2, 800, { "letter-spacing": 0.3 * s });
+  const order = ["basil", "dash", "pepper", "roux", "ember", "sprig", "crumb", "mochi"];
+  order.forEach((id, i) => {
+    const c = by[id], col = i % 2, row = Math.floor(i / 2), x = PX + col * 96, y = 40 + row * 42, w = 92, h = 38;
+    const sel = !!c.selected;
+    rect(x, y, w, h, T.panelCard, { rx: 3, stroke: sel ? T.accent : c.state === "needs" ? T.alert : T.panelLine, "stroke-width": sel || c.state === "needs" ? 1.2 : .6 });
+    if (c.state === "needs") rect(x, y, 3, h, T.alert, { rx: 1.5 });
+    // avatar: the same figure, cropped to the head
+    rect(x + 4, y + 4, 15, 15, F ? "#6e6256" : "#26314f", { rx: 2 });
+    el("clipPath", { id: `av${id}` }, `<rect x="${x + 4}" y="${y + 4}" width="15" height="15" rx="2"/>`);
+    g0({ "clip-path": `url(#av${id})` }); person(KIND[id], x + 4.5, y + 7.5, { k: 0.88, skin: T.skin[["basil", "ember", "crumb", "dash"].includes(id) ? 0 : id === "pepper" || id === "mochi" ? 1 : id === "roux" ? 2 : 3], ...(STP[KIND[id]] ?? {}), ...(id === "mochi" ? { hat: "#e2a33a", coat: "#7a52b5" } : {}), ...(id === "dash" ? { hat: F ? "#3a6d4e" : "#38d9c9", coat: F ? "#4a3626" : "#2a3456" } : {}) }); g1();
+    text(x + 23, y + 4, c.name, T.panelFg, 7, 800);
+    text(x + 23, y + 12.4, c.job, T.panelMuted, 4.8, 700);
+    // status badge
+    const bk = c.state === "needs" ? "needs" : c.state, bt = c.ticket ? `${c.ticket} · ${c.status}` : c.status;
+    const bw = tw(bt, 4.8, 800) + 11;
+    rect(x + 23, y + 20, bw, 8, c.state === "needs" ? T.alert : T.tag, { rx: 1.6 }); icon(bk, x + 25, y + 21.6, 4.6, T.ink, { cut: c.state === "needs" ? T.alert : T.tag }); text(x + 31.4, y + 21.4, bt, T.ink, 4.8, 800);
+    // CTX gauge: attached to the agent, below identity + status
+    if (c.ctx != null) {
+      text(x + 23, y + 30.4, "CTX", T.panelMuted, 4.4, 800);
+      const on = Math.round(c.ctx / 10);
+      for (let k = 0; k < 10; k++) rect(x + 33 + k * 3.4, y + 31, 2.6, 4, k < on ? T.accent : T.panelLine, { rx: .5 });
+      text(x + 68, y + 30.4, `${c.ctx}%`, T.panelFg, 4.6, 800);
+    }
+  });
+  // agent drawer for the selected cook (Roux)
+  const DY = 212, c = by.roux;
+  rect(PX, DY, 188, 118, T.panelCard, { rx: 4, stroke: T.accent, "stroke-width": 1.2 });
+  text(PX + 8, DY + 6, "AGENT DRAWER", T.panelMuted, 4.8, 800, { "letter-spacing": 0.3 * s }); text(PX + 180, DY + 6, "Roux selected", T.accent, 4.8, 800, { "text-anchor": "end" });
+  rect(PX + 8, DY + 16, 30, 30, F ? "#6e6256" : "#26314f", { rx: 3 });
+  el("clipPath", { id: "avbig" }, `<rect x="${PX + 8}" y="${DY + 16}" width="30" height="30" rx="3"/>`);
+  g0({ "clip-path": "url(#avbig)" }); person("sauce", PX + 11, DY + 19, { k: 1.55, skin: T.skin[2], ...STP.sauce }); g1();
+  text(PX + 44, DY + 16, c.name, T.panelFg, 12, 900);
+  text(PX + 44, DY + 31, `${c.job} · ${c.role}`, T.accent, 7, 800);
+  text(PX + 44, DY + 40.5, "kitchen job · Pathfinder role", T.panelMuted, 4.4, 600);
+  const rows = [["Ticket", "3.3 · cooking"], ["Session", "implementation · live"], ["Worktree", ".pathfinder/worktrees/3.3"], ["Brief", "Pathfinder worker brief"]];
+  rows.forEach(([k, v], i) => { const y = DY + 54 + i * 11; rect(PX + 8, y - 2, 172, .5, T.panelLine); text(PX + 8, y, k, T.panelMuted, 5, 700); text(PX + 50, y, v, T.panelFg, 5.4, 700); });
+  [["Terminal", 8], ["Message", 52], ["Open ticket", 96]].forEach(([t, dx]) => { const w = tw(t, 5, 800) + 10; rect(PX + dx, DY + 100, w, 11, "none", { rx: 2, stroke: T.panelFg, "stroke-width": .8 }); text(PX + dx + 5, DY + 102.6, t, T.panelFg, 5, 800); });
+  // legend
+  const LGY = 346; let lx = PX;
+  [["needs", "Needs you"], ["wait", "Waiting for a cook"], ["work", "Cooking"], ["review", "At the pass"], ["off", "On break"]].forEach(([k, t]) => {
+    if (k === "needs") { rect(lx - .6, LGY - .6, 6.2, 6.2, T.ink, { rx: 1 }); rect(lx, LGY, 5, 5, T.alert, { rx: .8 }); icon("needs", lx + .5, LGY + .5, 4, T.ink, { cut: T.alert }); } else icon(k, lx, LGY, 5, k === "wait" ? T.panelMuted : T.panelFg);
+    text(lx + 7, LGY - .2, t, T.panelFg, 4.6, 600); lx += 7 + tw(t, 4.6, 600) + 6;
+  });
+  text(PX, 334, "CTX gauge and crew: sample data", T.panelMuted, 4.2, 600);
+
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", `0 0 ${FW} ${FH}`); svg.setAttribute("width", FW * s); svg.setAttribute("height", FH * s);
+  svg.innerHTML = out.join("");
+  return svg;
+}
+
+const t = q.get("t") || "fantasy";
+const box = document.getElementById("out");
+if (t === "all") { box.style.gap = `${10 * S}px`; ["fantasy", "space"].forEach((k) => box.appendChild(render(k, S))); }
+else box.appendChild(render(t, S));
+</script>
+</body></html>

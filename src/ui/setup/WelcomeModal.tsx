@@ -41,10 +41,10 @@ export function WelcomeModal() {
   };
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-[rgba(36,26,46,0.55)] p-4" role="dialog" aria-modal="true" aria-label="Welcome to JSM HQ">
+    <div className="fixed inset-0 z-50 grid place-items-center bg-[rgba(36,26,46,0.55)] p-4" role="dialog" aria-modal="true" aria-label="Welcome to Tin and Thyme">
       <div className="panel flex max-h-[calc(100dvh-2rem)] w-[min(720px,100%)] flex-col">
-        <div className="border-b-[3px] border-ink px-4 py-2">
-          <h2 className="m-0 text-[22px] font-bold">Welcome to JSM HQ</h2>
+        <div className="border-b-[3px] border-line px-4 py-2">
+          <h2 className="m-0 text-[22px] font-bold">Welcome to Tin &amp; Thyme</h2>
           <p className="m-0 text-[14px] text-muted">
             Set up the team for <b className="text-ink">{snap.config.project.repo || snap.config.project.name}</b>. You can change all of this later in Settings.
           </p>
@@ -126,7 +126,7 @@ export function WelcomeModal() {
           </section>
         </div>
 
-        <div className="flex items-center justify-between gap-3 border-t-[3px] border-ink px-4 py-2">
+        <div className="flex items-center justify-between gap-3 border-t-[3px] border-line px-4 py-2">
           <span className="text-[12px] text-muted">Saved to .jsmhq/config.json in your repo. Agents don't start until you press Start.</span>
           <button className="btn" disabled={!valid || sending} onClick={submit}>
             {sending ? "Creating…" : "Create team"}

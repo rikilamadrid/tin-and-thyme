@@ -37,7 +37,7 @@ function CheckRow({ c, running, onRun }: { c: SetupCheck; running: boolean; onRu
             <div className="mt-1.5 flex flex-wrap items-center gap-2">
               {c.fix.command && (
                 <>
-                  <code className="max-w-full truncate border-2 border-ink bg-navy-2 px-2 py-0.5 font-term text-[17px] text-[#dfe6ff]">{c.fix.command}</code>
+                  <code className="max-w-full truncate border-2 border-line bg-navy-2 px-2 py-0.5 font-term text-[17px] text-[#dfe6ff]">{c.fix.command}</code>
                   <button
                     className="btn px-2 text-[12px]"
                     onClick={() => {
@@ -68,7 +68,7 @@ function CheckRow({ c, running, onRun }: { c: SetupCheck; running: boolean; onRu
   );
 }
 
-/** "Get JSM HQ ready": what's missing on this machine and how to fix it. */
+/** "Get Tin & Thyme ready": what's missing on this machine and how to fix it. */
 export function SetupChecklist() {
   const setup = useOffice((s) => s.snap?.setup);
   const [runningId, setRunningId] = useState<string | null>(null);
@@ -77,8 +77,8 @@ export function SetupChecklist() {
   return (
     <div className="fixed inset-0 z-40 grid place-items-center bg-[rgba(36,26,46,0.55)] p-4" role="dialog" aria-modal="true" aria-label="Setup checklist">
       <div className="panel flex max-h-[calc(100dvh-2rem)] w-[min(760px,100%)] flex-col">
-        <div className="flex items-center gap-3 border-b-[3px] border-ink px-4 py-2">
-          <h2 className="m-0 flex-1 text-[22px] font-bold">Get JSM HQ ready</h2>
+        <div className="flex items-center gap-3 border-b-[3px] border-line px-4 py-2">
+          <h2 className="m-0 flex-1 text-[22px] font-bold">Get Tin &amp; Thyme ready</h2>
           <button className="btn text-[14px]" onClick={() => officeActions.recheckSetup()}>
             Check again
           </button>
@@ -106,8 +106,8 @@ export function SetupChecklist() {
             ))}
           </ul>
           {runningId && (
-            <div className="mb-2 mt-1 border-[3px] border-ink">
-              <div className="flex items-center justify-between bg-navy px-2 py-1 text-[13px] text-cream">
+            <div className="mb-2 mt-1 border-[3px] border-line">
+              <div className="flex items-center justify-between bg-navy px-2 py-1 text-[13px] text-ink">
                 <span>Running · type here if it asks for input</span>
                 <button className="text-[12px] underline" onClick={() => setRunningId(null)}>
                   Hide
@@ -119,15 +119,15 @@ export function SetupChecklist() {
             </div>
           )}
           {!setup.sandboxReady && setup.localReady && (
-            <p className="mb-2 border-[3px] border-orange bg-[#fff1d6] px-3 py-2 text-[14px]">
+            <p className="mb-2 border-[3px] border-orange bg-warn px-3 py-2 text-[14px]">
               Sandboxes aren't available here, but Local mode is. Set agents to <b>Local</b> in Settings → Team. They run plain Claude Code in their own folder, with permission prompts on.
             </p>
           )}
         </div>
-        <div className="flex items-center justify-between gap-3 border-t-[3px] border-ink px-4 py-2">
-          <span className="text-[12px] text-muted">HQ never runs sudo or install scripts for you. "Run in terminal" shows exactly what runs.</span>
+        <div className="flex items-center justify-between gap-3 border-t-[3px] border-line px-4 py-2">
+          <span className="text-[12px] text-muted">Tin &amp; Thyme never runs sudo or install scripts for you. "Run in terminal" shows exactly what runs.</span>
           <button className="btn" onClick={() => ui.closeSetup()}>
-            Continue to the office
+            Continue to the galley
           </button>
         </div>
       </div>

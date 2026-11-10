@@ -1,3 +1,4 @@
+import type { CharacterId } from "./crew";
 import type { StackConfig } from "./stack";
 // Domain types shared by the data source, the store, the office and the HUD.
 
@@ -45,6 +46,21 @@ export interface AgentConfig {
   workspacePath: string | null; // an existing folder to use; null = HQ-managed clone
   /** MCP servers (names in sbx's registry) this agent's sandbox gets. */
   mcp?: string[];
+  /** The Pass: this session's robot character (assigned once, never changes) and its real workflow facts. */
+  crew?: CrewInfo;
+}
+
+/** A visual alias (character, kitchen job) next to the real workflow role, session and ticket. */
+export interface CrewInfo {
+  character: CharacterId;
+  /** Kitchen job shown under the name, e.g. "Saucier". */
+  job: string;
+  /** The real workflow role, e.g. "developer" (Pathfinder roles/<role>.md). */
+  role: string;
+  /** Pathfinder session kind: implementation | resume | repair | adversary | review; null for the coordinator. */
+  session: string | null;
+  ticket: string | null;
+  worktree: string | null;
 }
 
 /** An MCP server registered with Docker Sandboxes (`sbx mcp ls`). */
@@ -134,6 +150,62 @@ export interface AgentStatus {
   stateSince: string; // ISO time
   note: string | null; // e.g. "Asking: max PDF size 10 MB or 20 MB?"
   session: SessionInfo;
+  /** Context window use read from the session's own transcript; absent/null when unavailable. */
+  context?: { used: number; limit: number } | null;
+  /**
+   * Model and reasoning effort for this agent's own session. "observed" = read from its latest model
+   * call in its transcript; "configured" = only what was requested for it (no call seen yet). Never another agent's values.
+   */
+  telemetry?: SessionTelemetry | null;
+  /** A worker's own context crossed the project's alert threshold (advisory; once per crossing). */
+  contextAlert?: { pct: number; threshold: number } | null;
+  /** Whether Tin & Thyme can checkpoint this worker and start it fresh through Pathfinder, and why not. */
+  fresh?: FreshReadiness | null;
+  /**
+   * How a workflow session ended, read from Pathfinder's own checkpoint when it stopped (absent while it runs).
+   * handed-off = it recorded the next stage (or done); gate = it stopped for a human; failed = it reported failure;
+   * interrupted = it stopped without recording any of those.
+   */
+  ended?: SessionEnd | null;
+}
+
+export interface SessionEnd {
+  outcome: "handed-off" | "gate" | "failed" | "interrupted";
+  /** The stage Pathfinder recorded next (adversary, review, repair, done, integrated), when handed off. */
+  next: string | null;
+  /** The session's last recorded result (Pathfinder `Last`), verbatim. */
+  result: string | null;
+  at: string;
+}
+
+export interface FreshReadiness {
+  can: boolean;
+  reason: string;
+  /** When Pathfinder itself lacks the control Tin & Thyme would need: the smallest change to it. */
+  pathfinderChange?: string;
+}
+
+export type HandoffStepStatus = "pending" | "running" | "ok" | "failed";
+
+/** One "Checkpoint & start fresh" for a ticket: three steps, each with what happened. */
+export interface Handoff {
+  key: string;
+  /** The session it replaces (HQ agent id). */
+  from: string;
+  phase: "running" | "dispatched" | "started" | "failed" | "refused";
+  steps: { pause: { status: HandoffStepStatus; detail: string }; save: { status: HandoffStepStatus; detail: string }; dispatch: { status: HandoffStepStatus; detail: string } };
+  /** The local checkpoint (outside the project), once written. */
+  checkpoint: string | null;
+  /** Marks the one request typed to the coordinator, so a retry never sends a second. */
+  dispatchId: string | null;
+  retryable: boolean;
+  at: string;
+}
+
+export interface SessionTelemetry {
+  model: string | null;
+  effort: string | null;
+  source: "observed" | "configured";
 }
 
 export type BoardStatus = "active" | "planned" | "done";
@@ -159,6 +231,15 @@ export interface Task {
   files?: string[]; // the only files this task may edit
   doneWhen?: string; // acceptance criteria
   note?: string | null; // e.g. why it's blocked
+  /** The workflow's own words for this ticket (Pathfinder engine row), shown as is. */
+  pf?: {
+    state: string;
+    lifecycle: string;
+    role: string | null;
+    gate: string | null;
+    /** The state the claim's checkpoint records (e.g. "adversary" while the engine shows a pending stage as stale). */
+    recorded?: string | null;
+  };
 }
 
 export type ReviewState = "pending" | "reviewing" | "changes-requested" | "passed";
@@ -343,6 +424,44 @@ export interface OfficeSnapshot {
   accessRequests?: AccessRequest[];
   mcp?: McpState;
   actionItems?: ActionItem[];
+  /** Set when a workflow adapter owns the roster and the board. */
+  workflow?: WorkflowInfo;
+}
+
+export interface WorkflowInfo {
+  kind: "pathfinder";
+  mode: string;
+  store: string;
+  /** Configured roles (roles/*.md frontmatter). */
+  roles: { name: string; description: string }[];
+  /** Context alert threshold for this project, in percent of the window (advisory). */
+  contextAlertPct?: number;
+  /** Checkpoint & start fresh, by ticket. */
+  handoffs?: Record<string, Handoff>;
+  /**
+   * Delegated helpers (subagents that aren't Pathfinder workers), grouped by the session that launched them.
+   * Running ones work at the subagent stations; finished ones are that session's history.
+   */
+  helpers?: WorkflowHelper[];
+  /** The coordinator's latest dispatch plan, as observed when it ran `orchestrate plan` (never computed here). */
+  plan?: PlanSeen | null;
+}
+
+export interface WorkflowHelper {
+  id: string;
+  label: string;
+  type: string;
+  /** HQ id of the session that launched it (the coordinator unless a worker did). */
+  parent?: string;
+  finished?: boolean;
+}
+
+export interface PlanSeen {
+  at: string;
+  outcome: string;
+  /** Eligible tickets the plan would claim now, or defers to a later round. */
+  dispatch: string[];
+  deferred: { key: string; reason: string }[];
 }
 
 /** Something an agent needs the user to do outside its sandbox (Team MCP `ask_user`). */

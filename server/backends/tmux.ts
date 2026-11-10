@@ -42,10 +42,22 @@ export const tmuxBackend: SessionBackend = {
   kill: (name) => tmux.killSession(name),
 
   attach(name, size, onData, onEnd) {
+    // The window must follow this viewer. A window pinned to a fixed size (`resize-window` sets
+    // window-size to manual) shows a small terminal a viewport into a bigger window that jumps
+    // with the cursor: glitchy scrolling. Unpin it on attach and on every resize.
+    const follow = () => void run("tmux", ["set-option", "-w", "-u", "-t", `=${name}:`, "window-size"], { timeoutMs: 5000 });
+    follow();
     const pty = spawnPty("tmux", ["attach-session", "-t", `=${name}`], { name: "xterm-256color", cols: size.cols, rows: size.rows, env: TERM_ENV });
     pty.onData(onData);
     pty.onExit(onEnd);
-    return { write: (d) => pty.write(d), resize: (c, r) => pty.resize(c, r), close: () => pty.kill() };
+    return {
+      write: (d) => pty.write(d),
+      resize: (c, r) => {
+        pty.resize(c, r);
+        follow();
+      },
+      close: () => pty.kill(),
+    };
   },
 
   async type(name, text) {

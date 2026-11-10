@@ -40,7 +40,7 @@ export function Portrait({ color, lead, size = 40 }: { color: string; lead: bool
       ref={ref}
       width={16}
       height={16}
-      className="shrink-0 border-[3px] border-ink bg-navy"
+      className="shrink-0 border-[3px] border-line bg-navy"
       style={{ width: size, height: size, imageRendering: "pixelated" }}
       aria-hidden
     />
@@ -48,7 +48,7 @@ export function Portrait({ color, lead, size = 40 }: { color: string; lead: bool
 }
 
 export function Dot({ color, size = 10 }: { color: string; size?: number }) {
-  return <i className="inline-block shrink-0 border-2 border-ink" style={{ width: size, height: size, background: color }} />;
+  return <i className="inline-block shrink-0 border-2 border-line" style={{ width: size, height: size, background: color }} />;
 }
 
 export function SectionTitle({ children }: { children: ReactNode }) {

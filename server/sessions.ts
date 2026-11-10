@@ -148,6 +148,30 @@ export class Sessions {
     }
   }
 
+  /** Agents HQ shows but does not run itself (a workflow's background subagents). */
+  external: (id: string) => boolean = () => false;
+
+  /** A workflow adapter knows this agent is still asking (its transcript ended on a question), whatever the prompt looks like. */
+  holdsAsking: (id: string) => boolean = () => false;
+
+  /** Starts a session with a given command in a given folder, writing nothing into it (workflow adapters). */
+  async startExternal(id: string, dir: string, spec: LaunchSpec) {
+    const hub = this.hub;
+    const st = hub.status(id);
+    if (!st || st.session.state === "running" || st.session.state === "starting") return;
+    const name = this.name(id);
+    try {
+      hub.setSession(id, { state: "starting", detail: "Starting…", workspace: dir });
+      if (!(await this.backend.exists(name))) await this.backend.create(name, dir, spec, { cols: 200, rows: 50 });
+      this.attach(id);
+      hub.setSession(id, { state: "running", detail: null, workspace: dir });
+      hub.setStatus(id, { state: "working", note: "Starting Pathfinder orchestration" });
+      hub.activity("session", id, `${hub.name(id)} started (Claude Code, Local mode, tmux ${name})`);
+    } catch (err) {
+      hub.setSession(id, { state: "failed", detail: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
   async stop(id: string) {
     const hub = this.hub;
     const agent = hub.cfg(id);
@@ -382,6 +406,7 @@ export class Sessions {
     const tick = async () => {
       if (this.hub.snap.setup.checks.find((c) => c.id === "tmux")?.status !== "ok") return;
       for (const agent of this.hub.snap.config.team) {
+        if (this.external(agent.id)) continue;
         const st = this.hub.status(agent.id);
         if (!st || st.session.state === "starting") continue;
         const name = this.name(agent.id);
@@ -474,7 +499,7 @@ export class Sessions {
       if (busy) return set("working", "Continuing after your answer");
       // Idle only on a positive sign: Claude Code's normal input footer is back. An unfamiliar
       // prompt keeps "needs you", so queued messages aren't typed into it. Codex: wait for "busy".
-      if (cli === "claude" && PROMPT_READY.test(screen)) set("idle", "Waiting for you");
+      if (cli === "claude" && PROMPT_READY.test(screen) && !this.holdsAsking(agentId)) set("idle", "Waiting for you");
       return;
     }
     if (dialog) return set("needs-input", "Asking: answer the question in the terminal");

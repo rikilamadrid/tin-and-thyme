@@ -3,7 +3,9 @@ import { nextAgentName } from "../../data/names";
 import { CLI_LABEL, type AgentCli, type AgentConfig, type AgentMode } from "../../data/types";
 import { officeActions, useOffice } from "../../store/office";
 import { agentPalette } from "../../theme/tokens";
-import { Field, Portrait, SectionTitle } from "../kit";
+import { crewIdentity } from "../../galley/model";
+import { RobotPortrait } from "../../galley/RobotPortrait";
+import { Field, SectionTitle } from "../kit";
 import { CommitInput } from "./controls";
 import { RemoveAgentDialog } from "./RemoveAgentDialog";
 
@@ -45,11 +47,13 @@ export function TeamSettings() {
 }
 
 function AgentRow({ agent, expanded, onToggle, onRemove }: { agent: AgentConfig; expanded: boolean; onToggle: () => void; onRemove: () => void }) {
+  // The same robot as the galley, the roster and the drawer: matched by this agent's id, never by role.
+  const character = useOffice((st) => (st.snap ? crewIdentity(st.snap, agent).character : "unit"));
   const set = (patch: Parameters<typeof officeActions.updateAgent>[1]) => officeActions.updateAgent(agent.id, patch);
   return (
-    <div className="border-[3px] border-ink bg-white">
+    <div className="border-[3px] border-line bg-card">
       <div className="grid grid-cols-[40px_1fr_1fr_150px_130px_auto] items-end gap-2.5 p-2.5">
-        <Portrait color={agent.color} lead={agent.isLead} />
+        <RobotPortrait character={character} size={40} />
         <Field label="Name">
           <CommitInput className="field" value={agent.name} onCommit={(v) => v.trim() && set({ name: v.trim() })} />
         </Field>
@@ -75,7 +79,7 @@ function AgentRow({ agent, expanded, onToggle, onRemove }: { agent: AgentConfig;
           </button>
           {!agent.isLead && (
             <button
-              className="btn px-2 text-[13px] text-red"
+              className="btn px-2 text-[13px] text-[#ff7a9c]"
               onClick={onRemove}
             >
               Remove
@@ -89,14 +93,14 @@ function AgentRow({ agent, expanded, onToggle, onRemove }: { agent: AgentConfig;
         </div>
       )}
       {expanded && (
-        <div className="grid grid-cols-2 gap-3 border-t-[3px] border-ink bg-cream p-3">
+        <div className="grid grid-cols-2 gap-3 border-t-[3px] border-line bg-cream p-3">
           <Field label="Colour">
             <div className="flex flex-wrap gap-1.5">
               {agentPalette.map((c) => (
                 <button
                   key={c}
-                  className="h-6 w-6 border-[3px] border-ink"
-                  style={{ background: c, outline: c === agent.color ? "3px solid #241a2e" : undefined, outlineOffset: 1 }}
+                  className="h-6 w-6 border-[3px] border-line"
+                  style={{ background: c, outline: c === agent.color ? "3px solid #eef6ff" : undefined, outlineOffset: 1 }}
                   aria-label={`Colour ${c}`}
                   onClick={() => set({ color: c })}
                 />
@@ -152,7 +156,7 @@ function AddAgent() {
     setName("");
   };
   return (
-    <section className="border-[3px] border-dashed border-ink p-3">
+    <section className="border-[3px] border-dashed border-line p-3">
       <SectionTitle>Add an agent</SectionTitle>
       <form
         className="grid grid-cols-[1fr_1fr_150px_130px_auto] items-end gap-2.5"

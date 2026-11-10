@@ -24,6 +24,7 @@ import { detectRepo } from "./repo";
 import { Sessions } from "./sessions";
 import { runSetupChecks } from "./setup";
 import { loadConfig, loadPlan } from "./store";
+import { COORDINATOR_ID, detectPathfinder, PathfinderRun } from "./pathfinder";
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -36,7 +37,16 @@ async function main() {
   const dev = flag("dev");
   const port = Number(arg("port") ?? process.env.HQ_PORT ?? 7420);
   const repo = await detectRepo(resolve(arg("repo") ?? process.env.HQ_REPO ?? process.cwd()));
-  const { config, isNew } = loadConfig(repo, port);
+  const pf = detectPathfinder(repo.root);
+  const loaded = loadConfig(repo, port);
+  const config = loaded.config;
+  const isNew = pf ? false : loaded.isNew;
+  if (pf) {
+    // Zero setup: the roster and the board are Pathfinder's. Nothing is read from or written to .jsmhq/.
+    config.team = [PathfinderRun.coordinatorConfig(repo.root)];
+    config.project.officeName = "Tin & Thyme";
+    config.workflow.review = { enabled: false, tool: "human", command: "" };
+  }
   config.project.hqPort = port;
   const slug = config.project.id;
   const token = agentToken(slug);
@@ -47,7 +57,8 @@ async function main() {
   const setup = await runSetupChecks(repo, config.team);
   for (const c of setup.checks) log.info(`  ${c.status === "ok" ? "✓" : c.status === "warning" ? "!" : "✗"} ${c.label}: ${c.detail}`);
 
-  const hub = new Hub(repo, slug, config, loadPlan(repo.root), setup);
+  const hub = new Hub(repo, slug, config, pf ? { boards: [], tasks: [] } : loadPlan(repo.root), setup);
+  if (pf) hub.persist = false;
   hub.snap.welcome = isNew;
   const sessions = new Sessions(hub, token);
   const inbox = new Inbox(hub, { type: (id, text) => sessions.typeInto(id, text), enter: (id) => sessions.pressEnter(id) });
@@ -75,6 +86,30 @@ async function main() {
   const planner = new Planner(hub, inbox);
   planner.actions = new ActionItems(hub, planner);
 
+  let pfRun: PathfinderRun | null = null;
+  const commands = makeCommands(hub, sessions, planner, inbox, sbx, mcp);
+  if (pf) {
+    const prompt = arg("pf-prompt") ?? "/orchestrate start";
+    pfRun = new PathfinderRun(hub, inbox, sessions, pf, port, token, prompt);
+    const r = pfRun;
+    sessions.external = (id) => r.isExternal(id);
+    sessions.holdsAsking = (id) => r.isAsking(id);
+    const native = { ...commands };
+    commands.startAgent = (id) => (id === COORDINATOR_ID ? r.startCoordinator() : undefined);
+    commands.stopAgent = (id) => (id === COORDINATOR_ID ? native.stopAgent(id) : undefined);
+    commands.assignTask = () => hub.activity("config", null, "Pathfinder owns assignment: start the orchestration instead");
+    commands.setContextAlert = (pct) => r.setContextAlert(Number(pct));
+    commands.ackContextAlert = (id) => typeof id === "string" && r.ackContextAlert(id);
+    commands.checkpointFresh = (id) => typeof id === "string" && void r.handoffs.start(id);
+    commands.retryHandoff = (key) => typeof key === "string" && void r.handoffs.retry(key);
+    commands.resolveActionItem = (id, decision, note) => {
+      if (typeof id === "string" && id.startsWith("gate-")) return r.answerGate(id, decision === "done" ? String(note ?? "") : "");
+      return native.resolveActionItem(id, decision, note);
+    };
+    log.info(`Pathfinder project (${pf.mode} mode) — roster and board come from ${pf.engine}`);
+    pfRun.start();
+  }
+
   const root = dirname(dirname(fileURLToPath(import.meta.url)));
   const distDir = join(root, "dist");
   const uiPort = Number(process.env.HQ_UI_PORT ?? 5173);
@@ -90,15 +125,16 @@ async function main() {
     agentToken: token,
     distDir: dev ? null : distDir,
     allowedOrigins: [uiOrigin, `http://127.0.0.1:${uiPort}`, `http://localhost:${port}`, `http://127.0.0.1:${port}`],
-    commands: makeCommands(hub, sessions, planner, inbox, sbx, mcp),
+    commands,
+    hookRouter: pfRun ? { agentId: COORDINATOR_ID, handle: (e, b) => pfRun!.onHook(e, b) } : undefined,
   });
   sessions.startPolling();
   sbx.startApprovalPolling();
-  const github = new GitHubSync(hub, planner, repo.github);
-  github.start();
+  const github = new GitHubSync(hub, planner, pf ? null : repo.github);
+  if (!pf) github.start();
 
   const url = `${uiOrigin}/?token=${uiToken}`;
-  log.info(`\n\n  JSM HQ is running → ${url}\n`);
+  log.info(`\n\n  Tin & Thyme (control-room) is running → ${url}\n`);
   if (!flag("no-open")) {
     // Windows: rundll32 hands the URL to the default browser without a shell (the token has no special chars, but `&` would).
     const [opener, args] = process.platform === "darwin" ? ["open", [url]] : process.platform === "win32" ? ["rundll32", ["url.dll,FileProtocolHandler", url]] : ["xdg-open", [url]];

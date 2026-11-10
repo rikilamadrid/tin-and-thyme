@@ -52,6 +52,8 @@ interface Options {
   distDir: string | null;
   allowedOrigins: string[];
   commands: Record<string, (...args: unknown[]) => unknown>;
+  /** A workflow adapter that takes this agent's hooks (its whole session tree). */
+  hookRouter?: { agentId: string; handle: (event: string, body: Record<string, unknown>) => { ok: boolean; response?: Record<string, unknown> } };
 }
 
 export function startHttp(o: Options) {
@@ -69,7 +71,9 @@ export function startHttp(o: Options) {
       const [, , agentId, event] = url.pathname.split("/");
       try {
         const body = await readBody(req);
-        const r = handleHook(o.hub, o.inbox, decodeURIComponent(agentId ?? ""), event ?? "", body ? JSON.parse(body) : {});
+        const id = decodeURIComponent(agentId ?? "");
+        const payload = body ? JSON.parse(body) : {};
+        const r = o.hookRouter && id === o.hookRouter.agentId ? o.hookRouter.handle(event ?? "", payload) : handleHook(o.hub, o.inbox, id, event ?? "", payload);
         if (!r.ok) return send(res, 404, "");
         if (r.response) return send(res, 200, JSON.stringify(r.response), "application/json");
         res.writeHead(204);

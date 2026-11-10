@@ -15,6 +15,8 @@ export class Hub {
   snap: OfficeSnapshot;
   private listeners = new Set<Listener>();
   private seq = 0;
+  /** False for a workflow adapter (Pathfinder): the project's files are its own; HQ writes nothing there. */
+  persist = true;
 
   constructor(readonly repo: RepoInfo, readonly slug: string, config: HqConfig, plan: PlanFile, setup: SetupState) {
     this.snap = {
@@ -123,11 +125,12 @@ export class Hub {
   }
 
   configChanged() {
-    saveConfig(this.repo.root, this.snap.config);
+    if (this.persist) saveConfig(this.repo.root, this.snap.config);
     this.emit({ type: "config.updated", config: structuredClone(this.snap.config) });
   }
 
   planChanged() {
+    if (!this.persist) return;
     const plan = { boards: this.snap.boards, tasks: this.snap.tasks };
     savePlan(this.repo.root, plan);
     if (this.snap.config.project.exportPlan) writePlanExport(this.repo.root, this.snap.config, plan);

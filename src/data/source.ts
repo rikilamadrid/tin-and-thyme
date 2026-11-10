@@ -25,6 +25,7 @@ import type {
   SandboxSettings,
   Task,
   WorkflowPatch,
+  WorkflowInfo,
 } from "./types";
 
 export type OfficeEvent =
@@ -46,7 +47,8 @@ export type OfficeEvent =
   | { type: "terminal.output"; agentId: string; data: string }
   | { type: "access.updated"; request: AccessRequest }
   | { type: "mcp.updated"; mcp: McpState }
-  | { type: "action.updated"; item: ActionItem };
+  | { type: "action.updated"; item: ActionItem }
+  | { type: "workflow.updated"; workflow: WorkflowInfo };
 
 export type SimSpeed = 1 | 2 | 4;
 
@@ -112,6 +114,14 @@ export interface OfficeDataSource {
   openEnvFile(agentId: string): void;
   /** Closes an action item; HQ tells the agent (done: with your note; dismissed: continue without it). */
   resolveActionItem(id: string, decision: "done" | "dismissed", note?: string): void;
+  /** Workflow projects: the context alert threshold (percent). */
+  setContextAlert?(pct: number): void;
+  /** The human saw this agent's context alert. */
+  ackContextAlert?(agentId: string): void;
+  /** Checkpoint this worker and ask Pathfinder for a fresh session. */
+  checkpointFresh?(agentId: string): void;
+  /** Retry a failed handoff without creating a second worker. */
+  retryHandoff?(key: string): void;
 
   // MCP servers (Docker Sandboxes' registry)
   refreshMcp(): void;

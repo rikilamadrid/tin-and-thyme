@@ -2,10 +2,11 @@
 // canvas keeps its pixel font. Saved per browser, not in .jsmhq/config.json,
 // because it's a personal choice, not a team setting.
 
-export type FontStyle = "pixel" | "clean" | "mono";
+export type FontStyle = "galley" | "pixel" | "clean" | "mono";
 
 export const FONT_STYLES: { id: FontStyle; label: string; hint: string }[] = [
-  { id: "pixel", label: "Pixel", hint: "Pixelify Sans, the game look" },
+  { id: "galley", label: "Galley", hint: "The roster's system font, easiest to read" },
+  { id: "pixel", label: "Pixel", hint: "Pixelify Sans, the old JSM HQ look" },
   { id: "clean", label: "Clean", hint: "Inter, easiest to read" },
   { id: "mono", label: "Mono", hint: "JetBrains Mono, like a terminal" },
 ];
@@ -13,7 +14,7 @@ export const FONT_STYLES: { id: FontStyle; label: string; hint: string }[] = [
 const KEY = "jsmhq.font";
 export const FONT_EVENT = "jsmhq:font";
 
-/** Terminals need a monospace font: Pixel keeps VT323, Clean and Mono use JetBrains Mono. */
+/** Terminals need a monospace font: Pixel keeps VT323, the others use JetBrains Mono. */
 export function terminalFont(font: FontStyle) {
   return font === "pixel"
     ? { family: '"VT323", ui-monospace, Menlo, monospace', size: 19, lineHeight: 1.05, load: '19px "VT323"' }
@@ -23,14 +24,14 @@ export function terminalFont(font: FontStyle) {
 export function savedFont(): FontStyle {
   try {
     const v = localStorage.getItem(KEY);
-    return FONT_STYLES.some((f) => f.id === v) ? (v as FontStyle) : "pixel";
+    return FONT_STYLES.some((f) => f.id === v) ? (v as FontStyle) : "galley";
   } catch {
-    return "pixel";
+    return "galley";
   }
 }
 
 export function applyFont(font: FontStyle) {
-  if (font === "pixel") delete document.documentElement.dataset.font;
+  if (font === "galley") delete document.documentElement.dataset.font;
   else document.documentElement.dataset.font = font;
 }
 

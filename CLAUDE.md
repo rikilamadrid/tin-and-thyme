@@ -1,0 +1,120 @@
+# Project Agent Guide
+
+This repository uses Pathfinder’s AI-assisted delivery workflow. Read
+`context/execution-mode.md` as `skills/ticket/SKILL.md` defines: human-in-the-loop
+or orchestrator, with human-in-the-loop as the default when the file is absent. Project truth lives in `context/`, and reusable behaviors live in `skills/`.
+
+## Read only what is needed
+
+For delivery work, usually read:
+
+1. `context/current-ticket.md`
+2. the ticket it names, and that ticket's parent feature spec
+3. relevant sections of `context/project-overview.md`
+4. relevant rules from `context/coding-standards.md`
+5. `context/ai-interaction.md`
+6. only the source files needed for the current ticket
+
+Do not load the whole repo by default.
+
+Pathfinder ships two context files: `ai-interaction.md` and
+`coding-standards.md`. Everything else in `context/` — `project-overview.md`,
+`features/`, `tickets/`, `history.md`, `current-ticket.md`, `handoff.md` — is
+written by the workflow that first needs it. A missing file here is normal; skip
+it rather than treating it as an error. `tickets/` in particular exists only
+when local Markdown is the project's ticket store.
+
+Track the durable ones in Git and ignore the two transient ones,
+`current-ticket.md` and `handoff.md`. `context/coding-standards.md` carries the
+rule; do not ignore `context/` wholesale.
+
+## Roles
+
+Lifecycle skills assume their responsible role for each invocation and read its
+contract themselves: planning uses `planner`, ticket implementation and
+completion use `developer`, and ticket review uses `tester`. Orchestration uses
+`orchestrator`; integration uses `integrator`. Each worker implements one active
+ticket in its own worktree; roles never call one another directly.
+
+The human can explicitly override that default with `/role <name>`. Read the
+named `roles/<name>.md` before anything else and follow it for the session. A
+role says what a worker is responsible for, what it reads, and what it must not
+do, where a skill says how to perform a task.
+
+A role narrows responsibility and never widens authority. Approval, acceptance,
+merge, and release remain the human's whether a role was assumed or explicit.
+
+## Project-selected policies
+
+Follow the stack, architecture, commands, Git workflow, review policy, and release process documented in `context/project-overview.md`.
+
+For contributors working on Pathfinder itself, that file does not exist: this
+repository’s Git and release workflow is in `CONTRIBUTING.md` §Git workflow and
+§Releasing. This exception applies only to Pathfinder’s own repository; a
+destination project records its own choices in `context/project-overview.md`.
+
+If a policy is `TBD`, do not invent it. Ask the human or clearly mark it unresolved.
+
+## Before implementation
+
+Restate:
+
+1. Goal
+2. Active ticket
+3. Expected files or areas
+4. Required context
+5. Risks
+6. Assumptions
+7. Verification plan
+8. Out-of-scope work
+9. Current Git state
+10. Intended Git action under the documented workflow
+
+## Human approval
+
+Ask before actions identified in `context/ai-interaction.md`, especially dependency additions, destructive commands, sensitive migrations, commits, merges, and releases.
+
+## Scope and quality
+
+- Implement only the active feature and current ticket.
+- Keep the project stable after each ticket.
+- Do not convert prototype code into production code without an explicit feature decision.
+- Prefer concrete verification over confident narration.
+- Report conflicts between specs, repository reality, and durable context.
+
+## Canonical skills and harness adapters
+
+Canonical Pathfinder skills are tool-neutral and live under `skills/`. Harness-specific representations — `.claude/skills/`, `.agents/skills/` — are generated integration artifacts and must not become independent behavior contracts. Edit the canonical file; regenerate the adapter.
+
+The Claude Code plugin declared by `.claude-plugin/plugin.json` is a third discovery surface, and the only one that generates nothing: it exposes the canonical `skills/` tree itself, namespaced `/pathfinder:<skill>`. There is no plugin copy of any skill and there must never be one. If a discovery surface and its canonical skill disagree, the canonical skill is correct.
+
+An adapter carries the canonical skill's frontmatter and a pointer to it, and nothing else. If an adapter and its canonical skill disagree, the canonical skill is correct.
+
+## Available skills
+
+- `kickstart-pathfinder` — discover and initialize project context
+- `debate-me` — pressure-test and recommend product, stack, workflow, and prototype direction
+- `reverse-engineer` — analyze an external reference and produce an evidence-based reconstruction blueprint
+- `prototype` — create and iterate the cheapest useful validation artifact
+- `to-specs` — generate context-sized feature specs
+- `to-tickets` — decompose one approved Feature into blocker-linked tickets
+- `ticket` — run one action of the ticket delivery loop: `load`, `start`, `review`, `complete`
+- `orchestrate` — coordinate several dependency-safe ticket workers at once in orchestrator mode
+- `debug-issue` — diagnose an observed failure to its root cause, apply the smallest justified fix, and verify it
+- `render-artifact` — compile a typed specification into a deterministic, self-contained visual artifact
+- `map-system` — turn a plain request about a system into a semantic diagram artifact
+- `learn-feature` — create an interactive lesson for a completed feature
+- `learn-codebase` — create a modular learning portal for the repository
+- `teach-feature` — teach the verified current feature from its spec, diff, tests, and implementation
+- `teach-architecture` — explain how completed features fit into the wider application and system architecture
+- `quiz-me` — assess understanding of a recently taught feature with evidence-based questions
+- `challenge-me` — create a small transfer exercise applying a learned concept in a changed context
+- `learning-review` — review accumulated lessons, identify gaps, and create a reinforcement plan
+- `reflect` — review completed work, and the reflection itself, and propose reusable workflow improvements for human approval; `record`, `harvest`, and `resolve` keep them in the improvement ledger
+- `handoff` — preserve useful state between sessions or tools
+- `role` — explicitly override the role the lifecycle would assume
+- `whereami` — report a compact read-only snapshot of the current session
+- `skillsmith` — teach and create small local skills
+- `hooksmith` — turn a described guarantee into one verified hook for the active harness
+- `setup-tracker` — choose the canonical ticket store when it is not local Markdown
+- `blog-post-redactor` — turn shipped work into a technical article built only from repository evidence

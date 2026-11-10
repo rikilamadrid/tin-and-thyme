@@ -79,7 +79,7 @@ export function ChipList({
           Add
         </button>
       </div>
-      {error && <div className="mt-1 text-[12px] text-red">{error}</div>}
+      {error && <div className="mt-1 text-[12px] text-[#ff7a9c]">{error}</div>}
     </div>
   );
 }
@@ -87,7 +87,7 @@ export function ChipList({
 export function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: boolean) => void; label: string }) {
   return (
     <button className="btn flex items-center gap-2 px-2 text-[14px]" role="switch" aria-checked={checked} aria-pressed={checked} onClick={() => onChange(!checked)}>
-      <span className="inline-block h-3 w-3 border-2 border-ink" style={{ background: checked ? "#00e436" : "#fff" }} />
+      <span className="inline-block h-3 w-3 border-2 border-line" style={{ background: checked ? "#00e436" : "#fff" }} />
       {label}
     </button>
   );

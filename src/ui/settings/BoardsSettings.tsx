@@ -22,7 +22,7 @@ export function BoardsSettings() {
             const tasks = snap.tasks.filter((t) => t.boardId === b.id);
             const done = tasks.filter((t) => t.status === "done").length;
             return (
-              <div key={b.id} className="grid grid-cols-[60px_1fr_140px_120px] items-center gap-2.5 border-[3px] border-ink bg-white px-2.5 py-2">
+              <div key={b.id} className="grid grid-cols-[60px_1fr_140px_120px] items-center gap-2.5 border-[3px] border-line bg-card px-2.5 py-2">
                 <span className="font-term text-[19px] text-muted">{b.id}</span>
                 <CommitInput className="field" value={b.title} onCommit={(v) => v.trim() && officeActions.updateBoard(b.id, { title: v.trim() })} />
                 <select className="field" value={b.status} onChange={(e) => officeActions.updateBoard(b.id, { status: e.target.value as BoardStatus })} aria-label={`${b.title} status`}>
@@ -39,7 +39,7 @@ export function BoardsSettings() {
         </div>
       </section>
       <form
-        className="flex items-end gap-2 border-[3px] border-dashed border-ink p-3"
+        className="flex items-end gap-2 border-[3px] border-dashed border-line p-3"
         onSubmit={(e) => {
           e.preventDefault();
           if (!title.trim()) return;

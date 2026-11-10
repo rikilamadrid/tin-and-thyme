@@ -1,0 +1,377 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Controlroom art concepts v2</title>
+<style>html,body{margin:0;background:#0c0b10}canvas{display:block;image-rendering:pixelated}</style></head>
+<body><canvas id="c"></canvas>
+<script>
+// Controlroom concept renderer, polish pass (v2).
+// Every scene shares one floor plan and one moment on a 336 x 308 logical grid.
+// ?t=office|ship|guild renders one scene; ?t=all renders the three side by side.
+// ?s=<whole number> is the pixel scale. No fractional scaling anywhere.
+const q = new URLSearchParams(location.search);
+const S = Math.max(1, Math.round(Number(q.get("s") || 4)));
+const SW = 336, SH = 308, OY = 24, GAP = 10;
+const which = q.get("t") || "office";
+const list = which === "all" ? ["office", "ship", "guild"] : [which];
+const W = list.length * SW + (list.length - 1) * GAP, H = SH;
+const cv = document.getElementById("c"); cv.width = W * S; cv.height = H * S;
+const ctx = cv.getContext("2d"); ctx.imageSmoothingEnabled = false;
+let ox = 0, oy = 0;
+const R = (x, y, w, h, c) => { if (!c) return; ctx.fillStyle = c; ctx.fillRect((x + ox) * S, (y + oy) * S, w * S, h * S); };
+const P = (x, y, c) => R(x, y, 1, 1, c);
+
+// ---------------------------------------------------------------- pixel font (3x5), drawn at 1x or 2x of the grid
+const F = {A:"010101111101101",B:"110101110101110",C:"011100100100011",D:"110101101101110",E:"111100110100111",F:"111100110100100",G:"011100101101011",H:"101101111101101",I:"111010010010111",J:"001001001101010",K:"101101110101101",L:"100100100100111",M:"101111111101101",N:"110101101101101",O:"010101101101010",P:"110101110100100",Q:"010101101110011",R:"110101110101101",S:"011100010001110",T:"111010010010010",U:"101101101101111",V:"101101101101010",W:"101101111111101",X:"101101010101101",Y:"101101010010010",Z:"111001010100111",
+"0":"111101101101111","1":"010110010010111","2":"110001010100111","3":"110001010001110","4":"101101111001001","5":"111100110001110","6":"011100111101111","7":"111001010010010","8":"111101111101111","9":"111101111001110",
+".":"000000000000010","-":"000000111000000",":":"000010000010000","!":"010010010000010","?":"110001010000010","/":"001001010100100",">":"100010001010100","^":"010101000000000"," ":"000000000000000","%":"101001010100101"};
+const pw = (s, z = 1) => s.length * 4 * z - z;
+function ptext(x, y, s, c, z = 1) {
+  s = s.toUpperCase();
+  for (let i = 0; i < s.length; i++) { const g = F[s[i]] ?? F["?"]; for (let j = 0; j < 15; j++) if (g[j] === "1") R(x + (i * 4 + (j % 3)) * z, y + ((j / 3) | 0) * z, z, z, c); }
+}
+
+// ---------------------------------------------------------------- clean UI font for secondary text (positions snapped to the grid)
+const UIF = 'system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif';
+function ufont(size, weight) { ctx.font = `${weight} ${size * S}px ${UIF}`; }
+function uw(s, size = 6, weight = 600) { ufont(size, weight); return Math.ceil(ctx.measureText(s).width / S); }
+function utext(x, y, s, c, size = 6, weight = 600) { ufont(size, weight); ctx.fillStyle = c; ctx.textBaseline = "top"; ctx.fillText(s, (x + ox) * S, (y + oy) * S + Math.round(size * S * 0.04)); }
+/** A pill label in the UI font: zone names, name plates. */
+function pill(x, y, s, fg, bg, size = 6, weight = 700, center = false) { const w = uw(s, size, weight) + 4; const xx = center ? Math.round(x - w / 2) : x; R(xx, y, w, size + 3, bg); utext(xx + 2, y + 1, s, fg, size, weight); return w; }
+
+// ---------------------------------------------------------------- sprites (16 x 20)
+function spr(map, pal, x, y, rows = 20) { map.slice(0, rows).forEach((row, j) => [...row.padEnd(16, ".").slice(0, 16)].forEach((ch, i) => { if (ch !== ".") P(x + i, y + j, pal[ch] ?? "#f0f"); })); }
+// 1px dark outline around a sprite so its silhouette separates from any floor
+function outlined(map, pal, x, y, rows, ink) {
+  const m = map.slice(0, rows).map((r) => r.padEnd(16, ".").slice(0, 16));
+  const solid = (i, j) => j >= 0 && j < m.length && i >= 0 && i < 16 && m[j][i] !== ".";
+  for (let j = -1; j <= m.length; j++) for (let i = -1; i <= 16; i++) if (!solid(i, j) && (solid(i - 1, j) || solid(i + 1, j) || solid(i, j - 1) || solid(i, j + 1))) P(x + i, y + j, ink);
+  spr(map, pal, x, y, rows);
+}
+
+// ---------------------------------------------------------------- icons 5x5
+const ICON = { work: [".....", ".###.", ".###.", ".###.", "....."], review: [".##..", "#..#.", "#..#.", ".##..", "...##"], needs: ["..#..", ".###.", "##.##", ".###.", "..#.."], wait: ["#####", ".#.#.", "..#..", ".#.#.", "#####"], off: [".###.", "#....", "#..#.", "#....", ".###."] };
+const icon = (k, x, y, c, z = 1) => ICON[k].forEach((r, j) => [...r].forEach((ch, i) => ch === "#" && R(x + i * z, y + j * z, z, z, c)));
+
+// ---------------------------------------------------------------- status tags (first read: NEEDS YOU > ticket IDs)
+function needsTag(cx, y, T) {
+  const s = "NEEDS YOU", w = pw(s, 2) + 16, h = 16, x = Math.round(cx - w / 2);
+  R(x - 2, y - 2, w + 4, h + 4, T.ink); R(x - 1, y - 1, w + 2, h + 2, T.alert); R(x, y, w, h, T.ink); R(x + 1, y + 1, w - 2, h - 2, T.alert);
+  icon("needs", x + 2, y + 3, T.ink, 2); ptext(x + 14, y + 3, s, T.ink, 2);
+  R(cx - 3, y + h + 2, 7, 1, T.ink); R(cx - 2, y + h + 3, 5, 1, T.ink); R(cx - 1, y + h + 4, 3, 1, T.ink); P(cx, y + h + 5, T.ink);
+}
+/** Worker / reviewer tag: big ticket ID, small role word. Optional CTX meter row. */
+function ticketTag(cx, y, kind, id, role, T, ctxPct) {
+  const idW = uw(id, 8, 800), roleW = uw(role, 5, 700), w = Math.max(3 + 6 + idW + 2 + roleW + 3, ctxPct == null ? 0 : 44), h = ctxPct == null ? 12 : 19, x = Math.round(cx - w / 2);
+  R(x, y, w, h, T.ink); R(x + 1, y + 1, w - 2, h - 2, T.tagBg);
+  icon(kind, x + 3, y + 3, T.tagFg); utext(x + 9, y + 1, id, T.tagFg, 8, 800);
+  utext(x + 9 + idW + 2, y + 3, role, T.roleFg, 5, 700);
+  if (ctxPct != null) {
+    R(x + 1, y + 11, w - 2, 1, T.ctxOff);
+    utext(x + 3, y + 12, "CTX", T.tagFg, 4.5, 800);
+    const segs = 8, on = Math.round((ctxPct / 100) * segs), sx = x + 14;
+    for (let i = 0; i < segs; i++) { R(sx + i * 2, y + 13, 1, 4, i < on ? T.tagFg : T.ctxOff); }
+    utext(sx + segs * 2 + 2, y + 12, `${ctxPct}%`, T.tagFg, 4.5, 800);
+  }
+  R(cx - 1, y + h, 3, 1, T.ink); P(cx, y + h + 1, T.ink);
+}
+function waitTag(cx, y, id, T) {
+  const word = "needs a worker", w = 2 + 7 + uw(id, 6, 800) + 3 + uw(word, 5, 600) + 3, h = 10, x = Math.round(cx - w / 2);
+  R(x, y, w, h, T.floorQuiet);
+  for (let i = 0; i < w; i += 2) { P(x + i, y, T.muted); P(x + i, y + h - 1, T.muted); }
+  for (let j = 0; j < h; j += 2) { P(x, y + j, T.muted); P(x + w - 1, y + j, T.muted); }
+  icon("wait", x + 3, y + 2, T.muted); utext(x + 9, y + 1, id, T.muted, 6, 800); utext(x + 9 + uw(id, 6, 800) + 3, y + 2, word, T.muted, 5, 600);
+  P(cx, y + h + 1, T.muted); P(cx, y + h + 3, T.muted);
+}
+function offTag(cx, y, T) {
+  const s = "OFF DUTY", w = 2 + 7 + uw(s, 5.5, 700) + 3, h = 10, x = Math.round(cx - w / 2);
+  R(x, y, w, h, T.ink); R(x + 1, y + 1, w - 2, h - 2, T.tagBg); icon("off", x + 3, y + 2, T.tagFg); utext(x + 9, y + 2, s, T.roleFg, 5.5, 700);
+  R(cx - 1, y + h, 3, 1, T.ink);
+}
+const plate = (cx, y, s, T) => pill(cx, y, s, T.plateFg, T.plateBg, 5.5, 700, true);
+
+// ---------------------------------------------------------------- belt, parcels, MAIN
+function belt(T) {
+  const y = 184, x0 = 12, xT = 298;
+  R(x0, y - 1, xT - x0 + 10, 12, T.ink); R(x0, y, xT - x0 + 10, 10, T.belt); R(x0, y, xT - x0 + 10, 1, T.beltEdge); R(x0, y + 9, xT - x0 + 10, 1, T.beltEdge);
+  R(xT - 1, 92, 12, 102, T.ink); R(xT, 92, 10, 101, T.belt); R(xT, 92, 1, 101, T.beltEdge); R(xT + 9, 92, 1, 101, T.beltEdge);
+  const chev = (x, yy) => { for (let k = 0; k < 2; k++) { P(x - 1 + k, yy + 2, T.arrow); P(x + k, yy + 3, T.arrow); P(x + 1 + k, yy + 4, T.arrow); P(x + k, yy + 5, T.arrow); P(x - 1 + k, yy + 6, T.arrow); } };
+  for (let x = x0 + 8; x < xT - 4; x += 12) chev(x, y + 1);
+  for (let yy = 180; yy > 96; yy -= 12) for (let k = 0; k < 2; k++) { P(xT + 2, yy + 3 - k, T.arrow); P(xT + 3, yy + 2 - k, T.arrow); P(xT + 4, yy + 1 - k, T.arrow); P(xT + 5, yy + 2 - k, T.arrow); P(xT + 6, yy + 3 - k, T.arrow); }
+}
+function parcel(x, y, T) { R(x - 1, y - 1, 11, 9, T.ink); R(x, y, 9, 7, T.parcel); R(x, y, 9, 1, T.parcelHi); R(x + 4, y, 1, 7, T.tape); }
+function idFlag(cx, y, id, T) { const w = uw(id, 8, 800) + 6, x = Math.round(cx - w / 2); R(x, y, w, 12, T.ink); R(x + 1, y + 1, w - 2, 10, T.tagBg); utext(x + 3, y + 1, id, T.tagFg, 8, 800); R(cx - 1, y + 12, 3, 2, T.ink); }
+function mainSign(T) {
+  R(284, 14, 38, 26, T.ink); R(286, 16, 34, 22, T.mainBg); ptext(303 - Math.floor(pw("MAIN", 2) / 2), 19, "MAIN", T.mainFg, 2);
+  const sub = T.mainSub; utext(303 - Math.floor(uw(sub, 5, 700) / 2), 30, sub, T.mainFg, 5, 700);
+}
+
+// ================================================================ THEMES
+const THEMES = {};
+
+THEMES.office = {
+  title: "01 · THE PLAYROOM OFFICE", ink: "#1d1426", alert: "#ffd23f", tagBg: "#fff8ec", tagFg: "#1d1426", roleFg: "#5a3a6e", ctxOff: "#d9cdbd", muted: "#8a7d93",
+  plateBg: "#2f2338", plateFg: "#fff8ec", zoneBg: "#2f2338", zoneFg: "#fff8ec", floorQuiet: "#e3b07c",
+  belt: "#3f3549", beltEdge: "#6a5d7c", arrow: "#ffd23f", parcel: "#c98a4b", parcelHi: "#e7b071", tape: "#7b4c2a",
+  mainBg: "#ffd23f", mainFg: "#1d1426", mainSub: "DOCK", panelBg: "#241b2d", panelFg: "#fff8ec", panelMuted: "#b8abc4", spriteBg: "#e3b07c",
+  sentence: "One flat rug per zone on a calm wood floor, so each place reads as a room; the dark belt is the only line that leads anywhere, and it ends at MAIN.",
+  ground() { R(0, 0, SW, 216, "#64b56e"); [[3, 40], [2, 120], [330, 60], [329, 150], [3, 200]].forEach(([x, y]) => R(x, y, 4, 4, "#3f8f4e")); },
+  floor() {
+    R(8, 8, 320, 200, "#352638");
+    R(12, 12, 270, 192, "#dca36a");
+    for (let y = 16; y < 204; y += 8) R(12, y, 270, 1, "#d39a61"); // quiet plank seams only
+    R(12, 12, 270, 30, "#ecdcc0"); R(12, 41, 270, 2, "#c4a982");
+    R(282, 12, 42, 192, "#2b2e44");
+  },
+  board() {
+    R(14, 11, 96, 46, "#1d1426"); R(15, 12, 94, 44, "#fffdf6");
+    R(15, 12, 94, 13, "#1d1426"); ptext(18, 15, "TASK BOARD", "#ffd23f", 2);
+    ["TODO", "DOING", "REVIEW", "DONE"].forEach((h, i) => { utext(17 + i * 23, 26, h, "#5a4a63", 5, 800); if (i) R(15 + i * 23, 26, 1, 29, "#e2d8c8"); });
+    const card = (col, row, id, c, mark) => { const x = 16 + col * 23, y = 33 + row * 11; R(x, y, 21, 10, c); utext(x + 2, y + 1, id, "#1d1426", 7.5, 800); if (mark) icon(mark, x + 15, y + 2, "#1d1426"); };
+    card(0, 0, "3.4", "#ffe9a8", "wait"); card(0, 1, "3.5", "#ffe9a8"); card(1, 0, "3.2", "#a8e0ff", "work"); card(1, 1, "3.3", "#a8e0ff", "work"); card(2, 0, "3.1", "#ffc6d9", "review"); card(3, 0, "2.9", "#c6f2b6");
+  },
+  sign() { R(126, 13, 56, 9, "#7b4c2a"); R(127, 14, 54, 7, "#e7b071"); utext(154 - Math.floor(uw("Controlroom", 5.5, 800) / 2), 14, "Controlroom", "#3a2a3c", 5.5, 800); },
+  kitchen() {
+    R(212, 26, 50, 14, "#8f5e3a"); R(212, 26, 50, 2, "#c98a4b");
+    R(264, 14, 14, 26, "#f4f4f4"); R(264, 26, 14, 1, "#c4c4c4"); R(275, 18, 1, 5, "#999"); R(275, 29, 1, 6, "#999");
+    R(218, 18, 8, 8, "#1d1426"); R(220, 20, 4, 3, "#e05d5d");
+    R(232, 21, 6, 5, "#5fb36a"); R(244, 22, 3, 4, "#ff8f6b"); R(249, 22, 3, 4, "#6bb6ff"); R(254, 22, 3, 4, "#ffd23f");
+    R(212, 44, 66, 18, "#efe2cb"); R(226, 48, 22, 10, "#c98a4b"); R(226, 48, 22, 2, "#e7b071");
+    pill(213, 3, "Kitchen", this.zoneFg, this.zoneBg, 6, 700);
+  },
+  lounge() {
+    R(206, 68, 70, 50, "#9a7ad9");
+    R(212, 74, 58, 12, "#2f2338"); R(213, 75, 56, 10, "#3fa7a0"); R(213, 75, 56, 2, "#62c7bf"); R(212, 84, 6, 12, "#3fa7a0"); R(264, 84, 6, 12, "#3fa7a0"); R(218, 86, 46, 8, "#56bdb5");
+    R(272, 104, 4, 10, "#2f7a3e"); R(271, 101, 6, 4, "#5fb36a");
+    pill(207, 120, "Lounge", this.zoneFg, this.zoneBg, 6, 700);
+  },
+  huddle() {
+    R(16, 66, 30, 22, "#7b4c2a"); for (let s = 0; s < 3; s++) { R(17, 67 + s * 7, 28, 6, "#5a3820"); for (let b = 0; b < 7; b++) R(18 + b * 4, 68 + s * 7, 3, 5, ["#e05d5d", "#6bb6ff", "#ffd23f", "#5fb36a", "#c38fff", "#ff8f6b", "#fff4e0"][(b + s) % 7]); }
+    R(56, 66, 40, 24, "#2f7a3e"); R(57, 67, 38, 22, "#3e9a52"); R(75, 67, 1, 22, "#fff4e0"); R(57, 77, 38, 1, "#fff4e0"); R(74, 65, 3, 26, "#ddd"); R(64, 94, 4, 4, "#ff8f6b");
+  },
+  command() { R(116, 44, 76, 42, "#c8443a"); R(118, 46, 72, 38, "#d65a4b"); },
+  commandFront() { R(124, 64, 60, 12, "#7b4c2a"); R(124, 64, 60, 2, "#c98a4b"); R(127, 57, 14, 8, "#1d1426"); R(128, 58, 12, 5, "#7fd8c4"); R(167, 57, 14, 8, "#1d1426"); R(168, 58, 12, 5, "#7fd8c4"); },
+  station(x, y) { R(x, y, 44, 40, "#5d86cf"); R(x, y, 2, 40, "#d0d4e0"); R(x + 42, y, 2, 40, "#d0d4e0"); R(x, y, 44, 2, "#d0d4e0"); },
+  stationFront(x, y, lit, empty) {
+    R(x + 4, y + 20, 36, 8, "#8f5e3a"); R(x + 4, y + 20, 36, 2, "#c98a4b");
+    R(x + 26, y + 11, 13, 9, "#1d1426"); R(x + 27, y + 12, 11, 6, lit ? "#7fd8c4" : "#4a4a5a");
+    if (empty) { R(x + 14, y + 30, 10, 6, "#2f2338"); R(x + 15, y + 31, 8, 4, "#6a5d7c"); }
+  },
+  gate() { R(194, 163, 4, 33, "#2f2338"); R(228, 163, 4, 33, "#2f2338"); R(193, 160, 40, 10, "#1d1426"); R(194, 161, 38, 8, "#ff8fb1"); utext(213 - Math.floor(uw("Review gate", 5.5, 800) / 2), 162, "Review gate", "#1d1426", 5.5, 800); },
+  main() { R(284, 40, 38, 52, "#1d1426"); R(288, 44, 30, 46, "#9aa3b8"); for (let y = 46; y < 90; y += 4) R(288, y, 30, 1, "#828ba1"); mainSign(this); },
+  sprites: {
+    orch: { name: "Maple", role: "Orchestrator", prop: "hair bun · headset · clipboard",
+      map: ["......hhhh......", ".....hhhhhh.....", "......hhhh......", "....hhhhhhhh....", "...hhhhhhhhhh...", "..ahsssssssssha.", "..asskssssksssa.", "..asssssssssssa.", "..aa.ssmmmss....", "....ssssssss....", "...cccccccccc.ww", "..ccccwwwwcccwgw", ".cccccccccccc.ww", ".scccccccccccsww", "...cccccccccc...", "...dddddddddd...", "...ddd....ddd...", "...ddd....ddd...", "...ddd....ddd...", "..kkkk....kkkk.."],
+      pal: { h: "#6b3b23", a: "#1d1426", s: "#f1c19a", k: "#1d1426", m: "#b0574a", c: "#e05d5d", w: "#fff8ec", g: "#8f5e3a", d: "#2f2338" } },
+    dev: { name: "Beans", role: "Developer", prop: "pom beanie · headphones · laptop",
+      map: [".......ww.......", "......cccc......", ".....cccccc.....", "....cccccccc....", "...cccccccccc...", "..hhsssssssshh..", ".hhhskssssksshhh", ".hhhssssssssshh.", "....sssmmsss....", ".....ssssss.....", "...dddddddddd...", "..dgggggggggggd.", "..sgwwwwwwwwwgs.", "..dgggggggggggd.", "...dddddddddd...", "...dddddddddd...", "...jjj....jjj...", "...jjj....jjj...", "...jjj....jjj...", "..kkkk....kkkk.."],
+      pal: { w: "#fff8ec", c: "#ff8f6b", h: "#1d1426", s: "#c98a62", k: "#1d1426", m: "#8a4a3a", d: "#3f6fb5", g: "#9aa3b8", j: "#2f2338" }, wPal: { w: "#7fd8c4" } },
+    rev: { name: "Lens", role: "Reviewer", prop: "flat-top · round glasses · magnifier",
+      map: ["....hhhhhhhh....", "...hhhhhhhhhh...", "...hhhhhhhhhh...", "...ssssssssss...", "..aaaaassaaaaa..", "..awkwassawkwa..", "..aaaaassaaaaa..", "...ssssssssss...", "....sssmmsss.kkk", "....ssssss..kwwk", "..cccccccccckwwk", ".ccccccccccc.kk.", ".sccccccccccs.k.", "..cccccccccc..k.", "..cccccccccc....", "...dddddddddd...", "...ddd....ddd...", "...ddd....ddd...", "...ddd....ddd...", "..kkkk....kkkk.."],
+      pal: { h: "#e7b071", a: "#1d1426", w: "#cfefff", s: "#f1c19a", k: "#1d1426", m: "#b0574a", c: "#4fae5e", d: "#2f5a3a" } },
+    dev2: { name: "Dot", pal: { w: "#1d1426", c: "#ffd23f", h: "#1d1426", s: "#8a5a3c", k: "#1d1426", m: "#5a3020", d: "#3fa7a0", g: "#9aa3b8", j: "#2f2338" } },
+    off: { name: "Naps", pal: { w: "#fff8ec", c: "#c38fff", h: "#1d1426", s: "#f1c19a", k: "#1d1426", m: "#b0574a", d: "#7a52b5", g: "#9aa3b8", j: "#2f2338" } },
+  },
+};
+
+THEMES.ship = {
+  title: "02 · STARSHIP CONTROLROOM", ink: "#04050d", alert: "#ff9e1b", tagBg: "#e9fbff", tagFg: "#04050d", roleFg: "#1f4f7a", ctxOff: "#b9d3e0", muted: "#a9bde0",
+  plateBg: "#bff4ff", plateFg: "#04050d", zoneBg: "#58f0ff", zoneFg: "#04050d", floorQuiet: "#1c2540",
+  belt: "#262b39", beltEdge: "#ffcf3a", arrow: "#58f0ff", parcel: "#7a88a6", parcelHi: "#a9b6d2", tape: "#ffcf3a",
+  mainBg: "#7dff8a", mainFg: "#04050d", mainSub: "CARGO", panelBg: "#0b1022", panelFg: "#e9fbff", panelMuted: "#a9bde0", spriteBg: "#1c2540",
+  sentence: "Plain dark deck plates let every lit console stand out; one hazard-edged cargo belt is the only route, and the command chair sits alone on a ring of light.",
+  ground() { R(0, 0, SW, 216, "#04050d"); for (let i = 0; i < 60; i++) P((i * 97 + 13) % SW, (i * 57 + 7) % 214, i % 7 ? "#2e3860" : "#d6e6ff"); },
+  floor() {
+    R(6, 6, 324, 204, "#5d6a85"); R(8, 8, 320, 200, "#1b2236");
+    R(12, 12, 270, 192, "#1c2540"); for (let y = 24; y < 204; y += 24) R(12, y, 270, 1, "#222c4a"); for (let x = 24; x < 282; x += 24) R(x, 42, 1, 162, "#222c4a");
+    R(12, 12, 270, 30, "#121a2c"); R(12, 41, 270, 2, "#58f0ff");
+    R(282, 12, 42, 192, "#141824");
+    [[192, 16], [204, 16]].forEach(([x, y]) => { R(x, y, 10, 10, "#04050d"); P(x + 3, y + 3, "#fff"); P(x + 7, y + 6, "#9ad"); });
+  },
+  board() {
+    R(14, 11, 96, 46, "#58f0ff"); R(15, 12, 94, 44, "#061c2e");
+    R(15, 12, 94, 13, "#58f0ff"); ptext(18, 15, "DISPATCH", "#04050d", 2);
+    ["QUEUE", "LIVE", "SCAN", "SENT"].forEach((h, i) => { utext(17 + i * 23, 26, h, "#9fe9ff", 5, 800); if (i) R(15 + i * 23, 26, 1, 29, "#0d4a66"); });
+    const card = (col, row, id, c, mark) => { const x = 16 + col * 23, y = 33 + row * 11; R(x, y, 21, 10, "#04050d"); R(x, y, 2, 10, c); utext(x + 4, y + 1, id, c, 7.5, 800); if (mark) icon(mark, x + 15, y + 2, c); };
+    card(0, 0, "3.4", "#ffcf3a", "wait"); card(0, 1, "3.5", "#ffcf3a"); card(1, 0, "3.2", "#58f0ff", "work"); card(1, 1, "3.3", "#58f0ff", "work"); card(2, 0, "3.1", "#ff6bd6", "review"); card(3, 0, "2.9", "#7dff8a");
+  },
+  sign() { R(126, 13, 56, 9, "#58f0ff"); R(127, 14, 54, 7, "#04050d"); utext(154 - Math.floor(uw("Controlroom", 5.5, 800) / 2), 14, "Controlroom", "#58f0ff", 5.5, 800); },
+  kitchen() {
+    R(212, 14, 66, 28, "#262f4a"); R(212, 14, 66, 1, "#58f0ff");
+    R(216, 18, 14, 18, "#3a4670"); R(218, 20, 10, 8, "#04050d"); R(220, 22, 6, 4, "#ff9e1b");
+    R(236, 18, 8, 18, "#3a4670"); R(237, 20, 6, 3, "#7dff8a"); R(237, 25, 6, 3, "#7dff8a");
+    R(250, 22, 24, 12, "#58607a"); R(250, 22, 24, 1, "#9aa8c4"); R(254, 24, 4, 3, "#ff6bd6"); R(262, 24, 4, 3, "#ffcf3a");
+    R(212, 44, 66, 18, "#18203a"); R(232, 48, 26, 8, "#58607a"); R(232, 48, 26, 1, "#9aa8c4");
+    pill(213, 3, "Galley", this.zoneFg, this.zoneBg, 6, 700);
+  },
+  lounge() {
+    R(206, 68, 72, 50, "#141c33"); R(206, 68, 72, 1, "#ff6bd6"); R(206, 117, 72, 1, "#ff6bd6");
+    R(210, 72, 64, 8, "#04050d"); for (let i = 0; i < 6; i++) P(214 + i * 10, 74 + (i % 3) * 2, "#d6e6ff");
+    R(214, 84, 56, 10, "#ff6bd6"); R(215, 85, 54, 8, "#c94aa9"); R(215, 85, 54, 1, "#ff9ce4");
+    pill(207, 120, "Rec deck", "#04050d", "#ff6bd6", 6, 700);
+  },
+  huddle() {
+    R(18, 64, 34, 34, "#0f1a33"); R(20, 66, 30, 30, "#08293f"); for (let r = 5; r < 15; r += 5) for (let a = 0; a < 40; a++) { const t = a / 40 * 6.283; P(35 + Math.round(Math.cos(t) * r), 81 + Math.round(Math.sin(t) * r), "#1d6a8a"); } P(40, 76, "#ffcf3a"); P(30, 84, "#7dff8a");
+    pill(18, 100, "Nav", "#04050d", "#58f0ff", 6, 700);
+    R(60, 66, 30, 20, "#3a4670"); R(61, 67, 28, 18, "#26304d"); for (let i = 0; i < 6; i++) R(63 + i * 4, 74 + (i % 2) * 4, 2, 2, ["#ff9e1b", "#58f0ff", "#7dff8a"][i % 3]);
+  },
+  command() { for (let r = 26; r > 22; r -= 1) for (let a = 0; a < 140; a++) { const t = a / 140 * 6.283; P(154 + Math.round(Math.cos(t) * r * 1.4), 64 + Math.round(Math.sin(t) * r * 0.78), r > 24 ? "#58f0ff" : "#0d4a66"); } for (let yy = 46; yy < 84; yy++) { const half = Math.floor(Math.sqrt(Math.max(0, 1 - ((yy - 64) / 17) ** 2)) * 31); R(154 - half, yy, half * 2, 1, "#16223e"); } },
+  commandFront() { R(128, 66, 52, 9, "#3a4670"); R(128, 66, 52, 1, "#58f0ff"); R(131, 68, 10, 5, "#04050d"); R(132, 69, 8, 3, "#ff9e1b"); R(167, 68, 10, 5, "#04050d"); R(168, 69, 8, 3, "#7dff8a"); },
+  station(x, y) { R(x, y, 44, 40, "#17223f"); R(x, y, 44, 1, "#58f0ff"); R(x, y + 39, 44, 1, "#58f0ff"); },
+  stationFront(x, y, lit, empty) {
+    R(x + 4, y + 20, 36, 8, "#3a4670"); R(x + 4, y + 20, 36, 1, "#9aa8c4");
+    R(x + 24, y + 9, 16, 11, "#04050d"); R(x + 25, y + 10, 14, 9, lit ? "#0d4a66" : "#141824"); if (lit) for (let i = 0; i < 3; i++) R(x + 27 + i * 4, y + 13 - (i % 2), 3, 2, ["#58f0ff", "#7dff8a", "#ff9e1b"][i % 3]);
+    if (empty) { R(x + 14, y + 30, 12, 6, "#26304d"); R(x + 15, y + 31, 10, 4, "#3a4670"); }
+  },
+  gate() { R(192, 163, 6, 33, "#58607a"); R(228, 163, 6, 33, "#58607a"); R(191, 160, 44, 10, "#04050d"); R(192, 161, 42, 8, "#ff6bd6"); utext(213 - Math.floor(uw("Scan gate", 5.5, 800) / 2), 162, "Scan gate", "#04050d", 5.5, 800); },
+  main() { R(284, 40, 38, 52, "#58607a"); R(286, 42, 34, 48, "#141824"); for (let i = 0; i < 8; i++) R(288 + i * 4, 44, 2, 44, i % 2 ? "#ffcf3a" : "#04050d"); mainSign(this); },
+  sprites: {
+    orch: { name: "Vega", role: "Orchestrator", prop: "peaked cap · cape · epaulettes",
+      map: ["....kkkkkkkk....", "...kaaaaaaaak...", "...kaaayyaaak...", "..kkkkkkkkkkkk..", "...ssssssssss...", "...sskssssksss..", "...ssssssssss...", "....sssmmsss....", ".....ssssss.....", "cccccccccccccccc", "cyyccccccccccyyc", "ccccccaacccccccc", "cccccccaaccccccc", "scccccccaaccccs.", ".cccccccccccccc.", "..cccccccccccc..", "...dddddddddd...", "...ddd....ddd...", "...ddd....ddd...", "..kkkk....kkkk.."],
+      pal: { k: "#04050d", a: "#ffcf3a", y: "#ffcf3a", s: "#e8b48f", m: "#9a5040", c: "#d63a3a", d: "#2a2f3d" } },
+    dev: { name: "Spark", role: "Developer", prop: "antenna helmet · goggles · wrench",
+      map: [".......aa.......", "........a.......", "........a.......", ".....gggggg.....", "....gggggggg....", "...gwwwggwwwg...", "...gwkwggwkwg...", "...ssssssssss...", "....sssmmsss....", ".....ssssss.....", "...cccccccccc.gg", "..ccccaaccccc.gg", "..cccccccccc..g.", "..scccccccccssg.", "...cccccccccc...", "...dddddddddd...", "...ddd....ddd...", "...ddd....ddd...", "...ddd....ddd...", "..kkkk....kkkk.."],
+      pal: { a: "#ff9e1b", g: "#a9b6d2", w: "#58f0ff", k: "#04050d", s: "#c98a62", m: "#7a4030", c: "#ffcf3a", d: "#2a2f3d" } },
+    rev: { name: "Orbit", role: "Reviewer", prop: "crest · visor · scanner",
+      map: ["......hh........", ".....hhhh.......", "....hhhhhh......", "...hhhhhhhhh....", "...ssssssssss...", "..aaaaaaaaaaaa..", "..awwwwwwwwwwa..", "...ssssssssss...", "....sssmmsss...a", ".....ssssss....a", "...ccccccccc.ggg", "..cccccccccc.gwg", "..cccccccccc.ggg", "..scccccccccsg..", "...cccccccccc...", "...dddddddddd...", "...ddd....ddd...", "...ddd....ddd...", "...ddd....ddd...", "..kkkk....kkkk.."],
+      pal: { h: "#c9d4ff", a: "#04050d", w: "#ff6bd6", s: "#8ad1c0", m: "#3a7a6a", k: "#04050d", c: "#3a6df0", g: "#a9b6d2", d: "#1b2236" } },
+    dev2: { name: "Flux", pal: { a: "#ff9e1b", g: "#c9d4ff", w: "#58f0ff", k: "#04050d", s: "#e8b48f", m: "#9a5040", c: "#58f0ff", d: "#2a2f3d" } },
+    off: { name: "Drift", pal: { a: "#ff9e1b", g: "#a9b6d2", w: "#26304d", k: "#04050d", s: "#e8b48f", m: "#9a5040", c: "#7dff8a", d: "#2a2f3d" } },
+  },
+};
+
+THEMES.guild = {
+  title: "03 · WILD CARD: THE POTION GUILD", ink: "#1a1020", alert: "#ff5c8a", tagBg: "#fff4dc", tagFg: "#1a1020", roleFg: "#6a2c55", ctxOff: "#e0cfb3", muted: "#cfc2d6",
+  plateBg: "#4a2c55", plateFg: "#fff4dc", zoneBg: "#4a2c55", zoneFg: "#fff4dc", floorQuiet: "#7d7690",
+  belt: "#6b4a2e", beltEdge: "#3e2a1a", arrow: "#a6ffb0", parcel: "#7de0c8", parcelHi: "#c4fff0", tape: "#4a2c55",
+  mainBg: "#ffe680", mainFg: "#1a1020", mainSub: "VAULT", panelBg: "#2a1a33", panelFg: "#fff4dc", panelMuted: "#cbb9d4", spriteBg: "#7d7690",
+  sentence: "A lit cauldron means a brewer at work and a cold one means an open bench; the archmage glows on a rune circle, and every potion passes the mirror on its way to MAIN.",
+  ground() { R(0, 0, SW, 216, "#1f3d2c"); for (let i = 0; i < 14; i++) P((i * 71) % SW, (i * 43) % 214, "#ffe680"); },
+  floor() {
+    R(6, 6, 324, 204, "#5a5266"); R(8, 8, 320, 200, "#6e6680");
+    R(12, 12, 270, 192, "#837c94"); for (let y = 20; y < 204; y += 10) R(12, y, 270, 1, "#7a7389"); for (let y = 12; y < 204; y += 20) for (let x = 22 + ((y / 20) % 2) * 15; x < 282; x += 30) R(x, y, 1, 10, "#7a7389");
+    R(12, 12, 270, 30, "#4a3f58"); R(12, 41, 270, 2, "#2e2638");
+    R(282, 12, 42, 192, "#3a2f46");
+    [[114, 24], [194, 24]].forEach(([x, y]) => { R(x, y + 4, 2, 6, "#6b4a2e"); R(x - 1, y, 4, 4, "#ffb347"); P(x, y - 1, "#ffe680"); });
+  },
+  board() {
+    R(14, 11, 96, 46, "#6b4a2e"); R(15, 12, 94, 44, "#d1a56e");
+    R(15, 12, 94, 13, "#4a2c55"); ptext(18, 15, "QUESTS", "#ffe680", 2);
+    ["ASKED", "BREW", "TEST", "DONE"].forEach((h, i) => utext(17 + i * 23, 26, h, "#3e2a1a", 5, 800));
+    const card = (col, row, id, mark) => { const x = 16 + col * 23, y = 33 + row * 11; R(x, y, 21, 10, "#fff4dc"); P(x + 10, y, "#ff5c8a"); utext(x + 2, y + 1, id, "#1a1020", 7.5, 800); if (mark) icon(mark, x + 15, y + 2, "#4a2c55"); };
+    card(0, 0, "3.4", "wait"); card(0, 1, "3.5"); card(1, 0, "3.2", "work"); card(1, 1, "3.3", "work"); card(2, 0, "3.1", "review"); card(3, 0, "2.9");
+  },
+  sign() { R(126, 13, 56, 9, "#4a2c55"); R(127, 14, 54, 7, "#7a4a8a"); utext(154 - Math.floor(uw("Controlroom", 5.5, 800) / 2), 14, "Controlroom", "#ffe680", 5.5, 800); },
+  kitchen() {
+    R(212, 14, 30, 28, "#3e2a1a"); R(214, 16, 26, 24, "#2a1a10"); R(218, 26, 18, 10, "#ff7a2f"); R(220, 28, 14, 6, "#ffb347");
+    R(222, 20, 10, 7, "#3a3a46"); R(223, 21, 8, 5, "#55556a"); P(226, 18, "#ddd"); P(228, 17, "#ddd");
+    R(246, 18, 32, 22, "#6b4a2e"); for (let s = 0; s < 2; s++) { R(247, 20 + s * 10, 30, 1, "#3e2a1a"); for (let j = 0; j < 6; j++) R(249 + j * 5, 16 + s * 10, 3, 4, ["#a6ffb0", "#ff5c8a", "#ffe680", "#7de0c8", "#b07ac0", "#ffb347"][(j + s) % 6]); }
+    R(212, 44, 66, 18, "#7a6650"); R(228, 48, 24, 10, "#6b4a2e"); R(228, 48, 24, 2, "#8f6a44");
+    pill(213, 3, "Tea hearth", this.zoneFg, this.zoneBg, 6, 700);
+  },
+  lounge() {
+    R(206, 68, 72, 50, "#8f3a52");
+    R(212, 76, 18, 16, "#4a2c55"); R(214, 80, 14, 10, "#7a4a8a"); R(252, 76, 18, 16, "#4a2c55"); R(254, 80, 14, 10, "#7a4a8a");
+    R(234, 100, 18, 12, "#6b4a2e"); R(236, 102, 14, 8, "#c79a63"); R(272, 100, 6, 14, "#3e2a1a"); R(272, 98, 6, 3, "#a6ffb0");
+    pill(207, 120, "Lounge", this.zoneFg, this.zoneBg, 6, 700);
+  },
+  huddle() {
+    R(16, 64, 40, 24, "#3e2a1a"); for (let s = 0; s < 3; s++) { R(17, 65 + s * 7, 38, 6, "#2a1a10"); for (let b = 0; b < 9; b++) R(18 + b * 4, 66 + s * 7, 3, 5, ["#7a2f44", "#4a2c55", "#2e5a3e", "#6b4a2e", "#3a4670"][(b + s) % 5]); }
+    R(64, 66, 20, 20, "#2a1a10"); R(66, 68, 16, 16, "#3a6df0"); R(70, 72, 6, 4, "#5fb36a"); R(72, 78, 5, 3, "#5fb36a"); R(73, 86, 2, 6, "#6b4a2e"); R(68, 91, 12, 2, "#6b4a2e");
+  },
+  command() { for (let r = 26; r > 22; r--) for (let a = 0; a < 140; a++) { const t = a / 140 * 6.283; P(154 + Math.round(Math.cos(t) * r * 1.4), 64 + Math.round(Math.sin(t) * r * 0.78), r % 2 ? "#5a4a78" : "#c08ad0"); } for (let k = 0; k < 8; k++) { const t = k / 8 * 6.283; R(152 + Math.round(Math.cos(t) * 34), 63 + Math.round(Math.sin(t) * 19), 3, 3, "#ffe680"); } },
+  commandFront() { R(144, 66, 22, 12, "#4a2c55"); R(142, 66, 26, 3, "#7a4a8a"); R(148, 59, 14, 8, "#c4fff0"); R(150, 60, 10, 6, "#7de0c8"); },
+  station(x, y) { R(x, y, 44, 40, "#6c6380"); },
+  stationFront(x, y, lit, empty) {
+    R(x + 4, y + 22, 36, 7, "#6b4a2e"); R(x + 4, y + 22, 36, 2, "#8f6a44");
+    R(x + 25, y + 11, 14, 11, "#1a1020"); R(x + 26, y + 12, 12, 6, lit ? "#a6ffb0" : "#3a3a46"); R(x + 24, y + 11, 16, 2, "#3a3a46");
+    if (lit) { P(x + 29, y + 9, "#a6ffb0"); P(x + 33, y + 7, "#a6ffb0"); R(x + 27, y + 22, 10, 2, "#ff7a2f"); }
+    if (empty) { R(x + 12, y + 31, 10, 5, "#4a2c55"); R(x + 13, y + 32, 8, 3, "#7a4a8a"); }
+  },
+  gate() { R(192, 166, 42, 30, "#1a1020"); R(194, 168, 38, 28, "#c4fff0"); R(196, 170, 34, 14, "#8de6d4"); R(199, 172, 5, 8, "#e8fffa"); R(191, 158, 44, 10, "#4a2c55"); utext(213 - Math.floor(uw("Truth mirror", 5.5, 800) / 2), 160, "Truth mirror", "#ffe680", 5.5, 800); },
+  main() { R(284, 40, 38, 52, "#3e2a1a"); R(288, 44, 30, 46, "#b5884f"); for (let y = 48; y < 90; y += 8) R(288, y, 30, 2, "#6b4a2e"); R(312, 64, 3, 6, "#ffe680"); mainSign(this); },
+  sprites: {
+    orch: { name: "Sage", role: "Orchestrator", prop: "star hat · beard · orb staff",
+      map: [".........a....ww", "........aa...www", ".......aaa....k.", "......aayaa...k.", ".....aaaaaa...k.", "...aaaaaaaaaa.k.", "....ssssssss..k.", "....skssssks..k.", "....wwwwwwww..k.", "....wwwwwwww..k.", "...cwwwwwwwwc.k.", "..ccwwwwwwwwccs.", "..cccwwwwwwccck.", "..cccccwwccccck.", "..ccccccccccc.k.", "..ccccccccccc.k.", "..ccccccccccc.k.", "..ccccccccccc.k.", "..ccccccccccc.k.", ".kkkkkkkkkkkk.k."],
+      pal: { a: "#3a4ad6", y: "#ffe680", w: "#f4f0ff", k: "#6b4a2e", s: "#f1c19a", c: "#6a46e0" } },
+    dev: { name: "Fizz", role: "Developer", prop: "floppy beret · apron · paddle",
+      map: ["................", "....aaaaaaa.....", "...aaaaaaaaaa...", "..aaaaaaaaaaaaa.", "..aa.wwhhhhww...", "....hsssssssh...", "....skssssksh...", "....ssssssss....", ".....sssmmss.....", "......ssss....gg", "...cccccccccc.gg", "..ccccwwwwcccgg.", "..ccccwwwwccgg..", "..scccwwwwcgsc..", "...cccwwwwgg....", "...ccccwwgggg...", "...dddd..dgggg..", "...ddd....ddd...", "...ddd....ddd...", "..kkkk....kkkk.."],
+      pal: { a: "#2e8a5a", w: "#c4fff0", h: "#6b3b23", s: "#c98a62", k: "#1a1020", m: "#7a4030", c: "#c0602f", g: "#8f6a44", d: "#4a2c55" } },
+    rev: { name: "Glint", role: "Reviewer", prop: "pointed hood · monocle · hand mirror",
+      map: [".......cc.......", "......cccc......", ".....cccccc.....", "....cccccccc....", "...cccssssccc...", "...ccsssssscc...", "...ccskssaacc...", "...ccssssaacc...", "...ccsssmmscc...", "....csssssc..aa.", "...cccccccc.awwa", "..ccccccccc.awwa", "..ccccccccc..aa.", "..sccccccccs.k..", "...cccccccc..k..", "...dddddddd.....", "...ddd...ddd....", "...ddd...ddd....", "...ddd...ddd....", "..kkkk...kkkk..."],
+      pal: { c: "#8a3450", s: "#f1c19a", k: "#1a1020", a: "#ffe680", w: "#c4fff0", m: "#9a4a40", d: "#3e2a1a" } },
+    dev2: { name: "Pip", pal: { a: "#b07ac0", w: "#c4fff0", h: "#ffe680", s: "#f1c19a", k: "#1a1020", m: "#9a4a40", c: "#3a6df0", g: "#8f6a44", d: "#4a2c55" } },
+    off: { name: "Moss", pal: { a: "#6b4a2e", w: "#c4fff0", h: "#1a1020", s: "#f1c19a", k: "#1a1020", m: "#9a4a40", c: "#2e8a5a", g: "#8f6a44", d: "#2e5a3e" } },
+  },
+};
+
+// ================================================================ the shared moment
+function drawScene(T, x0) {
+  ox = x0; oy = 0;
+  R(0, 0, SW, SH, T.panelBg);
+  utext(6, 6, T.title, T.panelFg, 9, 800);
+  oy = OY;
+  T.ground(); T.floor(); T.board(); T.sign(); T.kitchen(); T.lounge(); T.huddle(); T.command();
+
+  const st = [[18, 122], [68, 122], [118, 122]];
+  st.forEach(([x, y]) => T.station(x, y));
+  st.forEach(([x, y]) => { for (let yy = y + 40; yy < 183; yy += 3) P(x + 22, yy, T.arrow); });
+  pill(18, 165, "Stations", T.zoneFg, T.zoneBg, 6, 700);
+  belt(T); T.gate(); T.main();
+
+  const sp = T.sprites, devPal = { ...sp.dev.pal, ...(sp.dev.wPal || {}) };
+  // orchestrator — NEEDS YOU (the first read)
+  outlined(sp.orch.map, sp.orch.pal, 146, 44, 20, T.ink); T.commandFront();
+  plate(154, 78, sp.orch.name, T);
+  needsTag(154, 22, T);
+  // two workers at stations, one station open with a ticket waiting for a worker
+  outlined(sp.dev.map, devPal, st[0][0] + 6, st[0][1] + 6, 15, T.ink); T.stationFront(st[0][0], st[0][1], true, false);
+  outlined(sp.dev.map, sp.dev2.pal, st[1][0] + 6, st[1][1] + 6, 15, T.ink); T.stationFront(st[1][0], st[1][1], true, false);
+  T.stationFront(st[2][0], st[2][1], false, true);
+  R(st[2][0] + 8, st[2][1] + 14, 13, 7, "#fff8ec"); ptext(st[2][0] + 9, st[2][1] + 15, "3.4", "#1d1426");
+  plate(st[0][0] + 22, st[0][1] + 31, sp.dev.name, T); plate(st[1][0] + 22, st[1][1] + 31, sp.dev2.name, T);
+  ticketTag(st[0][0] + 22, st[0][1] - 23, "work", "3.2", "DEV", T, 37);
+  ticketTag(st[1][0] + 22, st[1][1] - 16, "work", "3.3", "DEV", T);
+  waitTag(st[2][0] + 26, st[2][1] - 14, "3.4", T);
+  // off duty in the lounge
+  outlined(sp.dev.map, sp.off.pal, 234, 72, 14, T.ink); R(230, 86, 24, 8, T === THEMES.office ? "#56bdb5" : T === THEMES.ship ? "#c94aa9" : "#7a4a8a");
+  R(250, 82, 4, 4, "#fff"); R(254, 83, 1, 2, "#fff");
+  plate(242, 96, sp.off.name, T); offTag(242, 57, T);
+  // reviewer at the gate, ticket 3.1 inside it
+  parcel(208, 185, T);
+  outlined(sp.rev.map, sp.rev.pal, 238, 150, 20, T.ink);
+  plate(246, 172, sp.rev.name, T);
+  ticketTag(246, 134, "review", "3.1", "REVIEW", T);
+  // a parcel heading to MAIN
+  parcel(268, 185, T); idFlag(272, 166, "2.9", T);
+  pill(250, 197, "to MAIN ›", T.zoneFg, T.zoneBg, 5.5, 800);
+
+  // ---------------------------------------------------------------- lineup + legend
+  oy = 0; const py = OY + 216;
+  R(0, py, SW, SH - py, T.panelBg); R(6, py + 3, SW - 12, 1, T.panelMuted);
+  utext(6, py + 6, "CAST · ACTUAL SPRITE SIZE", T.panelMuted, 5, 800);
+  [sp.orch, sp.dev, sp.rev].forEach((c, i) => {
+    const x = 6 + i * 70, y = py + 15;
+    R(x, y, 20, 24, T.ink); R(x + 1, y + 1, 18, 22, T.spriteBg); outlined(c.map, c.pal, x + 2, y + 2, 20, T.ink);
+    utext(x + 23, y, c.name, T.panelFg, 7, 800); utext(x + 23, y + 9, c.role, T.alert, 5.5, 800);
+    c.prop.split(" · ").forEach((part, k) => utext(x + 23, y + 16 + k * 5, part, T.panelMuted, 4.5, 600));
+  });
+  const lx = 220, ly = py + 6;
+  utext(lx, ly, "STATES", T.panelMuted, 5, 800);
+  const lg = [["needs", "Needs you"], ["wait", "Needs a worker"], ["work", "Working"], ["review", "In review"], ["off", "Off duty"]];
+  lg.forEach(([k, s], i) => {
+    const x = lx + (i % 2) * 56, y = ly + 9 + ((i / 2) | 0) * 9;
+    if (k === "needs") { R(x - 1, y - 1, 7, 7, T.ink); R(x, y, 5, 5, T.alert); icon("needs", x, y, T.ink); } else icon(k, x, y, k === "wait" ? T.panelMuted : T.panelFg);
+    utext(x + 8, y - 1, s, T.panelFg, 5.5, 600);
+  });
+  utext(lx, ly + 37, "CTX meter: sample data", T.panelMuted, 4.5, 600);
+  // one sentence on readability
+  const words = T.sentence.split(" "); let line = "", lines = [];
+  for (const w of words) { if (uw(line + " " + w, 5.5, 500) > SW - 12) { lines.push(line.trim()); line = w; } else line += " " + w; }
+  lines.push(line.trim());
+  lines.forEach((l, i) => utext(6, SH - 17 + i * 7, l, T.panelFg, 5.5, 500));
+}
+
+ctx.fillStyle = "#0c0b10"; ctx.fillRect(0, 0, cv.width, cv.height);
+list.forEach((t, i) => drawScene(THEMES[t], i * (SW + GAP)));
+document.title = list.join("+");
+</script>
+</body></html>

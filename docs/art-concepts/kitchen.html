@@ -1,0 +1,451 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Controlroom kitchen concepts</title>
+<style>html,body{margin:0;background:#0d0c10}#out{display:flex;gap:20px}canvas,svg{display:block;image-rendering:pixelated}svg{image-rendering:auto}</style></head>
+<body><div id="out"></div>
+<script>
+// Controlroom as a working kitchen: one floor plan, one moment, three art styles.
+//   ?v=pixel|illus|mini|all   &s=<whole-number scale>
+// Logical frame 336 x 308 for every style. Pixel is a canvas on that grid; the
+// other two are vector SVG with the same viewBox, so the layout is identical.
+const q = new URLSearchParams(location.search);
+const S = Math.max(1, Math.round(Number(q.get("s") || 4)));
+const FW = 336, FH = 308, OY = 24;
+const UIF = "system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif";
+
+// ============================================================ shared moment
+const CAST = {
+  chef: { name: "Basil", title: "Head Chef", role: "orchestrator", props: ["tall toque", "mustache", "ladle"] },
+  sous: { name: "Pepper", title: "Sous Chef", role: "developer", props: ["bandana", "chef's knife", "cutting board"] },
+  sauce: { name: "Roux", title: "Saucier", role: "developer", props: ["pleated toque", "whisk", "stock pot"] },
+  expo: { name: "Dash", title: "Expediter", role: "reviewer", props: ["backwards cap", "headset", "ticket spike"] },
+  brk: { name: "Mochi", title: "Line cook", role: "developer" },
+};
+const ST = [[18, 122], [68, 122], [118, 122]]; // stations: sous, saucier, open
+const SENT = {
+  pixel: "Pixel grid with one flat colour per zone: the Head Chef's red island, the hot pass and the swinging MAIN doors are the brightest shapes, so the eye goes chef → line → pass → service.",
+  illus: "Flat shapes in five colours: only the Head Chef and the NEEDS YOU flag use tomato red, every cook is a bold silhouette with one prop, and the belt is the one charcoal line to MAIN.",
+  mini: "Warm light falls on the work and the edges fall into shadow; each figurine has its own hat and prop, and the lit heat lamps and MAIN doors pull your eye along the route.",
+};
+const TITLE = { pixel: "KITCHEN 01 · PIXEL ART", illus: "KITCHEN 02 · ILLUSTRATED", mini: "KITCHEN 03 · MINIATURE DIORAMA" };
+
+// ============================================================ PIXEL renderer (canvas)
+function renderPixel(s) {
+  const cv = document.createElement("canvas"); cv.width = FW * s; cv.height = FH * s;
+  const ctx = cv.getContext("2d"); ctx.imageSmoothingEnabled = false;
+  let oy = 0;
+  const R = (x, y, w, h, c) => { if (!c) return; ctx.fillStyle = c; ctx.fillRect(Math.round(x * s), Math.round((y + oy) * s), Math.round(w * s), Math.round(h * s)); };
+  const P = (x, y, c) => R(x, y, 1, 1, c);
+  const F = {A:"010101111101101",B:"110101110101110",C:"011100100100011",D:"110101101101110",E:"111100110100111",F:"111100110100100",G:"011100101101011",H:"101101111101101",I:"111010010010111",K:"101101110101101",L:"100100100100111",M:"101111111101101",N:"110101101101101",O:"010101101101010",P:"110101110100100",R:"110101110101101",S:"011100010001110",T:"111010010010010",U:"101101101101111",V:"101101101101010",W:"101101111111101",Y:"101101010010010"," ":"000000000000000",".":"000000000000010","·":"000000010000000"};
+  const pw = (t, z = 1) => t.length * 4 * z - z;
+  const ptext = (x, y, t, c, z = 1) => { t = t.toUpperCase(); for (let i = 0; i < t.length; i++) { const g = F[t[i]] ?? F[" "]; for (let j = 0; j < 15; j++) if (g[j] === "1") R(x + (i * 4 + (j % 3)) * z, y + ((j / 3) | 0) * z, z, z, c); } };
+  const uf = (size, w) => (ctx.font = `${w} ${size * s}px ${UIF}`);
+  const uw = (t, size = 6, w = 600) => { uf(size, w); return Math.ceil(ctx.measureText(t).width / s); };
+  const ut = (x, y, t, c, size = 6, w = 600) => { uf(size, w); ctx.fillStyle = c; ctx.textBaseline = "top"; ctx.fillText(t, Math.round(x * s), Math.round((y + oy) * s + size * s * 0.04)); };
+  const pill = (x, y, t, fg, bg, size = 6, w = 700, center = false) => { const ww = uw(t, size, w) + 4, xx = center ? Math.round(x - ww / 2) : x; R(xx, y, ww, size + 3, bg); ut(xx + 2, y + 1, t, fg, size, w); return ww; };
+  const ICON = { work: [".....", ".###.", ".###.", ".###.", "....."], review: [".##..", "#..#.", "#..#.", ".##..", "...##"], needs: ["..#..", ".###.", "##.##", ".###.", "..#.."], wait: ["#####", ".#.#.", "..#..", ".#.#.", "#####"], off: [".###.", "#....", "#..#.", "#....", ".###."] };
+  const icon = (k, x, y, c, z = 1) => ICON[k].forEach((r, j) => [...r].forEach((ch, i) => ch === "#" && R(x + i * z, y + j * z, z, z, c)));
+  const spr = (map, pal, x, y, rows = 20) => map.slice(0, rows).forEach((row, j) => [...row.padEnd(16, ".").slice(0, 16)].forEach((ch, i) => { if (ch !== ".") P(x + i, y + j, pal[ch] ?? "#f0f"); }));
+  const outlined = (map, pal, x, y, rows, ink) => { const m = map.slice(0, rows).map((r) => r.padEnd(16, ".").slice(0, 16)); const so = (i, j) => j >= 0 && j < m.length && i >= 0 && i < 16 && m[j][i] !== "."; for (let j = -1; j <= m.length; j++) for (let i = -1; i <= 16; i++) if (!so(i, j) && (so(i - 1, j) || so(i + 1, j) || so(i, j - 1) || so(i, j + 1))) P(x + i, y + j, ink); spr(map, pal, x, y, rows); };
+
+  const T = { ink: "#1e1720", alert: "#ffcc33", tag: "#fff8ec", sub: "#6b5560", muted: "#8f8291", zone: "#2b2230", zoneFg: "#fff8ec", ctxOff: "#dccfbf", panel: "#231b26", panelFg: "#fff8ec", panelMuted: "#bcaebf" };
+
+  const SPR = {
+    chef: ["....wwwwwwww....", "...wwwwwwwwww...", "...wwwwwwwwww...", "....wwwwwwww....", "....gggggggg..ll", "...ssssssssss.ll", "...sskssssksss.l", "...ssssssssss..l", "....smmmmmms...l", ".....ssssss....l", "..wwwwrrrrwwwwsl", ".wwwwwbwwbwwwww.", ".wwwwwwwwwwwwww.", ".swwwwbwwbwwww..", "..wwwwwwwwwwww..", "...dddddddddd...", "...ddd....ddd...", "...ddd....ddd...", "...ddd....ddd...", "..kkkk....kkkk.."],
+    sous: ["................", "................", "....rrrrrrrr....", "...rrrrrrrrrrr..", "...rrrrrrrrrr.rr", "...ssssssssss...", "...sskssssksss..", "...ssssssssss...", "....sssmmsss....", ".....ssssss.....", "...cccccccccc...", "..ccccwcccccc..g", "..cccccwccccc.gg", "..scccccccccsgg.", "...cccccccccc...", "...dddddddddd...", "...ddd....ddd...", "...ddd....ddd...", "...ddd....ddd...", "..kkkk....kkkk.."],
+    sauce: ["................", "....wwwwwwww....", "...wwwwwwwwww...", "...wgwgwgwgww...", "...bbbbbbbbbb...", "...ssssssssss...", "...sskssssksss..", "...ssssssssss...", "....sssmmsss.y..", ".....ssssss.yyy.", "...wwwwwwwwwyyy.", "..wwwwwwwwwwwy..", "..waaaaaaaawwy..", "..saaaaaaaas.y..", "...aaaaaaaa.....", "...dddddddddd...", "...ddd....ddd...", "...ddd....ddd...", "...ddd....ddd...", "..kkkk....kkkk.."],
+    expo: ["................", "...cccccccc.....", "..cccccccccc....", ".cccccccccccc..w", "...ssssssssss.ww", "..kssksssskss.w.", "..kssssssssss.w.", "..kkssssssss..k.", "....sssmmsss..k.", ".....ssssss...k.", "...tttttttttt.k.", "..twtwtwtwtwt.k.", "..ttttttttttt.k.", "..stwtwtwtwtsk..", "...tttttttttt...", "...dddddddddd...", "...ddd....ddd...", "...ddd....ddd...", "...ddd....ddd...", "..kkkk....kkkk.."],
+  };
+  const PAL = {
+    chef: { w: "#fbf7ef", g: "#d8d0c4", l: "#a7adb5", s: "#f0c09a", k: "#1e1720", m: "#5b3a2a", r: "#e04b3c", b: "#1e1720", d: "#2f2a36" },
+    sous: { r: "#d6463c", s: "#c98a62", k: "#1e1720", m: "#7a4030", c: "#2f2a36", w: "#fbf7ef", g: "#c7ccd3", d: "#4a3f52" },
+    sauce: { w: "#fbf7ef", g: "#d8d0c4", b: "#3a6db5", s: "#8a5a3c", k: "#1e1720", m: "#4a2a1a", y: "#b8bec7", a: "#3a6db5", d: "#2f2a36" },
+    expo: { c: "#2e8a6e", s: "#f0c09a", k: "#1e1720", m: "#b0574a", w: "#fff8ec", t: "#2f2a36", d: "#4a3f52" },
+    brk: { r: "#e2a33a", s: "#f0c09a", k: "#1e1720", m: "#b0574a", c: "#7a52b5", w: "#fbf7ef", g: "#7a52b5", d: "#4a3f52" },
+  };
+
+  // ---- frame
+  R(0, 0, FW, FH, T.panel);
+  ut(6, 6, TITLE.pixel, T.panelFg, 9, 800);
+  oy = OY;
+  // outside + walls
+  R(0, 0, FW, 216, "#3a2f2a"); R(6, 6, 324, 204, "#5a4a42"); R(8, 8, 320, 200, "#463a35");
+  // floor: warm terracotta tile, very quiet grout
+  R(12, 12, 270, 192, "#d9895f"); for (let y = 54; y < 204; y += 10) R(12, y, 270, 1, "#cf8058"); for (let x = 22; x < 282; x += 10) R(x, 44, 1, 160, "#cf8058");
+  // back wall: white subway tile + hanging pans
+  R(12, 12, 270, 32, "#efe9df"); R(12, 43, 270, 1, "#c9bfb2");
+  for (let y = 16; y < 43; y += 5) R(12, y, 270, 1, "#e3dccf");
+  [[114, 16, 5], [186, 16, 6], [198, 16, 5]].forEach(([x, y, r]) => { R(x + r - 1, y - 2, 2, 3, "#6b5560"); R(x, y + 1, r * 2, r * 2 - 1, "#c06a3a"); R(x + 1, y + 2, r * 2 - 2, r * 2 - 3, "#d98a52"); R(x + 2, y + 3, 2, 2, "#f2b37a"); });
+  // ticket rail (orders)
+  R(14, 11, 96, 46, "#1e1720"); R(15, 12, 94, 44, "#f6f1e8"); R(15, 12, 94, 13, "#1e1720"); ptext(18, 15, "ORDERS", T.alert, 2);
+  ut(80, 15, "ticket rail", "#bcaebf", 5, 600);
+  R(15, 26, 94, 2, "#a7adb5");
+  ["NEW", "COOKING", "AT PASS", "SERVED"].forEach((h, i) => { ut(17 + i * 23, 29, h, "#6b5560", 4.5, 800); if (i) R(15 + i * 23, 28, 1, 27, "#e2d8c8"); });
+  const slip = (col, row, id, mark) => { const x = 16 + col * 23, y = 35 + row * 10; R(x, y, 21, 9, "#fffdf8"); R(x, y + 8, 21, 1, "#d9cfc0"); R(x + 10, y - 1, 2, 2, "#6b5560"); ut(x + 2, y + 0.5, id, T.ink, 7.5, 800); if (mark) icon(mark, x + 15, y + 2, T.ink); };
+  slip(0, 0, "3.4", "wait"); slip(0, 1, "3.5"); slip(1, 0, "3.2", "work"); slip(1, 1, "3.3", "work"); slip(2, 0, "3.1", "review"); slip(3, 0, "2.9");
+  // sign + YES CHEF sticker
+  R(126, 13, 56, 9, "#2b2230"); ut(154 - Math.floor(uw("Controlroom", 5.5, 800) / 2), 14, "Controlroom", "#fff8ec", 5.5, 800);
+  // pantry / walk-in (top right)
+  R(212, 14, 34, 30, "#c7ccd3"); R(213, 15, 32, 28, "#dfe3e8"); R(240, 24, 2, 8, "#8a919b"); ut(216, 17, "WALK-IN", "#4a4f58", 4.5, 800);
+  R(250, 14, 30, 30, "#8a5a3a"); for (let k = 0; k < 3; k++) { R(251, 22 + k * 8, 28, 1, "#5a3a24"); for (let j = 0; j < 5; j++) R(252 + j * 5, 17 + k * 8, 4, 5, ["#e04b3c", "#ffcc33", "#7fa37a", "#fbf7ef", "#c06a3a"][(j + k) % 5]); }
+  R(272, 33, 3, 3, "#ffcc33"); P(275, 34, "#e08a2a"); // rubber duck on the shelf
+  pill(213, 3, "Pantry", T.zoneFg, T.zone, 6, 700);
+  // dish pit (left middle): sink, a mop with a hat
+  R(16, 62, 40, 22, "#a7adb5"); R(17, 63, 38, 20, "#c7ccd3"); R(20, 66, 14, 12, "#8a919b"); R(37, 66, 14, 12, "#8a919b"); R(26, 62, 2, 4, "#6b7079");
+  R(62, 58, 2, 28, "#8a5a3a"); R(58, 84, 10, 6, "#e8e2d4"); R(60, 55, 6, 4, "#fbf7ef"); R(59, 58, 8, 1, "#d8d0c4"); // mop in a toque
+  pill(16, 88, "Dish pit", T.zoneFg, T.zone, 5.5, 700);
+  // head chef island
+  R(114, 44, 80, 42, "#b8403a"); R(116, 46, 76, 38, "#c94b43");
+  // break nook
+  R(206, 68, 72, 50, "#7fa37a"); R(206, 68, 72, 2, "#5f8a5c");
+  R(212, 78, 50, 10, "#8a5a3a"); R(212, 78, 50, 2, "#a87048"); R(214, 88, 46, 6, "#6b4a2e"); // bench
+  R(266, 74, 10, 14, "#4a3f52"); R(267, 75, 8, 5, "#1e1720"); R(269, 81, 4, 5, "#5a3a24"); // coffee machine
+  R(252, 98, 22, 12, "#fff8ec"); ut(254, 99, "BACK IN 5", "#1e1720", 4, 800); ut(254, 104, "(ish)", "#6b5560", 4, 600); // sign
+  pill(207, 120, "Break nook", T.zoneFg, T.zone, 6, 700);
+  // MAIN · SERVICE: swinging doors
+  R(282, 12, 42, 192, "#2b2230");
+  R(284, 40, 38, 52, "#1e1720"); R(287, 44, 15, 46, "#c7ccd3"); R(304, 44, 15, 46, "#c7ccd3"); R(291, 52, 7, 7, "#7fc3d9"); R(308, 52, 7, 7, "#7fc3d9"); R(302, 44, 2, 46, "#8a919b");
+  R(284, 14, 38, 26, T.ink); R(286, 16, 34, 22, T.alert); ptext(303 - Math.floor(pw("MAIN", 2) / 2), 19, "MAIN", T.ink, 2); ut(303 - Math.floor(uw("SERVICE", 5, 800) / 2), 30, "SERVICE", T.ink, 5, 800);
+  // stations
+  ST.forEach(([x, y]) => { R(x, y, 44, 40, "#e3b48f"); R(x, y, 44, 2, "#c7ccd3"); R(x, y, 2, 40, "#c7ccd3"); R(x + 42, y, 2, 40, "#c7ccd3"); });
+  ST.forEach(([x, y]) => { for (let yy = y + 40; yy < 183; yy += 3) P(x + 22, yy, "#ffcc33"); });
+  pill(18, 165, "The line", T.zoneFg, T.zone, 6, 700);
+  // belt + pass + main climb
+  const by = 184, x0 = 12, xT = 298;
+  R(x0, by - 1, xT - x0 + 10, 12, T.ink); R(x0, by, xT - x0 + 10, 10, "#4a4f58"); R(x0, by, xT - x0 + 10, 1, "#8a919b"); R(x0, by + 9, xT - x0 + 10, 1, "#8a919b");
+  R(xT - 1, 92, 12, 102, T.ink); R(xT, 92, 10, 101, "#4a4f58"); R(xT, 92, 1, 101, "#8a919b"); R(xT + 9, 92, 1, 101, "#8a919b");
+  for (let x = x0 + 8; x < xT - 4; x += 12) for (let k = 0; k < 2; k++) { P(x - 1 + k, by + 3, "#ffcc33"); P(x + k, by + 4, "#ffcc33"); P(x + 1 + k, by + 5, "#ffcc33"); P(x + k, by + 6, "#ffcc33"); P(x - 1 + k, by + 7, "#ffcc33"); }
+  for (let yy = 180; yy > 96; yy -= 12) for (let k = 0; k < 2; k++) { P(xT + 2, yy + 3 - k, "#ffcc33"); P(xT + 3, yy + 2 - k, "#ffcc33"); P(xT + 4, yy + 1 - k, "#ffcc33"); P(xT + 5, yy + 2 - k, "#ffcc33"); P(xT + 6, yy + 3 - k, "#ffcc33"); }
+  // the pass: stainless shelf + heat lamps
+  R(190, 166, 46, 30, "#1e1720"); R(191, 167, 44, 4, "#c7ccd3"); R(192, 171, 4, 25, "#a7adb5"); R(230, 171, 4, 25, "#a7adb5");
+  [[198, 172], [208, 172], [218, 172]].forEach(([x, y]) => { R(x, y, 8, 3, "#ff8a3a"); R(x + 1, y + 3, 6, 4, "#ffb06a"); });
+  R(189, 158, 48, 9, "#e04b3c"); ut(213 - Math.floor(uw("The pass · review", 5, 800) / 2), 159.5, "The pass · review", "#fff8ec", 5, 800);
+  const plate = (x, y) => { R(x - 1, y - 1, 12, 8, T.ink); R(x, y, 10, 6, "#fbf7ef"); R(x + 3, y + 1, 4, 3, "#e04b3c"); R(x + 4, y + 1, 2, 1, "#7fa37a"); };
+  plate(207, 186); plate(266, 186);
+
+  // ---- people
+  outlined(SPR.chef, PAL.chef, 146, 42, 20, T.ink);
+  R(124, 64, 60, 12, "#a7adb5"); R(124, 64, 60, 2, "#dfe3e8"); R(130, 58, 12, 7, "#2f2a36"); R(132, 59, 8, 5, "#e04b3c"); R(166, 58, 12, 7, "#c06a3a"); R(167, 59, 10, 5, "#d98a52"); // island: tablet + copper pot
+  // station fronts with props
+  outlined(SPR.sous, PAL.sous, ST[0][0] + 6, ST[0][1] + 5, 15, T.ink);
+  R(ST[0][0] + 4, ST[0][1] + 20, 36, 8, "#a7adb5"); R(ST[0][0] + 4, ST[0][1] + 20, 36, 1, "#dfe3e8"); R(ST[0][0] + 24, ST[0][1] + 14, 14, 7, "#c28a5a"); R(ST[0][0] + 26, ST[0][1] + 16, 4, 2, "#e8822e"); R(ST[0][0] + 31, ST[0][1] + 15, 3, 3, "#7fa37a");
+  outlined(SPR.sauce, PAL.sauce, ST[1][0] + 6, ST[1][1] + 5, 15, T.ink);
+  R(ST[1][0] + 4, ST[1][1] + 20, 36, 8, "#a7adb5"); R(ST[1][0] + 4, ST[1][1] + 20, 36, 1, "#dfe3e8"); R(ST[1][0] + 25, ST[1][1] + 11, 13, 10, "#4a4f58"); R(ST[1][0] + 26, ST[1][1] + 12, 11, 3, "#b5552f"); P(ST[1][0] + 29, ST[1][1] + 9, "#fff"); P(ST[1][0] + 32, ST[1][1] + 7, "#fff"); P(ST[1][0] + 30, ST[1][1] + 5, "#fff"); R(ST[1][0] + 27, ST[1][1] + 21, 9, 1, "#ff8a3a");
+  R(ST[2][0] + 4, ST[2][1] + 20, 36, 8, "#a7adb5"); R(ST[2][0] + 4, ST[2][1] + 20, 36, 1, "#dfe3e8"); R(ST[2][0] + 10, ST[2][1] + 12, 13, 8, "#fffdf8"); ut(ST[2][0] + 11, ST[2][1] + 12.5, "3.4", T.ink, 6, 800); R(ST[2][0] + 29, ST[2][1] + 15, 5, 5, "#e8c07a"); P(ST[2][0] + 31, ST[2][1] + 14, "#7fa37a"); // lonely onion
+  // break
+  outlined(SPR.sous, PAL.brk, 228, 66, 14, T.ink); R(212, 80, 50, 8, "#8a5a3a"); R(240, 77, 4, 4, "#fbf7ef"); R(244, 78, 1, 2, "#fbf7ef"); P(241, 75, "#ddd");
+  // expediter
+  outlined(SPR.expo, PAL.expo, 238, 150, 20, T.ink);
+
+  // ---- labels (hierarchy: NEEDS YOU > ticket IDs > MAIN > the rest)
+  const needs = (cx, y) => { const t = "NEEDS YOU", w = pw(t, 2) + 16, h = 16, x = Math.round(cx - w / 2); R(x - 2, y - 2, w + 4, h + 4, T.ink); R(x - 1, y - 1, w + 2, h + 2, T.alert); R(x, y, w, h, T.ink); R(x + 1, y + 1, w - 2, h - 2, T.alert); icon("needs", x + 2, y + 3, T.ink, 2); ptext(x + 14, y + 3, t, T.ink, 2); R(cx - 3, y + h + 2, 7, 1, T.ink); R(cx - 2, y + h + 3, 5, 1, T.ink); R(cx - 1, y + h + 4, 3, 1, T.ink); };
+  const tag = (cx, y, kind, id, title, role, ctxPct) => {
+    const idW = uw(id, 8, 800), tW = uw(title, 5.5, 800), w = Math.max(9 + idW + 2 + tW + 3, ctxPct == null ? 0 : 46), h = ctxPct == null ? 17 : 24, x = Math.round(cx - w / 2);
+    R(x, y, w, h, T.ink); R(x + 1, y + 1, w - 2, h - 2, T.tag); icon(kind, x + 3, y + 3, T.ink); ut(x + 9, y + 1, id, T.ink, 8, 800); ut(x + 9 + idW + 2, y + 2.5, title, T.ink, 5.5, 800); ut(x + 9, y + 10.5, role, T.sub, 4.5, 700);
+    if (ctxPct != null) { R(x + 1, y + 16, w - 2, 1, T.ctxOff); ut(x + 3, y + 17, "CTX", T.ink, 4.5, 800); const on = Math.round(ctxPct / 100 * 8); for (let i = 0; i < 8; i++) R(x + 14 + i * 2, y + 18, 1, 4, i < on ? T.ink : T.ctxOff); ut(x + 32, y + 17, ctxPct + "%", T.ink, 4.5, 800); }
+    R(cx - 1, y + h, 3, 1, T.ink); P(cx, y + h + 1, T.ink);
+  };
+  const wait = (cx, y, id, word) => { const w = 9 + uw(id, 6, 800) + 3 + uw(word, 5, 600) + 3, h = 10, x = Math.round(cx - w / 2); R(x, y, w, h, "#e4a27c"); for (let i = 0; i < w; i += 2) { P(x + i, y, T.ink); P(x + i, y + h - 1, T.ink); } for (let j = 0; j < h; j += 2) { P(x, y + j, T.ink); P(x + w - 1, y + j, T.ink); } icon("wait", x + 3, y + 2, "#4a3f52"); ut(x + 9, y + 1, id, "#4a3f52", 6, 800); ut(x + 9 + uw(id, 6, 800) + 3, y + 2, word, "#4a3f52", 5, 600); P(cx, y + h + 1, T.ink); P(cx, y + h + 3, T.ink); };
+  const off = (cx, y) => { const t = "On break", r = "developer", w = 9 + uw(t, 5.5, 800) + 2 + uw(r, 4.5, 700) + 3, x = Math.round(cx - w / 2); R(x, y, w, 10, T.ink); R(x + 1, y + 1, w - 2, 8, T.tag); icon("off", x + 3, y + 2, T.ink); ut(x + 9, y + 1.5, t, T.ink, 5.5, 800); ut(x + 9 + uw(t, 5.5, 800) + 2, y + 2.5, r, T.sub, 4.5, 700); R(cx - 1, y + 10, 3, 1, T.ink); };
+  const nameplate = (cx, y, n) => pill(cx, y, n, T.zoneFg, T.zone, 5.5, 700, true);
+  needs(154, 22);
+  nameplate(154, 78, CAST.chef.name); { const t = "Head Chef · orchestrator", w = uw(t, 4.5, 700) + 6; R(154 - Math.round(w / 2), 87, w, 8, T.ink); ut(154 - Math.round(w / 2) + 3, 88, t, "#fff8ec", 4.5, 700); }
+  tag(38, 95, "work", "3.2", "Sous Chef", "developer", 37);
+  tag(92, 102, "work", "3.3", "Saucier", "developer");
+  wait(152, 108, "3.4", "waiting for a cook");
+  nameplate(ST[0][0] + 22, ST[0][1] + 31, CAST.sous.name); nameplate(ST[1][0] + 22, ST[1][1] + 31, CAST.sauce.name);
+  off(238, 56); nameplate(238, 96, CAST.brk.name);
+  tag(246, 131, "review", "3.1", "Expediter", "reviewer");
+  nameplate(246, 172, CAST.expo.name);
+  { const w = uw("2.9", 8, 800) + 6, x = 271 - Math.round(w / 2); R(x, 166, w, 12, T.ink); R(x + 1, 167, w - 2, 10, T.tag); ut(x + 3, 167, "2.9", T.ink, 8, 800); R(270, 178, 3, 2, T.ink); }
+  pill(248, 197, "to MAIN · SERVICE ›", T.zoneFg, T.zone, 5, 800);
+
+  // ---- cast + legend
+  oy = 0; const py = OY + 216;
+  R(0, py, FW, FH - py, T.panel); R(6, py + 3, FW - 12, 1, T.panelMuted);
+  ut(6, py + 6, "CAST · ACTUAL SPRITE SIZE", T.panelMuted, 5, 800);
+  [["chef", SPR.chef, PAL.chef], ["sous", SPR.sous, PAL.sous], ["sauce", SPR.sauce, PAL.sauce], ["expo", SPR.expo, PAL.expo]].forEach(([k, m, p], i) => {
+    const x = 6 + i * 53, y = py + 15, c = CAST[k];
+    R(x, y, 20, 24, T.ink); R(x + 1, y + 1, 18, 22, "#d9895f"); outlined(m, p, x + 2, y + 2, 20, T.ink);
+    ut(x + 22, y, c.name, T.panelFg, 6.5, 800); ut(x + 22, y + 8, c.title, T.alert, 5, 800); ut(x + 22, y + 14, c.role, T.panelMuted, 4.5, 700); ut(x + 22, y + 20, c.props[0], T.panelMuted, 4, 600);
+  });
+  legend((x, y, k) => { if (k === "needs") { R(x - 1, y - 1, 7, 7, T.ink); R(x, y, 5, 5, T.alert); icon("needs", x, y, T.ink); } else icon(k, x, y, k === "wait" ? T.panelMuted : T.panelFg); }, (x, y, t, c, sz, w) => ut(x, y, t, c, sz, w), T, py, uw);
+  caption((x, y, t) => ut(x, y, t, T.panelFg, 5.5, 500), (t) => uw(t, 5.5, 500), SENT.pixel);
+  return cv;
+}
+
+function legend(drawIcon, txt, T, py, uw) {
+  const lx = 222, ly = py + 6;
+  txt(lx, ly, "STATES", T.panelMuted, 5, 800);
+  [["needs", "Needs you"], ["wait", "Waiting for a cook"], ["work", "Cooking"], ["review", "At the pass"], ["off", "On break"]].forEach(([k, t], i) => { const x = lx, y = ly + 8 + i * 6.5; drawIcon(x, y, k); txt(x + 8, y - 1, t, T.panelFg, 5, 600); });
+  txt(lx + 62, ly + 8, "CTX meter:", T.panelMuted, 4.5, 700); txt(lx + 62, ly + 13, "sample data", T.panelMuted, 4.5, 600);
+}
+function caption(txt, w, sentence) {
+  const words = sentence.split(" "); let line = "", lines = [];
+  for (const wd of words) { if (w((line + " " + wd).trim()) > FW - 18) { lines.push(line.trim()); line = wd; } else line += " " + wd; }
+  lines.push(line.trim()); lines.forEach((l, i) => txt(6, FH - 17 + i * 7, l));
+}
+
+// ============================================================ VECTOR renderers (illustrated + miniature)
+function renderVector(style, s) {
+  const mini = style === "mini";
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", `0 0 ${FW} ${FH}`); svg.setAttribute("width", FW * s); svg.setAttribute("height", FH * s);
+  svg.setAttribute("shape-rendering", "geometricPrecision"); svg.setAttribute("text-rendering", "geometricPrecision");
+  let out = [], late = [];
+  const a = (o) => Object.entries(o).map(([k, v]) => `${k}="${v}"`).join(" ");
+  const el = (t, o, inner = "") => out.push(`<${t} ${a(o)}>${inner}</${t}>`);
+  const g0 = (o = {}) => out.push(`<g ${a(o)}>`), g1 = () => out.push("</g>");
+  const rect = (x, y, w, h, fill, o = {}) => el("rect", { x, y, width: w, height: h, fill, ...o });
+  const circ = (cx, cy, r, fill, o = {}) => el("circle", { cx, cy, r, fill, ...o });
+  const path = (d, fill, o = {}) => el("path", { d, fill, ...o });
+  // Text is emitted at its real pixel size under an inverse scale, so Chrome never rounds glyph advances at tiny user-unit sizes.
+  const text = (x, y, t, fill, size, weight = 600, o = {}) => { const { transform, "letter-spacing": ls, ...rest } = o; el("text", { x: x * s, y: y * s, fill, "font-size": size * s, "font-weight": weight, "font-family": UIF, "dominant-baseline": "hanging", ...(ls ? { "letter-spacing": ls * s } : {}), ...rest, transform: `${transform ?? ""} scale(${1 / s})` }, t.replace(/&/g, "&amp;")); };
+  const tw = (t, size, weight) => { const c = tw.c ?? (tw.c = document.createElement("canvas").getContext("2d")); c.font = `${weight} ${size * 10}px ${UIF}`; return c.measureText(t).width / 10 * 1.05; };
+
+  // palettes
+  const C = mini
+    ? { ink: "#2a1f1c", panel: "#241a17", panelFg: "#fbf3e6", panelMuted: "#c9b8a6", alert: "#ffcf40", red: "#c8463a", cream: "#fbf3e6", steel: "#b9bfc6", steelHi: "#e9edf1", steelLo: "#7d848d", tile: "#d9a07a", tileLo: "#c48a66", wall: "#ece4d6", wood: "#8a5a3a", woodHi: "#b27a50", sage: "#8aa37a", copper: "#c0703c", tag: "#fff9ef", sub: "#6e5a52", zone: "#3a2c28", zoneFg: "#fbf3e6", belt: "#3b3c42", arrow: "#ffcf40" }
+    : { ink: "#26242b", panel: "#26242b", panelFg: "#f4ecdf", panelMuted: "#b9b2a6", alert: "#f2b134", red: "#e4572e", cream: "#f4ecdf", steel: "#c9ced4", steelHi: "#e4e7ea", steelLo: "#9aa1a9", tile: "#efe3cf", tileLo: "#e4d6bf", wall: "#f8f2e8", wood: "#2f6f73", woodHi: "#3d8589", sage: "#7fa37a", copper: "#e4572e", tag: "#fffaf2", sub: "#6b6460", zone: "#26242b", zoneFg: "#f4ecdf", belt: "#26242b", arrow: "#f2b134" };
+
+  // defs: miniature materials and light
+  if (mini) out.push(`<defs>
+    <filter id="sh" x="-30%" y="-30%" width="160%" height="170%"><feDropShadow dx="1.2" dy="2" stdDeviation="1.3" flood-color="#2a1408" flood-opacity=".45"/></filter>
+    <filter id="shs" x="-30%" y="-30%" width="160%" height="170%"><feDropShadow dx=".6" dy="1" stdDeviation=".6" flood-color="#2a1408" flood-opacity=".5"/></filter>
+    <filter id="paint" x="0" y="0" width="100%" height="100%"><feTurbulence type="fractalNoise" baseFrequency=".9" numOctaves="2" seed="7"/><feColorMatrix values="0 0 0 0 .5  0 0 0 0 .4  0 0 0 0 .3  0 0 0 .22 0"/><feComposite in2="SourceGraphic" operator="in"/></filter>
+    <filter id="blur"><feGaussianBlur stdDeviation="1.6"/></filter>
+    <radialGradient id="light" cx=".42" cy=".38" r=".75"><stop offset="0" stop-color="#fff3d6" stop-opacity=".28"/><stop offset=".55" stop-color="#fff3d6" stop-opacity="0"/><stop offset="1" stop-color="#1a0c05" stop-opacity=".55"/></radialGradient>
+    <linearGradient id="steel" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f3f6f8"/><stop offset=".45" stop-color="#c3c9d0"/><stop offset="1" stop-color="#8a919a"/></linearGradient>
+    <linearGradient id="wood" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#9c6a44"/><stop offset="1" stop-color="#6e4428"/></linearGradient>
+    <radialGradient id="copper" cx=".35" cy=".35" r=".7"><stop offset="0" stop-color="#f3b07a"/><stop offset=".6" stop-color="#c0703c"/><stop offset="1" stop-color="#7a3e1c"/></radialGradient>
+    <radialGradient id="lamp" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#ffd27a" stop-opacity=".95"/><stop offset="1" stop-color="#ff8a3a" stop-opacity="0"/></radialGradient>
+    <pattern id="tile" width="10" height="10" patternUnits="userSpaceOnUse"><rect width="10" height="10" fill="#d9a07a"/><rect x=".4" y=".4" width="9.2" height="9.2" rx="1" fill="#dca57f"/><rect x="1" y="1" width="5" height="2" rx="1" fill="#e6b592" opacity=".6"/></pattern>
+    <pattern id="subway" width="12" height="5" patternUnits="userSpaceOnUse"><rect width="12" height="5" fill="#e2d9c9"/><rect x=".3" y=".3" width="11.4" height="4.4" rx=".8" fill="#f1ebdf"/></pattern>
+    <pattern id="table" width="40" height="8" patternUnits="userSpaceOnUse"><rect width="40" height="8" fill="#5a3a26"/><path d="M0 3 Q10 1 20 3 T40 3" stroke="#6e4a32" stroke-width=".8" fill="none"/><path d="M0 6.5 Q12 5 24 6.5 T40 6" stroke="#4a2e1e" stroke-width=".6" fill="none"/></pattern>
+  </defs>`);
+  const sh = mini ? { filter: "url(#sh)" } : {};
+  const shs = mini ? { filter: "url(#shs)" } : {};
+  const steel = mini ? "url(#steel)" : C.steel;
+
+  // ---- frame + header
+  rect(0, 0, FW, FH, C.panel);
+  text(6, 6, TITLE[style], C.panelFg, 9, 800, { "letter-spacing": ".2" });
+  g0({ transform: `translate(0 ${OY})` });
+
+  // outside
+  if (mini) { rect(0, 0, FW, 216, "url(#table)"); g0({ filter: "url(#blur)" }); rect(0, 0, FW, 216, "#3a2416", { opacity: ".35" }); g1(); }
+  else rect(0, 0, FW, 216, "#3d3a42");
+  // diorama base / walls
+  rect(6, 6, 324, 204, mini ? "#4a3428" : "#26242b", { rx: mini ? 4 : 0, ...sh });
+  rect(10, 10, 316, 196, mini ? "#6b4a36" : "#26242b", { rx: mini ? 2 : 0 });
+  // floor
+  rect(12, 12, 270, 192, mini ? "url(#tile)" : C.tile);
+  if (!mini) for (let x = 22; x < 282; x += 20) rect(x, 44, .5, 160, C.tileLo);
+  // back wall
+  rect(12, 12, 270, 32, mini ? "url(#subway)" : C.wall); rect(12, 43, 270, 1.2, mini ? "#b9ab98" : "#d8ccba");
+  // hanging pans (rail + three pans)
+  rect(110, 14, 98, 1.2, C.steelLo);
+  [[118, 22, 6], [190, 23, 7], [203, 21, 5]].forEach(([cx, cy, r]) => { rect(cx - .6, 14, 1.2, cy - r - 14 + 1, C.steelLo); circ(cx, cy, r, mini ? "url(#copper)" : C.copper, shs); if (!mini) circ(cx - r * .3, cy - r * .3, r * .28, "#f08a5d"); });
+  // the back of MAIN corridor
+  rect(282, 12, 42, 192, mini ? "#3a2c28" : "#3d3a42");
+
+  // ---- ticket rail
+  rect(14, 11, 96, 46, C.ink, { rx: mini ? 2 : 1.5, ...sh });
+  rect(15, 12, 94, 44, mini ? "#f6efe2" : "#fffaf2", { rx: 1.2 });
+  rect(15, 12, 94, 13, C.ink, { rx: 1.2 }); rect(15, 20, 94, 5, C.ink);
+  text(18, 14.5, "ORDERS", C.alert, 10, 900, { "letter-spacing": ".6" });
+  text(76, 17.5, "ticket rail", C.panelMuted, 4.8, 600);
+  rect(15, 26, 94, 1.6, mini ? "url(#steel)" : C.steelLo);
+  ["NEW", "COOKING", "AT PASS", "SERVED"].forEach((h, i) => { text(17 + i * 23, 29.5, h, C.sub, 4.4, 800); if (i) rect(15 + i * 23, 28, .5, 27, "#e2d8c8"); });
+  const slip = (col, row, id, mark, rot) => { const x = 16 + col * 23, y = 35 + row * 10; g0({ transform: `rotate(${rot} ${x + 10} ${y})` }); rect(x, y, 21, 9, mini ? "#fffaf0" : "#ffffff", shs); circ(x + 10.5, y - .2, .9, C.steelLo); text(x + 2, y + 1.2, id, C.ink, 7.2, 800); if (mark) icon(mark, x + 15, y + 2.2, 4.6, C.ink); g1(); };
+  slip(0, 0, "3.4", "wait", -2); slip(0, 1, "3.5", null, 1.5); slip(1, 0, "3.2", "work", 1); slip(1, 1, "3.3", "work", -1.5); slip(2, 0, "3.1", "review", 2); slip(3, 0, "2.9", null, -1);
+
+  function icon(k, x, y, sz, color, o = {}) {
+    const u = sz / 5;
+    if (k === "work") rect(x + u, y + u, u * 3, u * 3, color, { rx: u * .4 });
+    if (k === "review") { circ(x + u * 2, y + u * 2, u * 1.5, "none", { stroke: color, "stroke-width": u * .9 }); path(`M${x + u * 3} ${y + u * 3} L${x + u * 4.6} ${y + u * 4.6}`, "none", { stroke: color, "stroke-width": u * 1.1, "stroke-linecap": "round" }); }
+    if (k === "needs") { path(`M${x + u * 2.5} ${y} L${x + u * 5} ${y + u * 2.5} L${x + u * 2.5} ${y + u * 5} L${x} ${y + u * 2.5} Z`, color); rect(x + u * 2.1, y + u * 1, u * .8, u * 2, o.cut ?? "#fff"); rect(x + u * 2.1, y + u * 3.4, u * .8, u * .8, o.cut ?? "#fff"); }
+    if (k === "wait") path(`M${x} ${y} H${x + sz} L${x + u * 3} ${y + u * 2.5} L${x + sz} ${y + sz} H${x} L${x + u * 2} ${y + u * 2.5} Z`, color);
+    if (k === "off") path(`M${x + u * 3.5} ${y + u * .2} A${u * 2.4} ${u * 2.4} 0 1 0 ${x + u * 3.5} ${y + u * 4.8} A${u * 1.8} ${u * 1.8} 0 1 1 ${x + u * 3.5} ${y + u * .2} Z`, color);
+  }
+
+  // sign
+  rect(126, 13, 56, 9, C.ink, { rx: 1 }); text(154, 14.6, "Controlroom", C.cream, 5.6, 800, { "text-anchor": "middle" });
+
+  // ---- pantry / walk-in
+  rect(212, 14, 34, 30, steel, { rx: 1, ...sh }); rect(240, 24, 1.6, 8, C.steelLo, { rx: .8 }); text(215, 17, "WALK-IN", "#4a4f58", 4.4, 800);
+  rect(250, 14, 30, 30, mini ? "url(#wood)" : C.wood, { rx: 1, ...sh });
+  for (let k = 0; k < 3; k++) { rect(251, 22.5 + k * 8, 28, .8, mini ? "#4a2e1e" : "#1f4f52"); for (let j = 0; j < 5; j++) rect(252.5 + j * 5.2, 17 + k * 8, 3.6, 5, [C.red, C.alert, C.sage, C.cream, mini ? "#c0703c" : "#9aa1a9"][(j + k) % 5], { rx: .8 }); }
+  circ(274.5, 35, 1.6, "#ffd23f"); circ(276, 33.6, 1, "#ffd23f"); path("M276.8 33.6 l1.2 .3 l-1.2 .4z", "#f08a2a"); // duck
+  late.push(() => pill(213, 3, "Pantry"));
+
+  // ---- dish pit + mop wearing a toque
+  rect(16, 62, 40, 22, steel, { rx: 1.5, ...sh }); rect(19.5, 65.5, 14, 13, mini ? "#7d848d" : C.steelLo, { rx: 2 }); rect(36.5, 65.5, 14, 13, mini ? "#7d848d" : C.steelLo, { rx: 2 });
+  circ(44, 70, 2.4, mini ? "#cfe7f1" : "#ffffff", { opacity: .8 }); circ(46.5, 73, 1.6, mini ? "#cfe7f1" : "#ffffff", { opacity: .7 }); // suds
+  rect(61.5, 56, 1.6, 30, C.wood, mini ? {} : { fill: "#9aa1a9" }); path("M57 90 q5 -8 11 0 z", "#e8e2d4", shs); path("M59 56 h8 v-3 q-1 -3 -4 -3 q-3 0 -4 3 z", C.cream, shs);
+  late.push(() => pill(16, 88, "Dish pit", 5.5));
+
+  // ---- head chef island (red is reserved for the chef + NEEDS YOU)
+  rect(114, 44, 80, 42, C.red, { rx: mini ? 3 : 2, ...(mini ? { opacity: .95 } : {}) });
+  if (mini) rect(114, 44, 80, 42, "url(#light)", { rx: 3, opacity: .0 });
+  // ---- break nook
+  rect(206, 68, 72, 50, C.sage, { rx: 2 });
+  rect(212, 78, 50, 10, mini ? "url(#wood)" : C.wood, { rx: 1.5, ...sh }); rect(214, 88, 46, 5, mini ? "#5a3a26" : "#1f4f52", { rx: 1 });
+  rect(266, 74, 10, 14, C.ink, { rx: 1.2, ...sh }); rect(267.5, 75.5, 7, 4.5, "#4a4f58", { rx: .6 }); rect(269, 81.5, 4, 5, mini ? "#5a3a26" : C.alert, { rx: .6 });
+  rect(251, 98, 24, 13, C.tag, { rx: 1, ...shs, transform: "rotate(-3 263 104)" }); text(253, 99.5, "BACK IN 5", C.ink, 4.2, 900, { transform: "rotate(-3 263 104)" }); text(253, 105, "(ish)", C.sub, 4, 600, { transform: "rotate(-3 263 104)" });
+  late.push(() => pill(207, 120, "Break nook"));
+
+  // ---- MAIN · SERVICE swinging doors
+  rect(284, 40, 38, 52, C.ink, { rx: 1 });
+  rect(287, 44, 15, 46, steel, { rx: 1 }); rect(304, 44, 15, 46, steel, { rx: 1 }); circ(294.5, 56, 3.6, mini ? "#9fd3e6" : "#bfe3ee", { stroke: C.steelLo, "stroke-width": .8 }); circ(311.5, 56, 3.6, mini ? "#9fd3e6" : "#bfe3ee", { stroke: C.steelLo, "stroke-width": .8 });
+  rect(284, 14, 38, 26, C.ink, { rx: 1.2, ...sh }); rect(286, 16, 34, 22, C.alert, { rx: 1 });
+  text(303, 17.5, "MAIN", C.ink, 11, 900, { "text-anchor": "middle", "letter-spacing": ".4" }); text(303, 30, "SERVICE", C.ink, 5, 900, { "text-anchor": "middle", "letter-spacing": ".5" });
+
+  // ---- stations (the line)
+  ST.forEach(([x, y]) => rect(x, y, 44, 40, mini ? "#e9c09a" : "#f7ecdb", { rx: 1.5, stroke: mini ? "none" : C.steelLo, "stroke-width": mini ? 0 : .6 }));
+  ST.forEach(([x, y]) => el("line", { x1: x + 22, y1: y + 40, x2: x + 22, y2: 183, stroke: C.arrow, "stroke-width": 1, "stroke-dasharray": "1 2" }));
+  late.push(() => pill(18, 165, "The line"));
+
+  // ---- belt
+  const by = 184, x0 = 12, xT = 298;
+  if (mini) { rect(x0, by - 1.5, xT - x0 + 10, 13, "#26262b", { rx: 2, ...sh }); for (let x = x0 + 3; x < xT + 8; x += 4) rect(x, by - 1, 1.2, 12, "#55565e", { rx: .5 }); rect(x0, by + .5, xT - x0 + 10, 9, C.belt, { rx: 1.5 }); }
+  else rect(x0, by, xT - x0 + 10, 10, C.belt, { rx: 1 });
+  if (mini) rect(xT - 1.5, 92, 13, 104, "#26262b", { rx: 2, ...sh });
+  rect(xT, 92, 10, 102, C.belt, { rx: 1 });
+  for (let x = x0 + 8; x < xT - 4; x += 12) path(`M${x - 1.5} ${by + 2.2} l3.2 2.8 l-3.2 2.8`, "none", { stroke: C.arrow, "stroke-width": 1.4, "stroke-linecap": "round", "stroke-linejoin": "round" });
+  for (let yy = 180; yy > 96; yy -= 12) path(`M${xT + 2.2} ${yy + 3} l2.8 -3.2 l2.8 3.2`, "none", { stroke: C.arrow, "stroke-width": 1.4, "stroke-linecap": "round", "stroke-linejoin": "round" });
+
+  // ---- the pass (review)
+  rect(190, 166, 46, 30, C.ink, { rx: 1.5, ...sh }); rect(191, 167, 44, 4, steel, { rx: 1 }); rect(192, 171, 3.5, 25, steel); rect(230.5, 171, 3.5, 25, steel);
+  [[202, 173], [213, 173], [224, 173]].forEach(([cx, cy]) => { if (mini) circ(cx, cy + 6, 9, "url(#lamp)"); else circ(cx, cy + 4, 4.5, C.alert, { opacity: .35 }); path(`M${cx - 4} ${cy} h8 l-1.5 3 h-5 z`, mini ? "url(#steel)" : C.steelHi); });
+  rect(189, 158, 48, 9, C.red, { rx: 1.2, ...shs }); text(213, 159.6, "The pass · review", C.cream, 5, 800, { "text-anchor": "middle" });
+  const dish = (cx, cy) => { el("ellipse", { cx, cy, rx: 5.6, ry: 3.4, fill: "#ffffff", ...shs }); el("ellipse", { cx, cy, rx: 3.6, ry: 2.1, fill: mini ? "#efe6d6" : "#f4ecdf" }); circ(cx - .6, cy - .2, 1.5, C.red); circ(cx + 1.2, cy - .8, .8, C.sage); };
+  dish(212, 189); dish(271, 189);
+
+  // ---- people (vector figures in the same 16 x 20 footprint)
+  function person(kind, x, y, { cut = 20, pal = {} } = {}) {
+    const P = Object.assign({ skin: "#f0c09a", coat: C.cream, pants: "#3a3640", shoe: C.ink, hat: C.cream, acc: C.red, eye: C.ink }, pal);
+    g0({ transform: `translate(${x} ${y})`, ...(mini ? { filter: "url(#shs)" } : {}) });
+    el("clipPath", { id: `cut-${kind}-${x}-${y}` }, `<rect x="-6" y="-8" width="28" height="${cut + 8}"/>`);
+    g0({ "clip-path": `url(#cut-${kind}-${x}-${y})` });
+    // legs + shoes
+    rect(4.6, 15, 2.8, 4.4, P.pants, { rx: .6 }); rect(8.6, 15, 2.8, 4.4, P.pants, { rx: .6 }); rect(4, 18.8, 3.8, 1.4, P.shoe, { rx: .6 }); rect(8.2, 18.8, 3.8, 1.4, P.shoe, { rx: .6 });
+    // torso + arms
+    rect(3.2, 9.4, 9.6, 6.8, P.coat, { rx: 2.4 });
+    rect(1.6, 10.2, 2.4, 5, P.coat, { rx: 1.2 }); rect(12, 10.2, 2.4, 5, P.coat, { rx: 1.2 });
+    circ(2.8, 15.2, 1.1, P.skin); circ(13.2, 15.2, 1.1, P.skin);
+    // head
+    const hc = mini ? `url(#skin-${kind})` : P.skin;
+    if (mini) out.push(`<radialGradient id="skin-${kind}" cx=".38" cy=".35" r=".7"><stop offset="0" stop-color="#fff0e0"/><stop offset=".55" stop-color="${P.skin}"/><stop offset="1" stop-color="#b07a58"/></radialGradient>`);
+    circ(8, 6.4, 3.7, hc);
+    circ(6.6, 6.4, .5, P.eye); circ(9.4, 6.4, .5, P.eye);
+    if (kind === "chef") {
+      // tall toque, mustache, ladle — the tallest silhouette in the room
+      rect(4.6, -2.6, 6.8, 5.4, P.hat, { rx: 1 }); circ(5.6, -3.4, 2.1, P.hat); circ(8, -4.4, 2.4, P.hat); circ(10.4, -3.4, 2.1, P.hat); rect(4.4, 1.8, 7.2, 1.4, mini ? "#ddd3c4" : "#e4d9c6", { rx: .5 });
+      path("M5.6 8.2 q1.2 -1.2 2.4 -.2 q1.2 -1 2.4 .2 q-1.2 .9 -2.4 .2 q-1.2 .7 -2.4 -.2z", "#5b3a2a");
+      path("M5.6 5.2 l1.8 -.6 M10.4 5.2 l-1.8 -.6", "none", { stroke: P.eye, "stroke-width": .55, "stroke-linecap": "round" }); // raised brows
+      path("M6 9.6 h4 l-2 2.2z", P.acc); circ(6.2, 12, .45, C.ink); circ(9.8, 12, .45, C.ink); circ(6.2, 14, .45, C.ink); circ(9.8, 14, .45, C.ink);
+      rect(13.4, 1, .9, 14, C.steelLo, { rx: .4 }); circ(13.9, 1, 1.8, C.steelLo);
+    }
+    if (kind === "sous" || kind === "brk") {
+      path("M4.2 5.4 q0 -4.8 3.8 -4.8 q3.8 0 3.8 4.8 z", P.hat); path("M11.4 3.6 l3.2 -1.2 l-1 2.6 l1.4 1.6 l-3.4 -.6z", P.hat); // bandana + knot
+      path("M6.8 8.6 q1.2 .8 2.4 0", "none", { stroke: P.eye, "stroke-width": .5, "stroke-linecap": "round" });
+      if (kind === "sous") { path("M13.6 15.4 l3.6 -6.4 l.9 .5 l-3.2 6.6z", "#e4e7ea", { stroke: C.steelLo, "stroke-width": .3 }); rect(12.8, 14.6, 1.4, 2.4, C.ink, { rx: .3, transform: "rotate(28 13.5 15.8)" }); }
+      if (kind === "brk") { path("M5.9 6.4 h1.4 M8.7 6.4 h1.4", "none", { stroke: P.eye, "stroke-width": .55 }); }
+    }
+    if (kind === "sauce") {
+      rect(4.2, 0.4, 7.6, 3.6, P.hat, { rx: 1.4 }); for (let k = 0; k < 4; k++) rect(5.2 + k * 1.8, .8, .4, 2.8, "#d8cfc0"); rect(4, 3.2, 8, 1.2, P.acc, { rx: .4 });
+      path("M6.8 8.4 q1.2 1 2.4 0", "none", { stroke: P.eye, "stroke-width": .5, "stroke-linecap": "round" });
+      rect(4.4, 11, 7.2, 5.6, P.acc, { rx: 1 }); // apron
+      rect(13.6, 7, .7, 8, C.steelLo); el("ellipse", { cx: 14, cy: 6, rx: 1.6, ry: 2.6, fill: "none", stroke: C.steelLo, "stroke-width": .5 }); el("ellipse", { cx: 14, cy: 6, rx: .7, ry: 2.6, fill: "none", stroke: C.steelLo, "stroke-width": .4 });
+    }
+    if (kind === "expo") {
+      path("M4.2 5 q0 -4.4 3.8 -4.4 q3.8 0 3.8 4.4 z", P.hat); path("M4.6 4.4 q-3 -.2 -4.2 1.2 l4.2 .4z", P.hat); // backwards cap, bill at back-left
+      path("M4 6.4 q0 -4 4 -4 q4 0 4 4", "none", { stroke: C.ink, "stroke-width": .7 }); rect(3.2, 5.6, 1.6, 2.6, C.ink, { rx: .5 }); path("M4.2 8 q1.4 2 3.4 1.6", "none", { stroke: C.ink, "stroke-width": .5 }); // headset
+      path("M6.8 8.4 q1.2 .9 2.4 0", "none", { stroke: P.eye, "stroke-width": .5, "stroke-linecap": "round" });
+      for (let k = 0; k < 5; k++) rect(4.2 + k * 1.6, 11, .8, 5, C.cream, { opacity: .85 }); // striped apron
+      rect(14, 0, .7, 15, C.steelLo); rect(12.6, 2, 3.6, 2.6, "#ffffff", { transform: "rotate(-8 14.4 3.3)" }); rect(12.8, 5, 3.4, 2.4, "#fff6df", { transform: "rotate(6 14.4 6.2)" }); // ticket spike
+    }
+    g1(); g1();
+  }
+  // the head chef + island front (tablet + copper pot)
+  person("chef", 146, 44, { pal: { coat: mini ? "#fbf7ef" : "#ffffff", pants: "#3a3640" } });
+  rect(124, 64, 60, 12, steel, { rx: 1.5, ...sh }); rect(130, 58, 12, 7, C.ink, { rx: 1 }); rect(131.5, 59.2, 9, 4.6, mini ? "#7fd8c4" : "#bfe3ee", { rx: .5 });
+  circ(172, 61, 5, mini ? "url(#copper)" : C.copper, shs); rect(166, 59.5, 12, 1.4, mini ? "#7a3e1c" : "#b8402a", { rx: .6 });
+  // sous chef: cutting board with carrots
+  person("sous", ST[0][0] + 6, ST[0][1] + 5, { cut: 15.5, pal: { coat: "#3a3640", hat: C.red === "#e4572e" ? "#e4572e" : "#c8463a", skin: "#c98a62" } });
+  rect(ST[0][0] + 4, ST[0][1] + 20, 36, 8, steel, { rx: 1.2, ...sh }); rect(ST[0][0] + 24, ST[0][1] + 14, 14, 7, mini ? "url(#wood)" : "#d9b48a", { rx: 1, ...shs }); el("ellipse", { cx: ST[0][0] + 28, cy: ST[0][1] + 17.5, rx: 2.6, ry: .9, fill: "#f08a2a" }); el("ellipse", { cx: ST[0][0] + 33, cy: ST[0][1] + 16.8, rx: 2.2, ry: .8, fill: "#f08a2a" }); circ(ST[0][0] + 35, ST[0][1] + 19, .9, C.sage);
+  // saucier: stock pot with steam
+  person("sauce", ST[1][0] + 6, ST[1][1] + 5, { cut: 15.5, pal: { skin: "#8a5a3c", acc: mini ? "#3a6db5" : "#2f6f73" } });
+  rect(ST[1][0] + 4, ST[1][1] + 20, 36, 8, steel, { rx: 1.2, ...sh }); rect(ST[1][0] + 25, ST[1][1] + 11, 13, 10, mini ? "#4a4f58" : "#26242b", { rx: 1.5, ...shs }); el("ellipse", { cx: ST[1][0] + 31.5, cy: ST[1][1] + 12, rx: 5.6, ry: 1.6, fill: "#b5552f" });
+  path(`M${ST[1][0] + 29} ${ST[1][1] + 9} q-2 -2 0 -4 q2 -2 0 -4 M${ST[1][0] + 33} ${ST[1][1] + 9} q2 -2 0 -4 q-2 -2 0 -4`, "none", { stroke: "#ffffff", "stroke-width": .8, "stroke-linecap": "round", opacity: .85 });
+  // open station: 3.4 slip waits, one lonely onion
+  rect(ST[2][0] + 4, ST[2][1] + 20, 36, 8, steel, { rx: 1.2, ...sh }); rect(ST[2][0] + 9, ST[2][1] + 12, 14, 8, C.tag, { rx: .6, ...shs, transform: `rotate(-4 ${ST[2][0] + 16} ${ST[2][1] + 16})` }); text(ST[2][0] + 11, ST[2][1] + 13.4, "3.4", C.ink, 6, 800, { transform: `rotate(-4 ${ST[2][0] + 16} ${ST[2][1] + 16})` });
+  circ(ST[2][0] + 31, ST[2][1] + 17.5, 2.6, "#e8c07a", shs); path(`M${ST[2][0] + 31} ${ST[2][1] + 15} q.6 -1.6 1.6 -2`, "none", { stroke: C.sage, "stroke-width": .6 });
+  // break: Mochi on the bench with a mug
+  person("brk", 228, 66, { cut: 14, pal: { hat: C.alert, coat: mini ? "#7a52b5" : "#2f6f73" } });
+  rect(212, 80, 50, 8, mini ? "url(#wood)" : C.wood, { rx: 1.5 }); rect(239.5, 76.5, 4, 4.4, "#ffffff", { rx: .6, ...shs }); path("M243.5 77.6 q1.6 .8 0 2", "none", { stroke: "#ffffff", "stroke-width": .6 });
+  path("M241 75.5 q-1 -1.5 0 -3", "none", { stroke: "#ffffff", "stroke-width": .5, opacity: .7 });
+  // expediter at the pass
+  person("expo", 238, 150, { pal: { hat: mini ? "#2e8a6e" : "#7fa37a", coat: mini ? "#3a3640" : "#26242b", skin: "#f0c09a" } });
+
+  // ---- light (miniature only): warm key light on the work, falloff at the edges
+  if (mini) { rect(6, 6, 324, 204, "url(#light)", { rx: 4, "pointer-events": "none" }); rect(6, 6, 324, 204, "#000", { filter: "url(#paint)", opacity: 1, rx: 4 }); }
+
+  // ---- labels (drawn after light so they stay crisp and high-contrast)
+  function pill(x, y, t, size = 6, center = false) { const w = tw(t, size, 700) + 4.4, xx = center ? x - w / 2 : x; rect(xx, y, w, size + 3, C.zone, { rx: 1.4, ...shs }); text(xx + 2.2, y + 1.4, t, C.zoneFg, size, 700); return w; }
+  function needs(cx, y) {
+    const t = "NEEDS YOU", w = tw(t, 10, 900) + 20, h = 16, x = cx - w / 2;
+    rect(x - 2, y - 2, w + 4, h + 4, C.ink, { rx: 3, ...sh }); rect(x - .8, y - .8, w + 1.6, h + 1.6, C.alert, { rx: 2.4 }); rect(x, y, w, h, C.ink, { rx: 2 }); rect(x + 1, y + 1, w - 2, h - 2, C.alert, { rx: 1.6 });
+    icon("needs", x + 3, y + 3, 10, C.ink, { cut: C.alert }); text(x + 16, y + 3.2, t, C.ink, 10, 900, { "letter-spacing": ".4" });
+    path(`M${cx - 3.5} ${y + h + 2} h7 l-3.5 4z`, C.ink);
+  }
+  function tag(cx, y, kind, id, title, role, ctxPct) {
+    const idW = tw(id, 8, 800), tW = tw(title, 5.5, 800), w = Math.max(9 + idW + 2 + tW + 3, ctxPct == null ? 0 : 46), h = ctxPct == null ? 17 : 24, x = cx - w / 2;
+    rect(x, y, w, h, C.tag, { rx: 1.8, stroke: C.ink, "stroke-width": 1, ...shs }); icon(kind, x + 3, y + 3, 4.6, C.ink);
+    text(x + 9, y + 1.6, id, C.ink, 8, 800); text(x + 9 + idW + 2, y + 3, title, C.ink, 5.5, 800); text(x + 9, y + 11, role, C.sub, 4.5, 700);
+    if (ctxPct != null) { rect(x + 1, y + 16.2, w - 2, .5, "#d9cfc0"); text(x + 3, y + 17.6, "CTX", C.ink, 4.5, 800); const on = Math.round(ctxPct / 100 * 8); for (let i = 0; i < 8; i++) rect(x + 14 + i * 2, y + 18, 1.2, 4, i < on ? C.ink : "#d9cfc0", { rx: .3 }); text(x + 32, y + 17.6, ctxPct + "%", C.ink, 4.5, 800); }
+    path(`M${cx - 2} ${y + h} h4 l-2 2.4z`, C.ink);
+  }
+  function wait(cx, y, id, word) { const w = 9 + tw(id, 6, 800) + 3 + tw(word, 5, 600) + 6, h = 10, x = cx - w / 2; rect(x, y, w, h, mini ? "#e7b996" : "#f7ecdb", { rx: 1.6, stroke: "#5a5060", "stroke-width": .8, "stroke-dasharray": "1.6 1.4" }); icon("wait", x + 3, y + 2.6, 4.6, "#5a5060"); text(x + 9, y + 1.8, id, "#5a5060", 6, 800); text(x + 9 + tw(id, 6, 800) + 3, y + 2.6, word, "#5a5060", 5, 600); el("line", { x1: cx, y1: y + h, x2: cx, y2: y + h + 4, stroke: "#5a5060", "stroke-width": .8, "stroke-dasharray": "1 1" }); }
+  function off(cx, y) { const t = "On break", r = "developer", w = 9 + tw(t, 5.5, 800) + 3 + tw(r, 4.5, 700) + 3, x = cx - w / 2; rect(x, y, w, 10, C.tag, { rx: 1.6, stroke: C.ink, "stroke-width": .8, ...shs }); icon("off", x + 3, y + 2.6, 4.6, C.ink); text(x + 9, y + 2, t, C.ink, 5.5, 800); text(x + 9 + tw(t, 5.5, 800) + 3, y + 3, r, C.sub, 4.5, 700); path(`M${cx - 1.6} ${y + 10} h3.2 l-1.6 1.8z`, C.ink); }
+  late.forEach((f) => f());
+  needs(154, 21);
+  pill(154, 78, CAST.chef.name, 5.5, true); rect(154 - 30, 87.5, 60, 7, C.ink, { rx: 1.2, opacity: .82 }); text(154, 88.6, "Head Chef · orchestrator", C.cream, 4.6, 700, { "text-anchor": "middle" });
+  tag(38, 95, "work", "3.2", "Sous Chef", "developer", 37);
+  tag(92, 102, "work", "3.3", "Saucier", "developer");
+  wait(152, 108, "3.4", "waiting for a cook");
+  pill(ST[0][0] + 22, ST[0][1] + 31, CAST.sous.name, 5.5, true); pill(ST[1][0] + 22, ST[1][1] + 31, CAST.sauce.name, 5.5, true);
+  off(238, 56); pill(238, 96, CAST.brk.name, 5.5, true);
+  tag(246, 131, "review", "3.1", "Expediter", "reviewer");
+  pill(246, 172, CAST.expo.name, 5.5, true);
+  { const w = tw("2.9", 8, 800) + 6, x = 271 - w / 2; rect(x, 166, w, 12, C.tag, { rx: 1.6, stroke: C.ink, "stroke-width": 1, ...shs }); text(x + 3, 167.4, "2.9", C.ink, 8, 800); path("M269.5 178 h3 l-1.5 2z", C.ink); }
+  { const t = "to MAIN · SERVICE ›", w = tw(t, 5, 800) + 4.4, x = 248; rect(x, 197, w, 8, C.zone, { rx: 1.4 }); text(x + 2.2, 198.4, t, C.zoneFg, 5, 800); }
+  g1();
+
+  // ---- cast + legend
+  const py = OY + 216;
+  rect(6, py + 3, FW - 12, .6, C.panelMuted);
+  text(6, py + 6, "CAST · ACTUAL FIGURE SIZE", C.panelMuted, 5, 800);
+  [["chef", { coat: "#ffffff" }], ["sous", { coat: "#3a3640", hat: mini ? "#c8463a" : "#e4572e", skin: "#c98a62" }], ["sauce", { skin: "#8a5a3c", acc: mini ? "#3a6db5" : "#2f6f73" }], ["expo", { hat: mini ? "#2e8a6e" : "#7fa37a", coat: mini ? "#3a3640" : "#4a4652" }]].forEach(([k, pal], i) => {
+    const x = 6 + i * 53, y = py + 15, c = CAST[k];
+    rect(x, y, 20, 24, mini ? "#d9a07a" : C.tile, { rx: 1.5 }); person(k, x + 2, y + 4, { pal });
+    text(x + 22, y, c.name, C.panelFg, 6.5, 800); text(x + 22, y + 8, c.title, C.alert, 5, 800); text(x + 22, y + 14, c.role, C.panelMuted, 4.5, 700); text(x + 22, y + 20, c.props[0], C.panelMuted, 4, 600);
+  });
+  legend((x, y, k) => { if (k === "needs") { rect(x - 1, y - 1, 7, 7, C.ink, { rx: 1 }); rect(x, y, 5, 5, C.alert, { rx: .8 }); icon("needs", x + .5, y + .5, 4, C.ink, { cut: C.alert }); } else icon(k, x, y, 5, k === "wait" ? C.panelMuted : C.panelFg); },
+    (x, y, t, c, sz, w) => text(x, y, t, c, sz, w), { panelMuted: C.panelMuted, panelFg: C.panelFg }, py, null);
+  caption((x, y, t) => text(x, y, t, C.panelFg, 5.5, 500), (t) => tw(t, 5.5, 500), SENT[style]);
+
+  svg.innerHTML = out.join("");
+  return svg;
+}
+
+// ============================================================ mount
+const v = q.get("v") || "pixel";
+const outEl = document.getElementById("out");
+const make = (k, sc) => (k === "pixel" ? renderPixel(sc) : renderVector(k, sc));
+if (v === "all") { outEl.style.gap = `${10 * S}px`; ["pixel", "illus", "mini"].forEach((k) => outEl.appendChild(make(k, S))); }
+else outEl.appendChild(make(v, S));
+document.title = v;
+</script>
+</body></html>

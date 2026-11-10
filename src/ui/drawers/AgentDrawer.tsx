@@ -2,7 +2,8 @@ import { useEffect, useState, type ReactNode } from "react";
 import { CLI_LABEL, HUMAN_ID, type AccessRequest, type AgentConfig, type AgentStatus, type OfficeSnapshot } from "../../data/types";
 import { officeActions, useOffice } from "../../store/office";
 import { ui, type AgentTab } from "../../store/ui";
-import { ago, Dot, Portrait, ReviewChip, SectionTitle, StateChip, Tabs, useNow } from "../kit";
+import { ago, Dot, ReviewChip, SectionTitle, StateChip, Tabs, useNow } from "../kit";
+import { CrewHeader } from "./CrewHeader";
 import { DrawerHeader } from "./Drawer";
 import { PortBanner, PortsRow } from "./Ports";
 import { TerminalView } from "./TerminalView";
@@ -13,6 +14,11 @@ export function AgentDrawer({ id, initialTab }: { id: string; initialTab?: Agent
   const [tab, setTab] = useState<AgentTab>(initialTab ?? "terminal");
   const agent = snap?.config.team.find((a) => a.id === id);
   const status = snap?.agents.find((a) => a.agentId === id);
+  // Opening the drawer is seeing the context alert: it clears until the next crossing.
+  const alerting = !!status?.contextAlert;
+  useEffect(() => {
+    if (alerting) officeActions.ackContextAlert(id);
+  }, [alerting, id]);
   if (!snap || !agent || !status) {
     return (
       <>
@@ -28,7 +34,6 @@ export function AgentDrawer({ id, initialTab }: { id: string; initialTab?: Agent
   return (
     <>
       <DrawerHeader>
-        <Portrait color={agent.color} lead={agent.isLead} size={36} />
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <b className="text-[18px]">{agent.name}</b>
@@ -39,12 +44,14 @@ export function AgentDrawer({ id, initialTab }: { id: string; initialTab?: Agent
           </div>
         </div>
       </DrawerHeader>
+      <CrewHeader id={id} />
       <SessionBar agent={agent} status={status} />
       {access ? (
         <AccessCard request={access} agent={agent} />
       ) : (
         status.note && (
-          <div className={`border-b-[3px] border-ink px-3 py-1.5 text-[14px] ${status.state === "needs-input" ? "bg-[#ffe1ea] text-red" : "bg-cream-2"}`}>
+          // One line, always: a note that wraps or unwraps would change the terminal's height under you.
+          <div className={`truncate border-b-[3px] border-line px-3 py-1.5 text-[14px] ${status.state === "needs-input" ? "bg-danger text-[#ff7a9c]" : "bg-cream-2"}`} title={status.note}>
             {status.note}
             {status.state === "needs-input" && <span className="ml-2 text-muted">— answer in the terminal and press Enter</span>}
           </div>
@@ -52,7 +59,7 @@ export function AgentDrawer({ id, initialTab }: { id: string; initialTab?: Agent
       )}
       <BlockedRequests agent={agent} />
       <PortBanner agent={agent} status={status} />
-      <div className="border-b-[3px] border-ink px-3 py-2">
+      <div className="border-b-[3px] border-line px-3 py-2">
         <Tabs
           value={tab}
           onChange={setTab}
@@ -92,7 +99,7 @@ function ShellTab({ agent, status }: { agent: AgentConfig; status: AgentStatus }
     return <div className="p-4 text-[14px] text-muted">Start {agent.name} first. The shell opens inside {agent.mode === "sandbox" ? "their sandbox" : "their folder"}.</div>;
   return (
     <div className="flex h-full flex-col">
-      <div className="flex items-center gap-2 border-b-[3px] border-ink bg-cream-2 px-3 py-1 text-[12px] text-muted">
+      <div className="flex items-center gap-2 border-b-[3px] border-line bg-cream-2 px-3 py-1 text-[12px] text-muted">
         <span className="min-w-0 flex-1 truncate">
           {agent.mode === "sandbox" ? `A shell in ${agent.name}'s sandbox, beside the agent` : `Your shell in ${agent.name}'s folder`}
         </span>
@@ -129,7 +136,7 @@ function BlockedRequests({ agent }: { agent: AgentConfig }) {
   };
   const shown = open ? approvals : approvals.slice(0, 3);
   return (
-    <div className="border-b-[3px] border-ink bg-[#fff1d6] px-3 py-1.5 text-[13px]">
+    <div className="border-b-[3px] border-line bg-warn px-3 py-1.5 text-[13px]">
       <div className="flex items-center gap-2">
         <b className="flex-1">
           Blocked by the sandbox · {approvals.length}
@@ -176,8 +183,8 @@ function BlockedRequests({ agent }: { agent: AgentConfig }) {
 /** The agent asked (request_access) to reach a domain its sandbox blocks. */
 function AccessCard({ request, agent }: { request: AccessRequest; agent: AgentConfig }) {
   return (
-    <div className="border-b-[3px] border-ink bg-[#ffe1ea] px-3 py-2">
-      <div className="text-[14px] text-red">
+    <div className="border-b-[3px] border-line bg-danger px-3 py-2">
+      <div className="text-[14px] text-[#ff7a9c]">
         <b>{agent.name}</b> wants to reach <b className="font-term text-[17px]">{request.domain}</b>
       </div>
       <div className="mb-2 text-[13px] text-muted">“{request.reason}”</div>
@@ -203,7 +210,7 @@ function SessionBar({ agent, status }: { agent: AgentConfig; status: AgentStatus
   const s = status.session;
   const live = useOffice((st) => st.live);
   return (
-    <div className="flex items-center gap-2 border-b-[3px] border-ink bg-cream px-3 py-1.5 text-[13px]">
+    <div className="flex items-center gap-2 border-b-[3px] border-line bg-cream px-3 py-1.5 text-[13px]">
       <span className={`chip chip-dot ${s.state === "starting" ? "blink" : ""}`} style={{ ["--c" as string]: SESSION_COLOR[s.state] }}>
         {s.state === "running" ? "Session running" : s.state === "starting" ? "Starting" : s.state === "failed" ? "Failed" : "Stopped"}
       </span>
@@ -219,7 +226,7 @@ function SessionBar({ agent, status }: { agent: AgentConfig; status: AgentStatus
         <button className="btn px-2 text-[12px]" disabled={s.state === "starting"} onClick={() => officeActions.stopAgent(agent.id)}>
           Stop
         </button>
-      ) : (
+      ) : agent.crew?.session ? null : (
         <button className="btn px-2 text-[12px]" onClick={() => officeActions.startAgent(agent.id)}>
           Start
         </button>
@@ -235,7 +242,15 @@ function NotRunning({ agent, status }: { agent: AgentConfig; status: AgentStatus
   return (
     <div className="grid h-full place-items-center bg-navy-2 p-6 text-center text-[#dfe6ff]">
       <div className="max-w-[380px]">
-        {s.state === "starting" ? (
+        {agent.crew?.session ? (
+          <>
+            <p className="mb-2 font-term text-[22px]">This {agent.crew.session} session has finished</p>
+            {s.detail && <p className="mb-3 font-term text-[16px] text-[#9aa6d1]">{s.detail}</p>}
+            <p className="text-[13px] text-[#9aa6d1]">
+              Its report went back to the coordinator. Pathfinder decides the next session for {agent.crew.ticket ?? "this ticket"}; Tin &amp; Thyme does not restart workers.
+            </p>
+          </>
+        ) : s.state === "starting" ? (
           <p className="blink font-term text-[22px]">{s.detail ?? "Starting…"}</p>
         ) : (
           <>
@@ -447,7 +462,7 @@ function MessagesTab({ snap, agent }: { snap: OfficeSnapshot; agent: AgentConfig
             const out = m.fromId === agent.id;
             const other = who(out ? m.toId : m.fromId);
             return (
-              <li key={m.id} className={`border-2 border-ink px-2.5 py-1.5 ${out ? "ml-8 bg-white" : "mr-8 bg-cream-2"}`}>
+              <li key={m.id} className={`border-2 border-line px-2.5 py-1.5 ${out ? "ml-8 bg-card" : "mr-8 bg-cream-2"}`}>
                 <div className="flex items-center gap-1.5 text-[13px] text-muted">
                   {other && <Dot color={other.color} size={8} />}
                   {out ? `To ${other?.name ?? "?"}` : `From ${other?.name ?? "?"}`}
@@ -460,7 +475,7 @@ function MessagesTab({ snap, agent }: { snap: OfficeSnapshot; agent: AgentConfig
         </ul>
       </div>
       <form
-        className="flex gap-2 border-t-[3px] border-ink bg-cream p-2"
+        className="flex gap-2 border-t-[3px] border-line bg-cream p-2"
         onSubmit={(e) => {
           e.preventDefault();
           send();

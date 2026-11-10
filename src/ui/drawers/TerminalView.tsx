@@ -128,12 +128,19 @@ export function TerminalView({ agentId, autoFocus = true }: { agentId: string; a
         e.preventDefault();
         return false;
       });
+      // Refit once the layout settles (drawer animation, a maximize, a note appearing), not on every
+      // intermediate frame: each new size resizes the agent's tmux window, and the program in it redraws.
+      let fitTimer = 0;
       ro = new ResizeObserver(() => {
-        try {
-          fit.fit();
-        } catch {
-          /* element hidden mid-animation */
-        }
+        window.clearTimeout(fitTimer);
+        fitTimer = window.setTimeout(() => {
+          if (disposed) return;
+          try {
+            fit.fit();
+          } catch {
+            /* element hidden mid-animation */
+          }
+        }, 120);
       });
       ro.observe(el);
       if (autoFocus) term.focus();
@@ -153,7 +160,7 @@ export function TerminalView({ agentId, autoFocus = true }: { agentId: string; a
     <div className="relative h-full min-h-0 w-full">
       <div ref={host} className="h-full min-h-0 w-full bg-navy-2" />
       {notice && (
-        <div role="status" className="absolute bottom-3 left-1/2 z-10 max-w-[90%] -translate-x-1/2 border-2 border-ink bg-yellow px-2 py-1 text-[13px] text-ink">
+        <div role="status" className="absolute bottom-3 left-1/2 z-10 max-w-[90%] -translate-x-1/2 border-2 border-line bg-yellow px-2 py-1 text-[13px] text-[#141a2e]">
           {notice}
         </div>
       )}
