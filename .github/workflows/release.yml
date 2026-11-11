@@ -1,0 +1,310 @@
+name: release
+
+# Publish `tin-and-thyme` to npm, then make the release public, in that order.
+#
+# Modelled on Lorekeeper's and Pathfinder's release workflows, for their reasons:
+#
+#   1. There is no human credential. npm mints a short-lived publish token from this
+#      workflow's OIDC identity (trusted publishing), so there is no OTP to answer and
+#      no token to expire. Provenance is attached automatically only for a public
+#      package published from a PUBLIC repository; while this repository is private,
+#      releases carry none.
+#   2. Nothing irreversible happens before the registry has the package. The tag and the
+#      GitHub Release are created only after the registry has been read back.
+#
+# The trigger is a manual dispatch, never a tag push, because a tag-triggered workflow
+# would perform the irreversible act first. Every step is convergent: it checks whether
+# its effect already exists and skips if so, so a run that dies halfway is repaired by
+# dispatching it again, never by inventing a new version.
+#
+# GATED. This workflow refuses to publish until all of these are true (RELEASING.md):
+#   - GitHub Actions is enabled for the repository (it is disabled today);
+#   - package.json no longer says "private": true (the deliberate first-publication step);
+#   - tin-and-thyme already exists on npm: npm binds a trusted publisher only to an
+#     existing package, so 0.1.0 is published once by a human, from the verified tarball;
+#   - a trusted publisher for this file is configured on npmjs.com, with `npm publish`
+#     allowed.
+#
+# The trusted publisher on npmjs.com is configured against this file's NAME. Renaming it
+# breaks publishing.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, no leading v (for example 0.1.1)"
+        required: true
+        type: string
+
+# `contents: write` pushes the tag and creates the Release; `id-token: write` mints the
+# OIDC token npm trades for a publish credential. Nothing else.
+permissions:
+  contents: write
+  id-token: write
+
+# Never cancel a release in flight: cancelling between publish and tag is the state this
+# workflow exists to avoid.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Publish and release
+    # Trusted publishing rejects self-hosted runners.
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Refuse any trigger but a dispatch against main
+        if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::release runs only as a manual dispatch against main" \
+               "(got ${{ github.event_name }} on ${{ github.ref }})"
+          exit 1
+
+      - name: Check out the release commit
+        uses: actions/checkout@v4
+        with:
+          # The publish guard reads origin/main.
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          # Trusted publishing needs Node >= 22.14.
+          node-version: 24
+          cache: pnpm
+          # Deliberately NO `registry-url`: it writes an .npmrc with an empty
+          # `_authToken`, which npm prefers over the OIDC exchange, and the publish then
+          # fails with an unhelpful 404 or 403.
+
+      - name: Ensure npm supports trusted publishing
+        run: |
+          set -euo pipefail
+          npm install --global npm@latest
+          echo "npm $(npm --version), node $(node --version)"
+          if [ "$(printf '11.5.1\n%s\n' "$(npm --version)" | sort -V | head -1)" != "11.5.1" ]; then
+            echo "::error::npm $(npm --version) is older than 11.5.1 and cannot publish via OIDC"
+            exit 1
+          fi
+
+      - name: Plan the release
+        id: plan
+        env:
+          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          case "$VERSION" in
+            v*) echo "::error::give the version without the leading v: ${VERSION#v}"; exit 1 ;;
+          esac
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::'$VERSION' is not a MAJOR.MINOR.PATCH version"
+            exit 1
+          fi
+
+          # The changelog is the source of truth; the manifest is derived from it; the
+          # dispatcher's input is a third statement of the same fact.
+          changelog="$(node -e '
+            const text = require("fs").readFileSync("CHANGELOG.md", "utf8");
+            const match = text.match(/^## \[(\d+\.\d+\.\d+)\]/m);
+            process.stdout.write(match ? match[1] : "");
+          ')"
+          manifest="$(node -p 'require("./package.json").version')"
+          private="$(node -p 'Boolean(require("./package.json").private)')"
+
+          echo "dispatched: $VERSION"
+          echo "changelog:  $changelog"
+          echo "manifest:   $manifest"
+          echo "private:    $private"
+          echo "commit:     $GITHUB_SHA"
+
+          if [ "$changelog" != "$VERSION" ] || [ "$manifest" != "$VERSION" ]; then
+            echo "::error::version disagreement — dispatched $VERSION," \
+                 "changelog $changelog, manifest $manifest."
+            exit 1
+          fi
+
+          # The first-publication boundary: "private": true stays until a human removes it.
+          if [ "$private" = "true" ]; then
+            echo "::error::package.json still says \"private\": true. Removing it is the" \
+                 "deliberate first-publication step; see RELEASING.md."
+            exit 1
+          fi
+
+          git fetch --quiet origin main
+          if [ "$(git rev-parse origin/main)" != "$GITHUB_SHA" ]; then
+            echo "::error::$GITHUB_SHA is not the tip of origin/main" \
+                 "($(git rev-parse origin/main)). Re-dispatch after main settles."
+            exit 1
+          fi
+
+          # The bootstrap gate. A 404 packument means the package has never been
+          # published, so no trusted publisher can exist for it yet.
+          status="$(curl -s -o packument.json -w '%{http_code}' https://registry.npmjs.org/tin-and-thyme)"
+          if [ "$status" = "404" ]; then
+            echo "::error::tin-and-thyme has never been published. The first" \
+                 "publication is a one-time human bootstrap; see RELEASING.md."
+            exit 1
+          fi
+          if [ "$status" != "200" ]; then
+            echo "::error::the registry answered $status for tin-and-thyme"
+            exit 1
+          fi
+
+          published=no
+          if node -e 'process.exit(require("./packument.json").versions?.[process.argv[1]] ? 0 : 1)' "$VERSION"; then
+            published=yes
+            echo "::notice::tin-and-thyme@$VERSION is already on the registry; publish will be skipped"
+          fi
+          rm -f packument.json
+
+          tagged=no
+          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null 2>&1; then
+            tagged=yes
+            echo "::notice::tag v$VERSION already exists on the remote; tagging will be skipped"
+          fi
+
+          released=no
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            released=yes
+            echo "::notice::GitHub Release v$VERSION already exists; it will be left alone"
+          fi
+
+          if [ "$published$tagged$released" = "yesyesyes" ]; then
+            echo "::error::v$VERSION is already published, tagged, and released. Nothing to do."
+            exit 1
+          fi
+
+          {
+            echo "version=$VERSION"
+            echo "published=$published"
+            echo "tagged=$tagged"
+            echo "released=$released"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install, test and verify the package
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile
+          pnpm build
+          npx tsx scripts/session-backend-test.ts
+          npx tsx scripts/workspace-test.ts
+          mkdir -p "$RUNNER_TEMP/pack"
+          npm pack --pack-destination "$RUNNER_TEMP/pack"
+          node scripts/smoke-test.mjs "$RUNNER_TEMP/pack/tin-and-thyme-${{ steps.plan.outputs.version }}.tgz"
+
+      - name: Publish to npm
+        # The single authenticated step, and the first irreversible one. No secret is
+        # referenced: the credential is minted from this job's OIDC identity against the
+        # trusted publisher configured on npmjs.com. The package's prepublishOnly guard
+        # (scripts/publish-guard.mjs) checks intent, privacy, version, changelog, README
+        # images and the tree once more against the real working directory.
+        if: steps.plan.outputs.published == 'no'
+        env:
+          TIN_AND_THYME_PUBLISH: "yes"
+        run: npm publish
+
+      - name: Confirm the registry serves this version
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          # A fresh version can take minutes to appear. Poll every 10 seconds for at
+          # most 10 minutes and stop as soon as it answers.
+          url="https://registry.npmjs.org/tin-and-thyme/$VERSION"
+          interval=10
+          attempts=60
+          limit=600
+          start=$SECONDS
+          rm -f packument.json
+          for attempt in $(seq 1 "$attempts"); do
+            status="$(curl -s --max-time 10 -o packument.json -w '%{http_code}' "$url" || true)"
+            elapsed=$((SECONDS - start))
+            if [ "$status" = "200" ] && [ -s packument.json ]; then
+              echo "attempt $attempt/$attempts: visible after ${elapsed}s"
+              break
+            fi
+            rm -f packument.json
+            echo "attempt $attempt/$attempts: HTTP ${status:-000}, not visible yet (${elapsed}s of ${limit}s)"
+            if [ "$attempt" -eq "$attempts" ] || [ $((elapsed + interval)) -gt "$limit" ]; then
+              break
+            fi
+            sleep "$interval"
+          done
+          if [ ! -s packument.json ]; then
+            echo "::error::tin-and-thyme@$VERSION never appeared on the registry" \
+                 "within ${limit}s. Nothing was tagged or released. Investigate, then re-dispatch."
+            exit 1
+          fi
+
+          head="$(node -p 'require("./packument.json").gitHead || ""')"
+          echo "registry gitHead: ${head:-<absent>}"
+          if [ -z "$head" ]; then
+            echo "::warning::the registry recorded no gitHead, so the published" \
+                 "tree cannot be tied to a commit from here"
+          elif [ "$head" != "$GITHUB_SHA" ]; then
+            echo "::error::published gitHead $head is not the release commit $GITHUB_SHA." \
+                 "Do not tag this. A wrong version can only be superseded."
+            exit 1
+          fi
+          rm -f packument.json
+          echo "tin-and-thyme@$VERSION is live and matches $GITHUB_SHA."
+
+      - name: Tag the release commit
+        if: steps.plan.outputs.tagged == 'no'
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v$VERSION" -m "v$VERSION — released by .github/workflows/release.yml"
+          git push origin "refs/tags/v$VERSION"
+
+      - name: Create the GitHub Release
+        # Notes come verbatim from the changelog section.
+        if: steps.plan.outputs.released == 'no'
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node -e '
+            const version = process.argv[1];
+            const text = require("fs").readFileSync("CHANGELOG.md", "utf8");
+            const escaped = version.replace(/\./g, "\\.");
+            const start = new RegExp(`^## \\[${escaped}\\][^\\n]*\\n`, "m").exec(text);
+            if (!start) { console.error(`no CHANGELOG.md section for ${version}`); process.exit(1); }
+            const rest = text.slice(start.index + start[0].length);
+            const end = /^## /m.exec(rest);
+            process.stdout.write((end ? rest.slice(0, end.index) : rest).replace(/^\n+|\n+$/g, "") + "\n");
+          ' "$VERSION" > notes.md
+          gh release create "v$VERSION" \
+            --verify-tag \
+            --target "$GITHUB_SHA" \
+            --title "Tin & Thyme v$VERSION" \
+            --notes-file notes.md
+          rm -f notes.md
+
+      - name: Summarise
+        if: always()
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          {
+            echo "### tin-and-thyme v$VERSION"
+            echo
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| commit | \`$GITHUB_SHA\` |"
+            echo "| npm | https://www.npmjs.com/package/tin-and-thyme/v/$VERSION |"
+            echo "| release | $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/v$VERSION |"
+            echo
+            echo "Verify from outside: install tin-and-thyme@$VERSION into a scratch folder and open a scratch Pathfinder repository."
+          } >> "$GITHUB_STEP_SUMMARY"

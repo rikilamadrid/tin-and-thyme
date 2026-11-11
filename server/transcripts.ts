@@ -3,7 +3,7 @@
 // The coordinator's transcript and its subagents' transcripts are the durable
 // record of a run: each worker's brief (first prompt), whether it finished
 // (meta.json), and the token usage of its latest model call (context in use).
-// Controlroom reads them so a restart rebuilds the same roster, and so the
+// Tin & Thyme reads them so a restart rebuilds the same roster, and so the
 // roster can show real context usage. Nothing here writes.
 
 import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from "node:fs";

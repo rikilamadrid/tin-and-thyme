@@ -136,7 +136,7 @@ export function busySnapshot(): OfficeSnapshot {
   const activity: ActivityEvent[] = lines.map(([type, agentId, text, min], i) => ({ id: `fx-${i}`, at: ago(min), type, agentId, text }));
   return {
     ...base,
-    config: { ...base.config, project: { ...base.config.project, name: "pokepal (fixture)" }, team },
+    config: { ...base.config, project: { ...base.config.project, name: "sample-app (fixture)" }, team },
     agents,
     boards: [{ id: "fixture", title: "Tin & Thyme fixture · busy run", status: "active", order: 0 }],
     tasks,

@@ -3,8 +3,9 @@
 import { build } from "esbuild";
 
 await build({
-  entryPoints: ["server/main.ts"],
-  outfile: "dist-server/main.mjs",
+  entryPoints: { main: "server/main.ts", kitchen: "server/kitchen.ts" },
+  outdir: "dist-server",
+  outExtension: { ".js": ".mjs" },
   bundle: true,
   platform: "node",
   format: "esm",
@@ -13,4 +14,4 @@ await build({
   sourcemap: false,
   logLevel: "warning",
 });
-console.log("built dist-server/main.mjs");
+console.log("built dist-server/main.mjs and dist-server/kitchen.mjs");

@@ -1,11 +1,11 @@
-// Pathfinder workflow adapter (Controlroom).
+// Pathfinder workflow adapter (Tin & Thyme).
 //
 // When HQ opens a repository that carries Pathfinder's execution-mode marker,
 // the roster and the board come from Pathfinder, never from .jsmhq/:
 //
 //   - the board is the project's OWN engine: `orchestrate.mjs status --json`
 //     (run from the project, so its kit version decides the vocabulary);
-//   - the coordinator is one Claude Code session Controlroom launches in tmux,
+//   - the coordinator is one Claude Code session Tin & Thyme launches in tmux,
 //     running Pathfinder's `/orchestrate start`;
 //   - worker sessions are that coordinator's background subagents. They are
 //     seen through Claude Code hook events on the coordinator's session tree:
@@ -293,7 +293,7 @@ export class PathfinderRun {
     return dir;
   }
 
-  /** Controlroom's own note of which transcript is the coordinator's (in ~/.controlroom, never the project). */
+  /** Tin & Thyme's own note of which transcript is the coordinator's (in ~/.controlroom, never the project). */
   private rememberTranscript(file: string) {
     if (this.transcript === file) return;
     this.transcript = file;
@@ -320,7 +320,7 @@ export class PathfinderRun {
     } catch {
       /* first run */
     }
-    // An orchestration started before Controlroom kept this note: match its first prompt.
+    // An orchestration started before Tin & Thyme kept this note: match its first prompt.
     const cmd = /^\/(\S+)\s*(.*)$/.exec(this.prompt.trim());
     if (!cmd) return null;
     const [, name, args] = cmd;
@@ -347,11 +347,11 @@ export class PathfinderRun {
     writeFileSync(
       guard,
       `#!/usr/bin/env node
-// Controlroom run policy for this orchestration: commit locally only.
+// Tin & Thyme run policy for this orchestration: commit locally only.
 let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
   let cmd = ""; try { cmd = JSON.parse(s).tool_input?.command ?? ""; } catch {}
   if (new RegExp(${JSON.stringify(BLOCKED_COMMANDS)}).test(cmd)) {
-    process.stderr.write("Controlroom run policy: this run is local only. Do not push, open or edit pull requests or GitHub issues, call the GitHub API, or deploy. Treat this step as a human decision: record it as a human gate (State: human-gate, Gate: <what you need>) and stop.");
+    process.stderr.write("Tin & Thyme run policy: this run is local only. Do not push, open or edit pull requests or GitHub issues, call the GitHub API, or deploy. Treat this step as a human decision: record it as a human gate (State: human-gate, Gate: <what you need>) and stop.");
     process.exit(2);
   }
   process.exit(0);
@@ -668,7 +668,7 @@ let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
       }
       case "PostToolUse": {
         const res = body.tool_response as Record<string, unknown> | undefined;
-        const failed = res && (res.interrupted || (typeof res.stderr === "string" && /Controlroom run policy/.test(res.stderr)));
+        const failed = res && (res.interrupted || (typeof res.stderr === "string" && /(Tin & Thyme|Tin & Thyme) run policy/.test(res.stderr)));
         if (failed) hub.terminal(w.hqId, `\x1b[33m  blocked by run policy\x1b[0m\r\n`);
         break;
       }
@@ -902,7 +902,7 @@ let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
     const item = this.hub.snap.actionItems?.find((i) => i.id === itemId);
     if (!item) return;
     const key = item.taskId ?? itemId.replace(/^gate-/, "");
-    const text = note.trim() ? `Human answer for the ${key} gate (from Controlroom): ${note.trim()}` : `Human dismissed the ${key} gate in Controlroom without an answer; leave it open.`;
+    const text = note.trim() ? `Human answer for the ${key} gate (from Tin & Thyme): ${note.trim()}` : `Human dismissed the ${key} gate in Tin & Thyme without an answer; leave it open.`;
     const ok = await this.sessions.typeInto(COORDINATOR_ID, text.replace(/\s+/g, " "));
     this.hub.activity("agent.answered", COORDINATOR_ID, ok ? `Your answer for ${key} went to the coordinator` : `Couldn't reach the coordinator's terminal for ${key}`);
     if (!ok) log.warn(`answerGate: coordinator terminal unavailable`);

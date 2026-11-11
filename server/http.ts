@@ -43,6 +43,8 @@ function readBody(req: IncomingMessage, limit = 256 * 1024): Promise<string> {
 }
 
 interface Options {
+  /** Extra identity for GET /api/health (a Tin & Thyme kitchen: app, key, instance). */
+  health?: Record<string, string>;
   hub: Hub;
   inbox: Inbox;
   planner: Planner;
@@ -97,7 +99,7 @@ export function startHttp(o: Options) {
       }
     }
 
-    if (url.pathname === "/api/health") return send(res, 200, JSON.stringify({ ok: true }), "application/json");
+    if (url.pathname === "/api/health") return send(res, 200, JSON.stringify({ ok: true, ...o.health }), "application/json");
 
     if (req.method === "GET" && o.distDir) {
       const rel = normalize(url.pathname === "/" ? "/index.html" : url.pathname).replace(/^(\.\.[/\\])+/, "");

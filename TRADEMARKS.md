@@ -1,5 +1,16 @@
 # Trademarks
 
+Tin & Thyme is an independent fork of JSM HQ. The notice below is JavaScript Mastery's,
+kept as they wrote it. It asks a fork for a different name and logo and no suggestion of
+their endorsement, which is why Tin & Thyme has its own name, uses no JSM logo and claims
+no endorsement.
+
+Removing the old `jsm-hq` executable is a separate decision of ours, not something the
+notice spells out: Tin & Thyme ships one command, `tin-and-thyme`, and that launcher
+carried the upstream product's own install instructions.
+
+---
+
 The code in this repository is MIT licensed (see `LICENSE`). The license covers the code only.
 
 The names **JSM HQ**, **JavaScript Mastery** and **JSM**, and their logos, are trademarks of JavaScript Mastery. The MIT license does not give you any right to use them.

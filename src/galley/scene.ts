@@ -761,7 +761,8 @@ function scanner(B: Backend, m: GalleyModel, f: FrameState, P: boolean, hits: Hi
   });
   for (const r of reviewers) {
     const a = f.actors.get(r.id);
-    if (!a || a.moving) continue;
+    // Not while it is still in (or queued at) the transporter: its tag belongs beside the scanner.
+    if (!a || a.moving || inBeam(a, f.now)) continue;
     const tag = nameTag(B, a.x, a.y + 1, r, P, f.selected === r.id);
     hits.push({ ...tag, kind: "agent", id: r.id, title: `${r.name} · ${r.job}`, sub: `${r.role} · ${r.ticket ?? ""} · ${r.status}` });
   }

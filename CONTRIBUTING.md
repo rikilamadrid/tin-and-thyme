@@ -1,50 +1,70 @@
-# Contributing to JSM HQ
+# Contributing to Tin & Thyme
 
 ## Run it from source
 
 Needs Node.js 20+ and pnpm 10 or 11 (`corepack enable` gets you pnpm).
 
-```bash
-git clone https://github.com/jsmastery-pro/jsm-hq && cd jsm-hq
+```sh
+git clone https://github.com/rikilamadrid/tin-and-thyme && cd tin-and-thyme
 pnpm install
-pnpm dev                                   # the UI with fake data, no agents
-HQ_REPO=~/developer/hq-test pnpm dev:hq    # the real HQ server + UI, with hot reload
+pnpm dev                                         # the UI alone, with sample data
+open "http://localhost:5173/?fixture=handoff"    # the labelled Crew Transporter scene
+HQ_REPO=~/Workspace/some-pathfinder-repo pnpm dev:hq   # a real kitchen + UI, with hot reload
 ```
-
-`pnpm dev` is a demo with fake data: nothing runs and nothing leaves the browser. To test a change for real, use `pnpm dev:hq` or `pnpm hq` against a throwaway repo.
 
 | Command | Does |
 | --- | --- |
-| `pnpm dev` | Demo UI with fake data at http://localhost:5173 |
-| `pnpm dev:hq` | Real HQ server + UI with hot reload (`HQ_REPO=<path>`) |
-| `pnpm hq` | Builds the UI, then runs HQ like a release (`--repo <path> --port 7420`) |
+| `pnpm dev` | The UI with sample data at http://localhost:5173 (no server) |
+| `pnpm dev:hq` | A real kitchen server for `HQ_REPO` plus the UI, with hot reload |
 | `pnpm build` | Type-checks, builds the UI to `dist/` and the server to `dist-server/` |
 | `pnpm typecheck` | Type-check only |
-| `npm pack` | Builds the npm tarball, to test it before publishing |
+| `node bin/tin-and-thyme.mjs open <repo>` | The built command, from this checkout |
 
-Start HQ with `HQ_DEBUG=1` to log why a queued message is waiting.
+Labelled sample scenes, for checking the kitchen without a live run: `?fixture=busy`
+(every place in use), `?fixture=sounds` (the sound cues) and `?fixture=handoff` (the
+Crew Transporter script; it keeps its start time in the URL, so a refresh resumes it).
 
 ## Where things are
 
 ```
-src/
-  data/      Types, the OfficeDataSource interface, fake (data/mock) and real (data/ws) data
-  store/     Zustand stores; the only code that talks to the data source
-  office/    The PixiJS pixel office: layout, sprites, agents, belt
-  ui/        Top bar, team panel, activity, drawers, settings, setup checklist, welcome
-server/      Local HQ server: setup checks, workspaces, sessions (tmux, or HQ-run on Windows), sbx, hooks, Team MCP, GitHub
-bin/         The jsm-hq command
-docs/        User guides
-context/     Implementation plans, and the first UI build brief (001-ui-build-context.md)
+bin/tin-and-thyme.mjs   The command: open, url, list
+server/                 The local server: kitchen identity (kitchen.ts), the Pathfinder
+                        adapter (pathfinder.ts), sessions, hooks, terminals, HTTP
+src/galley/             The kitchen: model, scene, both art styles
+src/ui/                 Top bar, roster and ticket cards, drawers, settings
+src/audio/              Sound cues
+src/data/fixture/       The labelled sample scenes
+docs/                   Guides
+skills/, roles/, ...    The Pathfinder kit this repository itself is run with
 ```
 
-## Docker Sandboxes versions
+## Tests
 
-HQ calls the `sbx` CLI and reads its output. sbx 0.48 changed several outputs (for example `sbx ls --json` and `sbx mcp ls --json` now return a bare array), so read sbx output in a way that accepts both the old and the new format. HQ is tested on sbx 0.47 and 0.50.
+```sh
+pnpm typecheck
+pnpm build
+npx tsx scripts/session-backend-test.ts      # tmux and pty session backends
+npx tsx scripts/workspace-test.ts            # line endings in agent clones
+npm pack --pack-destination /tmp/tt-pack
+node scripts/smoke-test.mjs /tmp/tt-pack/tin-and-thyme-*.tgz
+```
+
+The smoke test installs the packed tarball into an empty folder, runs the installed
+`tin-and-thyme` against a throwaway Pathfinder-shaped repository (a stub engine), checks
+the built UI, the board, reuse, `url` and the missing-kit message, and keeps all kitchen
+state in a temporary HOME.
+
+## Git
+
+`main` is the release line. Work on a branch and merge by pull request. The original
+project stays reachable as the fetch-only `upstream` remote
+(`https://github.com/jsmastery-pro/jsm-hq`); nothing is pushed there.
 
 ## Releasing
 
-1. Bump `version` in `package.json` and merge to `main`.
-2. From a clean, up-to-date `main`, run `npm publish`. It builds first.
-
-Only members of the `therealjsmastery` npm org can publish. The README on npm updates only when a new version is published.
+See [`RELEASING.md`](RELEASING.md): the version comes from `CHANGELOG.md`, the first
+publication is a one-time human step from a verified tarball, and every later release is
+a manual dispatch of `.github/workflows/release.yml`, publishing through npm trusted
+publishing. `package.json` keeps `"private": true` until the first publication is
+decided. Never force-push, never move or delete a published tag, and never rewrite
+released history.

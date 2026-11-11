@@ -1,9 +1,11 @@
-// jsm-hq — start HQ for the git repo you're in.
+// The Tin & Thyme server: one kitchen for one repository.
 //
-//   jsm-hq [--repo <path>] [--port 7420] [--dev] [--no-open]
+//   node dist-server/main.mjs [--repo <path>] [--port 7420] [--dev] [--no-open] [--kitchen]
 //
-// --dev: the UI is served by Vite (pnpm dev:hq); HQ prints/opens the Vite URL.
+// Users start it through `tin-and-thyme open` (bin/tin-and-thyme.mjs), which picks the port, passes
+// --kitchen and reuses a running kitchen. --dev: the UI is served by Vite (pnpm dev:hq).
 
+import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,6 +27,7 @@ import { Sessions } from "./sessions";
 import { runSetupChecks } from "./setup";
 import { loadConfig, loadPlan } from "./store";
 import { COORDINATOR_ID, detectPathfinder, PathfinderRun } from "./pathfinder";
+import { adoptLegacyState, APP, canonicalRoot, claimStateDir, clearRecord, kitchenKey, writeRecord } from "./kitchen";
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -48,7 +51,17 @@ async function main() {
     config.workflow.review = { enabled: false, tool: "human", command: "" };
   }
   config.project.hqPort = port;
+  // A Pathfinder kitchen keys its local state (~/.jsmhq, ~/.controlroom, tmux names) by the repo's canonical
+  // path, so two repos with the same folder name never share it.
+  const canonical = pf ? canonicalRoot(repo.root) : null;
+  if (pf && canonical) {
+    config.project.id = kitchenKey(canonical);
+    const adopted = adoptLegacyState(canonical, config.project.id);
+    if (adopted) log.info(`kitchen state: copied this repo's earlier state from ${adopted}`);
+    claimStateDir(canonical, config.project.id);
+  }
   const slug = config.project.id;
+  const instance = process.env.TT_INSTANCE || randomBytes(12).toString("hex");
   const token = agentToken(slug);
   const uiToken = browserToken(slug, dev);
 
@@ -127,6 +140,7 @@ async function main() {
     allowedOrigins: [uiOrigin, `http://127.0.0.1:${uiPort}`, `http://localhost:${port}`, `http://127.0.0.1:${port}`],
     commands,
     hookRouter: pfRun ? { agentId: COORDINATOR_ID, handle: (e, b) => pfRun!.onHook(e, b) } : undefined,
+    health: pf ? { app: APP, key: slug, instance } : undefined,
   });
   sessions.startPolling();
   sbx.startApprovalPolling();
@@ -134,7 +148,10 @@ async function main() {
   if (!pf) github.start();
 
   const url = `${uiOrigin}/?token=${uiToken}`;
-  log.info(`\n\n  Tin & Thyme (control-room) is running → ${url}\n`);
+  log.info(`\n\n  Tin & Thyme is running → ${url}\n`);
+  // Started by `tin-and-thyme open`: say where this kitchen is, so the command can find and verify it.
+  const kitchen = flag("kitchen") && pf && canonical;
+  if (kitchen) writeRecord({ app: APP, key: slug, root: canonical, port, pid: process.pid, instance, url, startedAt: new Date().toISOString() });
   if (!flag("no-open")) {
     // Windows: rundll32 hands the URL to the default browser without a shell (the token has no special chars, but `&` would).
     const [opener, args] = process.platform === "darwin" ? ["open", [url]] : process.platform === "win32" ? ["rundll32", ["url.dll,FileProtocolHandler", url]] : ["xdg-open", [url]];
@@ -147,6 +164,7 @@ async function main() {
     sessions.shutdown();
     sbx.stopApprovalPolling();
     github.stop();
+    if (kitchen) clearRecord(slug, instance);
     process.exit(0);
   };
   process.on("SIGINT", quit);
@@ -155,15 +173,15 @@ async function main() {
 
 main().catch((err) => {
   if ((err as NodeJS.ErrnoException)?.code === "EADDRINUSE") {
-    log.error(`Port ${arg("port") ?? 7420} is in use — another HQ may be running. Stop it, or pick another port: npx @therealjsmastery/jsm-hq --port 7421`);
+    log.error(`Port ${arg("port") ?? 7420} is in use. Start kitchens with \`tin-and-thyme open\`, which picks a free port and reuses a running kitchen.`);
     process.exit(1);
   }
   if ((err as NodeJS.ErrnoException)?.code === "EACCES") {
     const port = arg("port") ?? 7420;
     log.error(
       process.platform === "win32"
-        ? `Windows reserved port ${port} (Hyper-V, WSL and Docker reserve port ranges). Pick another: npx @therealjsmastery/jsm-hq --port 8420\n  See the reserved ranges with: netsh interface ipv4 show excludedportrange protocol=tcp`
-        : `Not allowed to use port ${port}. Pick another: npx @therealjsmastery/jsm-hq --port 8420`,
+        ? `Windows reserved port ${port} (Hyper-V, WSL and Docker reserve port ranges). Pick another with --port.\n  See the reserved ranges with: netsh interface ipv4 show excludedportrange protocol=tcp`
+        : `Not allowed to use port ${port}. Pick another with --port, or start kitchens with \`tin-and-thyme open\`.`,
     );
     process.exit(1);
   }

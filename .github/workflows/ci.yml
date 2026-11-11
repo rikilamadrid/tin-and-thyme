@@ -6,7 +6,7 @@ on:
   pull_request:
 
 jobs:
-  # Build once per OS, then install the packed tarball like a new user and start HQ.
+  # Build once per OS, then install the packed tarball like a new user and open a kitchen with it.
   build:
     strategy:
       fail-fast: false
@@ -32,10 +32,10 @@ jobs:
         shell: bash
         run: mkdir -p pack && npm pack --ignore-scripts --pack-destination pack
       - name: CLI smoke test
-        run: node bin/jsm-hq.mjs --version && node bin/jsm-hq.mjs --help
+        run: node bin/tin-and-thyme.mjs --version && node bin/tin-and-thyme.mjs --help
       - name: Install and run like a new user
         shell: bash
-        run: node scripts/smoke-test.mjs pack/*.tgz 7431
+        run: node scripts/smoke-test.mjs pack/*.tgz
       - if: matrix.os == 'ubuntu-latest'
         uses: actions/upload-artifact@v4
         with:
@@ -56,4 +56,4 @@ jobs:
           path: pack
       - run: apt-get update -qq && apt-get install -y -qq git >/dev/null
       - run: "! command -v make && ! command -v g++ && ! command -v python3"
-      - run: node scripts/smoke-test.mjs pack/*.tgz 7431
+      - run: node scripts/smoke-test.mjs pack/*.tgz
