@@ -11,23 +11,27 @@ The kitchen opens in your browser with the repository's roles, its ticket board
 (from the repo's own Pathfinder engine and ticket store) and any existing claims.
 No `HQ_REPO`, no ports to manage.
 
-## Install once (from source)
-
-Tin & Thyme is not on npm yet. From a clone of this repository:
+## Install
 
 ```bash
-cd ~/Workspace/personal/tin-and-thyme
-pnpm install && pnpm build
-ln -s "$PWD/bin/tin-and-thyme.mjs" ~/.local/bin/tin-and-thyme
+npm install -g tin-and-thyme       # or, without installing: npx tin-and-thyme@latest open .
 tin-and-thyme --version
 ```
 
-A packed tarball installs the same executable: `npm install <path>/tin-and-thyme-0.1.0.tgz`
-puts it at `node_modules/.bin/tin-and-thyme`.
+Update with `npm install -g tin-and-thyme@latest`; uninstall with
+`npm uninstall -g tin-and-thyme`. Kitchens you started keep running until you stop
+them (`kill <pid>`).
 
-`~/.local/bin` must be on your `PATH`. The link points at this checkout, so after
-pulling changes, run `pnpm build` again; there is nothing to reinstall. To
-uninstall, remove the link: `rm ~/.local/bin/tin-and-thyme`.
+### From source
+
+```bash
+git clone https://github.com/rikilamadrid/tin-and-thyme && cd tin-and-thyme
+pnpm install && pnpm build
+ln -s "$PWD/bin/tin-and-thyme.mjs" ~/.local/bin/tin-and-thyme   # any folder on your PATH
+```
+
+The link points at the checkout, so after pulling changes, run `pnpm build` again.
+Remove it with `rm ~/.local/bin/tin-and-thyme`.
 
 ## Use
 

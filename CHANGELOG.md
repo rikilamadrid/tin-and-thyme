@@ -6,11 +6,9 @@ All notable changes to Tin & Thyme are recorded here. The format follows
 
 ## [Unreleased]
 
-## [0.1.0] - not yet published
+## [0.1.0] - 2026-11-11
 
-The first release candidate. It is not published: `package.json` keeps
-`"private": true` until the deliberate first-publication step in RELEASING.md, which
-also replaces "not yet published" above with the publication date.
+The first release, published to npm as `tin-and-thyme`.
 
 ### Added
 

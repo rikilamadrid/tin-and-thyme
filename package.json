@@ -1,7 +1,6 @@
 {
   "name": "tin-and-thyme",
   "version": "0.1.0",
-  "private": true,
   "description": "Tin & Thyme — watch a Pathfinder orchestration run as a robot kitchen. One local command opens the board, the crew, their terminals and every human gate for the repository you are in.",
   "license": "MIT",
   "author": {

@@ -49,13 +49,16 @@ or newer, Git, and a repository with the Pathfinder kit. To run an orchestration
 from the kitchen you also need Claude Code and tmux; for a GitHub Issues ticket
 store, the GitHub CLI (`gh`).
 
-Tin & Thyme is not on npm yet. Install it once from this repository:
+Try it without installing anything, from a repository that has the Pathfinder kit:
 
 ```sh
-git clone https://github.com/rikilamadrid/tin-and-thyme ~/Workspace/personal/tin-and-thyme
-cd ~/Workspace/personal/tin-and-thyme
-pnpm install && pnpm build
-ln -s "$PWD/bin/tin-and-thyme.mjs" ~/.local/bin/tin-and-thyme   # any folder on your PATH
+npx tin-and-thyme@latest open .
+```
+
+Or install the command once:
+
+```sh
+npm install -g tin-and-thyme
 tin-and-thyme --version
 ```
 
