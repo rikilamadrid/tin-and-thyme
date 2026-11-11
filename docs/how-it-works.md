@@ -1,5 +1,36 @@
 # How Tin & Thyme works
 
+## What starts, what is reused, and what closing the browser does
+
+| When | What happens |
+| --- | --- |
+| `tin-and-thyme open` | Resolves the repository to its canonical path. If a kitchen answers on its recorded port **and** proves it is that exact instance for that exact repository, it is reused. Otherwise one starts: a background Node server on the first free port from 7420, bound to `127.0.0.1`. |
+| Two `open`s at once | One starts the kitchen; the other waits on a per-repository lock and reuses it. |
+| A busy port or a stale record | The port is skipped. Tin & Thyme never stops a process it did not start. |
+| The kitchen opens | It reads Pathfinder's engine (`orchestrate.mjs status`) and the session data already on disk. No session starts. |
+| **Start team** | Launches the coordinator in tmux under a local-only run policy: pushes, pull requests, issues, GitHub API calls, deploys and `npm publish` are refused and become a human gate. |
+| You close the browser | Nothing else happens. The kitchen keeps running; `tin-and-thyme open` or `tin-and-thyme url` brings you back. |
+| You stop a kitchen | `kill <pid>` (`open` prints it). Coordinator and worker sessions keep running in tmux. |
+
+What Tin & Thyme keeps lives in your home folder, keyed by the repository's
+canonical path, so two repositories with the same folder name never share it:
+`~/.controlroom/<repo>-<hash>/` (run state), `~/.controlroom/kitchens/` (instance
+records and logs) and `~/.jsmhq/<repo>-<hash>/` (the hook token). Those folder
+names predate the project's current name; they are kept so existing kitchens keep
+their state.
+
+## Supported integrations
+
+| | |
+| --- | --- |
+| **Pathfinder** | The repository's own kit and engine, at the version it carries. Ticket stores: local Markdown and GitHub Issues. |
+| **Claude Code** | The coordinator and its worker sessions: hooks for live events, transcripts for context, model and effort. |
+| **Wonder Wagon** | The family's naming and CLI conventions. Tin & Thyme has no Wonder Wagon theme or serial yet; its kitchen palette is its own. |
+
+The server still carries features of the project it was forked from (Docker
+Sandboxes, a native multi-agent team, GitHub review loops). `tin-and-thyme open`
+does not use them, and these docs do not describe them.
+
 ## The command and the kitchen
 
 `tin-and-thyme open [path]` (`bin/tin-and-thyme.mjs`, with the shared logic in

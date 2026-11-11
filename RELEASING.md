@@ -87,11 +87,13 @@ published by hand once. Lorekeeper did exactly this for `create-lorekeeper`.
 
    ```sh
    npm view tin-and-thyme version                                   # 0.1.0
-   curl -s -o /dev/null -w '%{http_code}\n' https://cdn.jsdelivr.net/npm/tin-and-thyme@0.1.0/docs/images/tin-and-thyme-pixel.png   # 200
+   curl -s -o /dev/null -w '%{http_code}\n' https://cdn.jsdelivr.net/npm/tin-and-thyme@0.1.0/docs/images/kitchen.png   # 200
    ```
 
-   Then install it into a scratch folder and `tin-and-thyme open` a scratch Pathfinder
-   repository.
+   Open https://www.npmjs.com/package/tin-and-thyme in light and dark mode and check
+   that the banner and every screenshot render: this is the first time npm rendering
+   can be seen. Then install it into a scratch folder and `tin-and-thyme open` a
+   scratch Pathfinder repository.
 7. **Tag and release `v0.1.0`.** With Actions enabled (A), dispatch the workflow. It sees
    `0.1.0` already on the registry, skips the publish, and pushes the tag and creates the
    Release:
@@ -144,9 +146,9 @@ a separate decision; nothing in this process requires it.
 1. Move the `[Unreleased]` entries into `## [X.Y.Z] - YYYY-MM-DD` in `CHANGELOG.md` and
    keep an empty `[Unreleased]` above it. The GitHub Release notes are this section,
    verbatim.
-2. Set the same version in `package.json`, and update the version in the README image
-   URLs (`https://cdn.jsdelivr.net/npm/tin-and-thyme@X.Y.Z/…`). The publish guard
-   refuses if they disagree.
+2. Set the same version in `package.json`. The publish guard refuses if it and the
+   changelog disagree. README image URLs need no edit: `prepack` pins them to the
+   version being packed.
 3. Open the release pull request. CI builds, packs and smoke-tests the tarball. Merge it.
 4. `gh workflow run release.yml --ref main -f version=X.Y.Z`. It refuses unless the
    input, the changelog and the manifest agree, `"private"` is gone, the package exists
@@ -156,15 +158,26 @@ a separate decision; nothing in this process requires it.
 5. If it fails, **re-dispatch it.** Every step skips an effect that already exists.
    Never invent a new version to get past a failed run.
 
-## README images on npm
+## README images on GitHub and on npm
+
+The committed README uses **repository-relative** image paths (`docs/images/…`,
+`brand/readme/…`), so GitHub renders it from the repository, in both colour schemes,
+with nothing published.
 
 npm renders the README from the published package and cannot load images from a
-private repository. The README therefore points its images at the published package
-itself, through jsDelivr's npm mirror:
-`https://cdn.jsdelivr.net/npm/tin-and-thyme@<version>/docs/images/<file>.png`. The images
-ship in the tarball (`docs/images` is in `files`). Nothing is uploaded anywhere: jsDelivr
-serves the files npm already has. Until a version is published, those images show their
-alt text, on GitHub as well.
+private repository. So `prepack` (`scripts/npm-readme.mjs pin`) rewrites the README
+**inside the tarball** to point each image at the package's own copy, through
+jsDelivr's npm mirror:
+`https://cdn.jsdelivr.net/npm/tin-and-thyme@<version>/<path>`, and `postpack` puts the
+relative paths back. The images ship in the tarball (`docs/images` and `brand/readme`
+are in `files`); `pin` refuses one that does not. Nothing is uploaded anywhere: jsDelivr
+serves the files npm already has. If a pack is interrupted between the two steps,
+`node scripts/npm-readme.mjs unpin` (or `git checkout README.md`) restores the README.
+
+`npm pack --ignore-scripts` (CI) skips both steps, so CI's tarball keeps relative paths;
+the smoke test accepts either form and checks every referenced image is in the package.
+Until a version is published, the pinned URLs answer 404, so **npm rendering stays
+unverified until 0.1.0 is on the registry** (step B.6 checks it).
 
 The trusted publisher is bound to the workflow's filename. Renaming `release.yml`
 silently breaks every future publish.

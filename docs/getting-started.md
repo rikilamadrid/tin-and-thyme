@@ -66,5 +66,5 @@ calls, deploys and `npm publish` are refused and become a human gate.
 
 ## Something not working?
 
-See [Troubleshooting](../README.md#troubleshooting) in the README, and the kitchen's log
+See [Troubleshooting](troubleshooting.md), and the kitchen's log
 at `~/.controlroom/kitchens/<repo>-<hash>.log`.

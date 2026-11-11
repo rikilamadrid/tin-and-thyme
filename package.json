@@ -41,6 +41,7 @@
     "dist-server",
     "scripts/fix-node-pty.mjs",
     "docs/images",
+    "brand/readme",
     "LICENSE",
     "TRADEMARKS.md",
     "SECURITY.md",
@@ -57,7 +58,9 @@
     "typecheck": "tsc --noEmit -p . && tsc --noEmit -p server",
     "build": "tsc --noEmit -p . && tsc --noEmit -p server && vite build && node scripts/build-server.mjs",
     "preview": "vite preview",
-    "prepack": "npm run build",
+    "brand": "tsx scripts/brand/render-brand.ts",
+    "prepack": "npm run build && node scripts/npm-readme.mjs pin",
+    "postpack": "node scripts/npm-readme.mjs unpin",
     "prepublishOnly": "node scripts/publish-guard.mjs",
     "postinstall": "node scripts/fix-node-pty.mjs"
   },

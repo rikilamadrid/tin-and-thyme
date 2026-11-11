@@ -31,6 +31,11 @@ also replaces "not yet published" above with the publication date.
 - Per-session context, model and effort telemetry; advisory context alerts; optional
   sound cues that never replay on refresh or reconnect.
 - Labelled sample scenes: `?fixture=busy`, `?fixture=sounds`, `?fixture=handoff`.
+- An identity cut from the kitchen itself (`brand/IDENTITY.md`): a porthole mark with
+  Basil looking out, a pixel wordmark, and a README banner in day and night variants,
+  all generated from the app's own sprites by `pnpm brand`.
+- README images render on GitHub from the repository; the packed README pins them to the
+  package's own copies on jsDelivr, so npm can show them once a version is published.
 
 ### Changed
 

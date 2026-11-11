@@ -4,7 +4,8 @@
 //   - intent is explicit: TIN_AND_THYME_PUBLISH=yes (the release workflow sets it);
 //   - package.json is no longer "private" (that removal is the deliberate first-publication step);
 //   - its version is the newest `## [X.Y.Z]` in CHANGELOG.md;
-//   - every README image is pinned to that version's files in the package, and each one ships;
+//   - every README image is repository-relative, exists, and ships in the package (prepack then
+//     pins them for npm: scripts/npm-readme.mjs);
 //   - the tree is clean, and HEAD is contained in origin/main.
 //
 // npm runs no lifecycle scripts when publishing a tarball, so the one-time bootstrap publish
@@ -12,6 +13,7 @@
 
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import { isRelative, isShipped, readmeImages } from "./readme-images.mjs";
 
 const fail = (msg) => {
   console.error(`publish-guard: ${msg}`);
@@ -27,13 +29,10 @@ if (pkg.private) fail('package.json still says "private": true. Removing it is t
 const changelog = /^## \[(\d+\.\d+\.\d+)\]/m.exec(readFileSync("CHANGELOG.md", "utf8"))?.[1];
 if (changelog !== pkg.version) fail(`version disagreement: package.json ${pkg.version}, newest CHANGELOG.md section ${changelog ?? "none"}`);
 
-const readme = readFileSync("README.md", "utf8");
-const images = [...readme.matchAll(/!\[[^\]]*\]\(([^)\s]+)\)|<img[^>]+src="([^"]+)"/g)].map((m) => m[1] ?? m[2]);
-const prefix = `https://cdn.jsdelivr.net/npm/${pkg.name}@${pkg.version}/`;
-for (const src of images) {
-  if (!src.startsWith(prefix)) fail(`README image ${src} is not pinned to ${prefix} (npm cannot show it otherwise)`);
-  const file = src.slice(prefix.length);
-  if (!existsSync(file) || !pkg.files.some((f) => file === f || file.startsWith(f.replace(/\/?$/, "/")))) fail(`README image ${file} is not shipped in the package`);
+for (const src of readmeImages(readFileSync("README.md", "utf8"))) {
+  if (!isRelative(src)) fail(`README image ${src} is not repository-relative (GitHub renders the committed README; prepack pins images for npm)`);
+  const file = src.replace(/^\.\//, "");
+  if (!existsSync(file) || !isShipped(pkg, file)) fail(`README image ${file} is not shipped in the package`);
 }
 
 if (git("status", "--porcelain")) fail("the working tree is not clean");
