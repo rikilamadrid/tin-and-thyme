@@ -8,7 +8,9 @@
 //     orchestration starts;
 //   - opening again (from the repository, without a path) reuses the same kitchen, and `url`
 //     prints the same URL;
-//   - a repository without the Pathfinder kit gets the missing-kit message.
+//   - a repository without the Pathfinder kit gets the missing-kit message;
+//   - every image the packed README references is inside the package (pinned to this version's
+//     jsDelivr URL by prepack, or still repository-relative when packed with --ignore-scripts).
 //
 // Kitchen state goes to a temporary HOME, never the real one. The repository's engine is a
 // stub that answers `status --json` with two tickets: this test checks Tin & Thyme, not Pathfinder.
@@ -16,10 +18,11 @@
 //   node scripts/smoke-test.mjs <path/to/tin-and-thyme-x.y.z.tgz>
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { cdnPrefix, isRelative, readmeImages } from "./readme-images.mjs";
 
 const tarball = resolve(process.argv[2] ?? "");
 const win = process.platform === "win32";
@@ -89,6 +92,21 @@ if (version.code !== 0 || version.out.trim() !== pkg.version) fail(`--version pr
 const help = tt(["--help"]);
 if (help.code !== 0 || !help.out.startsWith(`Tin & Thyme ${pkg.version}`) || !help.out.includes("tin-and-thyme open [path]") || !help.out.trim().endsWith("a Wonder Wagon tool")) fail(`--help:\n${help.out}`);
 step(`tin-and-thyme ${pkg.version}: --version and --help`);
+
+// 2b. The packed README's images all ship in the package.
+{
+  const prefix = cdnPrefix(pkg);
+  const images = readmeImages(readFileSync(join(pkgRoot, "README.md"), "utf8"));
+  if (!images.length) fail("the packed README references no images");
+  const pinned = images.filter((src) => src.startsWith(prefix)).length;
+  for (const src of images) {
+    if (!src.startsWith(prefix) && !isRelative(src)) fail(`packed README image ${src} is neither pinned to ${prefix} nor relative`);
+    const file = src.startsWith(prefix) ? src.slice(prefix.length) : src.replace(/^\.\//, "");
+    if (!existsSync(join(pkgRoot, file))) fail(`packed README image ${file} is not in the package`);
+  }
+  if (pinned && pinned !== images.length) fail(`packed README pins ${pinned} of ${images.length} images`);
+  step(`README: ${images.length} images in the package, ${pinned ? `pinned to ${prefix}` : "repository-relative (packed without prepack)"}`);
+}
 
 // 3. The terminal library loads its prebuilt binary and can spawn a process.
 const req = createRequire(join(pkgRoot, "package.json"));
