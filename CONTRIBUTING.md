@@ -65,6 +65,5 @@ project stays reachable as the fetch-only `upstream` remote
 See [`RELEASING.md`](RELEASING.md): the version comes from `CHANGELOG.md`, the first
 publication is a one-time human step from a verified tarball, and every later release is
 a manual dispatch of `.github/workflows/release.yml`, publishing through npm trusted
-publishing. `package.json` keeps `"private": true` until the first publication is
-decided. Never force-push, never move or delete a published tag, and never rewrite
+publishing. Never force-push, never move or delete a published tag, and never rewrite
 released history.

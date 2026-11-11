@@ -5,7 +5,6 @@ From nothing to watching a Pathfinder round in your own kitchen. About ten minut
 ## 1. What you need
 
 - macOS (verified; Linux should work but has not been verified), Node.js 20+, Git.
-- pnpm (`corepack enable`), to build Tin & Thyme from source.
 - A repository with the Pathfinder kit. Don't have one? In that repository, run
   `npx create-pathfinder --mode orchestrator` and follow Pathfinder's own onboarding.
 - To run an orchestration from the kitchen: Claude Code and tmux. To only watch an
@@ -14,15 +13,13 @@ From nothing to watching a Pathfinder round in your own kitchen. About ten minut
 ## 2. Install the command
 
 ```sh
-git clone https://github.com/rikilamadrid/tin-and-thyme ~/Workspace/personal/tin-and-thyme
-cd ~/Workspace/personal/tin-and-thyme
-pnpm install && pnpm build
-ln -s "$PWD/bin/tin-and-thyme.mjs" ~/.local/bin/tin-and-thyme
+npm install -g tin-and-thyme
 tin-and-thyme --version
 ```
 
-Any folder on your `PATH` works instead of `~/.local/bin`. After pulling new changes,
-run `pnpm build` again; the link does not change.
+Or run it without installing: `npx tin-and-thyme@latest open .`. To update later,
+run `npm install -g tin-and-thyme@latest` again. To run it from source instead, see
+[`CONTRIBUTING.md`](../CONTRIBUTING.md).
 
 ## 3. Open a kitchen
 
