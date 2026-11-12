@@ -625,6 +625,15 @@ export class Delivery {
     });
   }
 
+  /**
+   * Runs a post-merge step (reconcile.ts, handback.ts) the way every operation
+   * here runs: one step per ticket at a time across processes, its result
+   * recorded and redacted.
+   */
+  runStep<T>(key: string, name: StepName, fn: () => Promise<{ data: T; message: string; change?: (s: DeliveryState) => void }>): Promise<Outcome<T>> {
+    return this.step(key, name, fn);
+  }
+
   // ------------------------------------------------------------ internals
 
   /** Runs one operation for a key, one at a time, recording its result. */

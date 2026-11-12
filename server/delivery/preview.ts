@@ -25,6 +25,7 @@
 // as own properties only (server/http.ts ownHandler).
 
 import type { RpcHandler } from "../http";
+import type { CoordinatorLink } from "./handback";
 import { createDeliveryService, unavailableBoard, unavailableRpc, type DeliveryHub, type DeliveryService } from "./service";
 
 /** The preview's plain commands: none, and a null prototype ("constructor" is no command). */
@@ -40,8 +41,12 @@ export interface AttachedDelivery {
   stop(): void;
 }
 
-/** Delivery for a server with no Pathfinder run (the preview), or `unavailable` when the repository has no GitHub origin. */
-export function attachDelivery(o: { hub: DeliveryHub; root: string; github: string | null; kitchenKey: string }): AttachedDelivery {
+/**
+ * Delivery for a server, or `unavailable` when the repository has no GitHub
+ * origin. The kitchen passes its coordinator session for the handback; a server
+ * with no Pathfinder run (the preview) passes none, and its handback is refused.
+ */
+export function attachDelivery(o: { hub: DeliveryHub; root: string; github: string | null; kitchenKey: string; coordinator?: CoordinatorLink | null }): AttachedDelivery {
   const rpc: Record<string, RpcHandler> = Object.create(null);
   if (!o.github) {
     const reason = "Delivery needs a repository whose origin is on GitHub.";
@@ -49,7 +54,7 @@ export function attachDelivery(o: { hub: DeliveryHub; root: string; github: stri
     rpc.delivery = unavailableRpc(reason);
     return { rpc, service: null, start() {}, stop() {} };
   }
-  const service = createDeliveryService({ hub: o.hub, root: o.root, repo: o.github, kitchenKey: o.kitchenKey });
+  const service = createDeliveryService({ hub: o.hub, root: o.root, repo: o.github, kitchenKey: o.kitchenKey, coordinator: o.coordinator ?? null });
   rpc.delivery = service.handle;
   return { rpc, service, start: () => service.start(), stop: () => service.stop() };
 }

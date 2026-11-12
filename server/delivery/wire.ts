@@ -3,13 +3,15 @@
 //   { rpc: "delivery", id, op, params }
 //
 // `id` matches /^[A-Za-z0-9_-]{1,64}$/ and comes back on the reply. `op` is one of
-// the eight named operations, looked up as an own property only. `params` holds
-// exactly the fields that op takes: a ticket key and full commit/tree ids, never
-// a title, a body, a flag or a command. Anything else is refused as `invalid`
-// before the delivery core is reached.
+// the named operations (eight up to the merge, four after it), looked up as an
+// own property only. `params` holds exactly the fields that op takes: a ticket
+// key, full commit/tree ids and a listing digest, never a title, a body, a flag
+// or a command. Anything else is refused as `invalid` before the delivery core
+// is reached.
 
 import { DELIVERY_OPS, type DeliveryOp } from "../../src/data/delivery";
 import { isSha } from "./ops";
+import { isPlanDigest } from "./reconcile";
 import { isTicketKey } from "./state";
 
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
@@ -24,6 +26,10 @@ const PARAMS: Record<DeliveryOp, readonly string[]> = Object.assign(Object.creat
   status: ["key"],
   merge: ["key", "head", "base", "tree"],
   verify: ["key"],
+  reconcilePlan: ["key"],
+  reconcile: ["key", "digest"],
+  handback: ["key"],
+  plan: ["key"],
 } satisfies Record<DeliveryOp, readonly string[]>);
 
 export interface DeliveryParams {
@@ -31,6 +37,8 @@ export interface DeliveryParams {
   head?: string;
   base?: string;
   tree?: string;
+  /** reconcile: the digest of the listing the human was shown. */
+  digest?: string;
 }
 
 export interface DeliveryRequest {
@@ -71,6 +79,10 @@ export function parseRequest(raw: unknown): Parsed {
     if (!allowed.includes(f)) continue;
     if (!isSha(params[f])) return fail(`${f} must be a full 40-character id`, op, key);
     out[f] = params[f] as string;
+  }
+  if (allowed.includes("digest")) {
+    if (!isPlanDigest(params.digest)) return fail("digest must be the 64-character listing digest", op, key);
+    out.digest = params.digest;
   }
   return { ok: true, req: { id, op, params: out } };
 }

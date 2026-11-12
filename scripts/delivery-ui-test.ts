@@ -334,6 +334,8 @@ async function originGate() {
   const k = await kitchen("origin");
   okReply("inspect (with Origin)", await k.call("inspect", { key: "10.1" }));
   const i = k.view().inspection!;
+  // Let the refresh that follows every operation finish first (it reads the engine and git refs), so only these requests are counted.
+  await k.service.refresh();
   const before = k.world.calls.length;
   const stateBefore = JSON.stringify(k.view());
   const params: Record<string, Record<string, unknown>> = {

@@ -82,7 +82,7 @@ export class DeliveryError extends Error {
 
 // ---------------------------------------------------------------- shapes
 
-export const STEPS = ["inspect", "approve", "push", "ensurePr", "status", "merge", "verify"] as const;
+export const STEPS = ["inspect", "approve", "push", "ensurePr", "status", "merge", "verify", "reconcile", "handback", "plan"] as const;
 export type StepName = (typeof STEPS)[number];
 
 export interface StepResult {
@@ -187,6 +187,49 @@ export function mergeOutcome(s: Pick<DeliveryState, "merged" | "pendingMerge" | 
   return "none";
 }
 
+/** After a verified merge: the main checkout was reconciled (reconcile.ts). */
+export interface ReconcileRecord {
+  at: string;
+  /** Local main before and after; equal when it already contained the merge. */
+  before: string;
+  after: string;
+  /** origin/main as fetched, which contains the merge. */
+  target: string;
+  mergeCommit: string;
+  /** ~/.controlroom/<kitchen>/backups/<ts>, when anything was moved. */
+  backup: string | null;
+  moved: number;
+  preserved: number;
+}
+
+/**
+ * The one marked request to the coordinator (handback.ts). Recorded before it
+ * is typed, so it is never typed twice for the same marker:
+ * - `sending`: recorded, being typed (left behind only when the kitchen stopped mid-send);
+ * - `sent`: the coordinator's terminal took it;
+ * - `unconfirmed`: the terminal did not confirm it; only the human's explicit retry types it again.
+ */
+export interface HandbackRecord {
+  marker: string;
+  at: string;
+  status: "sending" | "sent" | "unconfirmed";
+  note: string;
+  attempts: number;
+}
+
+/** The last read-only `orchestrate plan --json`, for the tickets this completion made eligible. */
+export interface PlanRecord {
+  at: string;
+  outcome: string;
+  message: string;
+  /** Eligible now: the plan's dispatch and deferred entries. */
+  eligible: { key: string; title: string; deferred: string | null }[];
+  /** Still blocked by this ticket. */
+  waitingOn: { key: string; title: string }[];
+  /** Eligible now and waiting on this ticket in the previous plan. */
+  newly: string[];
+}
+
 export interface DeliveryState {
   schema: "tin-and-thyme.delivery/1";
   key: string;
@@ -212,6 +255,10 @@ export interface DeliveryState {
   lastAttempt: SettledAttempt | null;
   mergeCommit: string | null;
   verified: boolean;
+  /** After the merge: the main checkout reconciled, the handback, the refreshed plan. */
+  reconciled: ReconcileRecord | null;
+  handback: HandbackRecord | null;
+  plan: PlanRecord | null;
   steps: Partial<Record<StepName, StepResult>>;
   /** Every step result, newest last, capped. */
   history: StepResult[];
@@ -237,6 +284,9 @@ export function emptyState(key: string): DeliveryState {
     lastAttempt: null,
     mergeCommit: null,
     verified: false,
+    reconciled: null,
+    handback: null,
+    plan: null,
     steps: {},
     history: [],
     updated: new Date(0).toISOString(),
@@ -254,6 +304,11 @@ export const isTicketKey = (key: unknown): key is string => typeof key === "stri
 export function deliveriesDir(kitchen: string, home = homedir()): string {
   if (!/^[A-Za-z0-9._-]+$/.test(kitchen) || kitchen.startsWith(".")) throw new DeliveryError("invalid", `not a kitchen folder name: ${kitchen}`);
   return join(home, ".controlroom", kitchen, "deliveries");
+}
+
+/** ~/.controlroom/<kitchen>/backups: where reconciling the main checkout moves colliding files. */
+export function backupsDir(kitchen: string, home = homedir()): string {
+  return join(deliveriesDir(kitchen, home), "..", "backups");
 }
 
 /** A lock file's holder is gone when its process no longer exists. */
@@ -286,12 +341,13 @@ export class DeliveryStore {
   /**
    * Takes a lock file in the deliveries folder, shared by every Delivery and
    * every kitchen process using this folder: `<key>.lock` for one ticket's
-   * steps, `merge.lock` for any merge into the integration branch. Returns the
+   * steps, `merge.lock` for any merge into the integration branch, `main.lock`
+   * for reconciling the main checkout. Returns the
    * release function, or throws a `blocked` DeliveryError while another live
    * holder has it. A lock whose holder process is gone (a crash) is reclaimed.
    */
   lock(name: string, what: string): () => void {
-    if (!isTicketKey(name) && name !== "merge") throw new DeliveryError("invalid", `not a lock name: ${String(name)}`);
+    if (!isTicketKey(name) && name !== "merge" && name !== "main") throw new DeliveryError("invalid", `not a lock name: ${String(name)}`);
     this.ensureDir();
     const path = join(this.dir, `${name}.lock`);
     const token = randomBytes(12).toString("hex");

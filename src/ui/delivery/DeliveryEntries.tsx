@@ -12,7 +12,16 @@ export function DeliverButton({ taskId }: { taskId: string }) {
   const view = useOffice((s) => s.snap?.delivery?.byKey[taskId]);
   if (!view) return null;
   const ready = isReadyToDeliver(view);
-  if (!ready && !view.pr && view.outcome === "none") return null;
+  // Reviewed but waiting on another ticket (an unfinished blocker, or stacked on unmerged commits): say on what.
+  if (!ready && !view.pr && view.outcome === "none") {
+    if (view.readiness.engineState !== "done" || !view.readiness.waitingOn.length) return null;
+    return (
+      <div className="mt-1 text-[12px] text-muted" title={view.readiness.reason ?? undefined}>
+        Waiting on {view.readiness.waitingOn.join(", ")}
+        {view.readiness.stacked ? " (stacked)" : ""}
+      </div>
+    );
+  }
   return (
     <div className="mt-1 flex items-center gap-1.5 text-[12px]">
       {ready && (

@@ -32,6 +32,9 @@ const STEP_LABEL: Record<DeliveryStep, string> = {
   status: "Checks & status",
   merge: "Merge",
   verify: "Verify",
+  reconcile: "Reconcile main",
+  handback: "Hand back",
+  plan: "Plan",
 };
 
 const OP_LABEL: Record<DeliveryOp, string> = {
@@ -43,6 +46,10 @@ const OP_LABEL: Record<DeliveryOp, string> = {
   status: "Refresh status",
   merge: "Merge",
   verify: "Verify",
+  reconcilePlan: "List main checkout",
+  reconcile: "Reconcile main",
+  handback: "Hand back to the coordinator",
+  plan: "Refresh plan",
 };
 
 export interface DeliveryPanelProps {
@@ -112,6 +119,7 @@ export function DeliveryPanel({ deliveryKey, board, view, client, onSignIn, init
   const [last, setLast] = useState<DeliveryReply | null>(initialReply);
   const [ack, setAck] = useState(false);
   const [confirmMerge, setConfirmMerge] = useState(false);
+  const [confirmReconcile, setConfirmReconcile] = useState(false);
 
   if (!client) return <p className="p-4 text-[14px] text-muted">Delivery needs the real kitchen. This demo has no repository to deliver.</p>;
   if (board && !board.available) return <p className="p-4 text-[14px] text-muted">Delivery is not available here: {board.reason}</p>;
@@ -120,6 +128,7 @@ export function DeliveryPanel({ deliveryKey, board, view, client, onSignIn, init
   const act = async (op: DeliveryOp, params: Record<string, string>) => {
     setBusy(op);
     setConfirmMerge(false);
+    setConfirmReconcile(false);
     try {
       setLast(await client.request(op, { key: view.key, ...params }));
     } finally {
@@ -388,6 +397,8 @@ export function DeliveryPanel({ deliveryKey, board, view, client, onSignIn, init
         {(view.pr || view.outcome !== "none") && view.outcome !== "pending" && view.outcome !== "unknown" && <div className="mt-2">{button("verify", "Verify merge")}</div>}
       </Section>
 
+      {view.outcome === "merged" && <AfterMerge view={view} button={button} busy={busy} confirm={confirmReconcile} setConfirm={setConfirmReconcile} />}
+
       <Section title="Steps">
         <ul data-testid="steps">
           {DELIVERY_STEPS.map((n) => (
@@ -396,5 +407,145 @@ export function DeliveryPanel({ deliveryKey, board, view, client, onSignIn, init
         </ul>
       </Section>
     </div>
+  );
+}
+
+type ButtonFn = (op: DeliveryOp, label: string, params?: Record<string, string>, extraBlock?: string | null) => ReactNode;
+
+/**
+ * After a verified merge: list the main checkout and reconcile it for exactly
+ * that listing, hand the ticket back to the coordinator once, refresh the plan.
+ */
+function AfterMerge({ view, button, busy, confirm, setConfirm }: { view: DeliveryView; button: ButtonFn; busy: DeliveryOp | null; confirm: boolean; setConfirm: (v: boolean) => void }) {
+  const am = view.after;
+  const rp = am.reconcilePlan;
+  const done = am.reconciled;
+  const hb = am.handback;
+  const plan = am.plan;
+  const reconcileGate = gateOf(view, "reconcile");
+  return (
+    <Section title="After merge">
+      <Row label="Local main">
+        <span data-testid="main-has-merge" data-value={String(am.mainHasMerge)}>
+          {am.mainHasMerge === true ? "contains the merge" : am.mainHasMerge === false ? "does not contain the merge yet" : "—"}
+        </span>
+      </Row>
+
+      <div className="mt-2 flex flex-wrap items-center gap-2">{button("reconcilePlan", rp ? "List the main checkout again" : "List the main checkout")}</div>
+      {rp && (
+        <div className="mt-2 text-[13px]" data-testid="reconcile-plan" data-collisions={rp.collisions.length}>
+          <div className="text-muted">
+            as of {rp.at}: {rp.branch} {rp.head.slice(0, 12)} → origin/{rp.branch} {rp.target.slice(0, 12)}
+          </div>
+          {rp.refusal ? (
+            <Banner color={RED} testId="reconcile-refusal">
+              <b>Cannot reconcile.</b> {rp.refusal}
+            </Banner>
+          ) : rp.upToDate ? (
+            <p>Local main already contains the merge: nothing to move or fast-forward.</p>
+          ) : (
+            <>
+              {rp.collisions.length ? (
+                <>
+                  <p>
+                    These {rp.collisions.length} file{rp.collisions.length === 1 ? "" : "s"} would be overwritten or removed. Each is copied to a new backup folder with a manifest, the copy is checked byte for
+                    byte, and only then is it moved out of the way. Nothing is deleted.
+                  </p>
+                  <ul className="mt-1 font-mono text-[12px]" data-testid="collisions">
+                    {rp.collisions.map((c) => (
+                      <li key={c.path} className="border-t-2 border-dashed border-cream-3 py-0.5" data-path={c.path}>
+                        <span className="break-all">{c.path}</span>{" "}
+                        <span className="text-muted">
+                          · {c.kind} ({c.status}) · {c.why}
+                          {c.type === "missing" ? " · deleted here" : ""}
+                          {c.staged ? " · staged content saved too" : ""}
+                        </span>{" "}
+                        {c.sameAsMerged ? <span style={{ color: GREEN }}>same as merged</span> : <span style={{ color: AMBER }}>differs from merged</span>}
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              ) : (
+                <p>Nothing collides: main fast-forwards as it is.</p>
+              )}
+              <p className="mt-1 text-muted">
+                {rp.preservedTotal} unrelated change{rp.preservedTotal === 1 ? "" : "s"} stay{rp.preservedTotal === 1 ? "s" : ""} exactly where {rp.preservedTotal === 1 ? "it is" : "they are"}
+                {rp.preserved.length ? `: ${rp.preserved.slice(0, 12).map((p) => p.path).join(", ")}${rp.preservedTotal > 12 ? ", …" : ""}` : ""}
+              </p>
+              <div className="mt-1 flex flex-wrap items-center gap-2">
+                {confirm ? (
+                  <>
+                    {button("reconcile", `Confirm: back up ${rp.collisions.length} and fast-forward ${rp.branch}`, { digest: rp.digest })}
+                    <button className="btn px-2 text-[13px]" onClick={() => setConfirm(false)}>
+                      Cancel
+                    </button>
+                  </>
+                ) : (
+                  <button className="btn px-2 text-[13px]" data-op="reconcile" disabled={!!(busy || reconcileGate)} title={reconcileGate?.message} onClick={() => setConfirm(true)}>
+                    Back up {rp.collisions.length} file{rp.collisions.length === 1 ? "" : "s"} and fast-forward {rp.branch}…
+                  </button>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+      {done && (
+        <div className="mt-2 text-[13px]" data-testid="reconciled">
+          <b style={{ color: GREEN }}>Main reconciled</b> <span className="text-muted">at {done.at}</span>
+          <Row label="Fast-forward">
+            {done.before.slice(0, 12)} → {done.after.slice(0, 12)}
+          </Row>
+          <Row label="Backup">{done.backup ? `${done.backup} (${done.moved} file${done.moved === 1 ? "" : "s"}, manifest.json)` : "nothing was moved"}</Row>
+          <Row label="Kept">{`${done.preserved} unrelated change${done.preserved === 1 ? "" : "s"}`}</Row>
+        </div>
+      )}
+
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        {button("handback", hb?.status === "unconfirmed" ? "Send the handback again" : "Hand back to the coordinator")}
+        <span className="text-[12px] text-muted">asks it once to run /ticket complete {view.key}, then orchestrate release {view.key}</span>
+      </div>
+      {hb && (
+        <div className="mt-1 text-[13px]" data-testid="handback" data-status={hb.status}>
+          <b style={{ color: hb.status === "sent" ? GREEN : AMBER }}>{hb.status === "sent" ? "Handed back" : hb.status === "sending" ? "Sending…" : "Not confirmed"}</b>{" "}
+          <span className="text-muted">
+            at {hb.at} · {hb.note}
+          </span>
+          <div className="font-mono text-[12px] text-muted">{hb.marker}</div>
+        </div>
+      )}
+
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        {button("plan", "Refresh the plan")}
+        {plan && <span className="text-[12px] text-muted">as of {plan.at}</span>}
+      </div>
+      {plan && (
+        <div className="mt-1 text-[13px]" data-testid="plan">
+          <p className="text-muted">{plan.message}</p>
+          {plan.eligible.length > 0 ? (
+            <ul>
+              {plan.eligible.map((e) => (
+                <li key={e.key} data-key={e.key} data-newly={plan.newly.includes(e.key) ? "yes" : "no"}>
+                  <b>{e.key}</b> {e.title}
+                  {plan.newly.includes(e.key) && (
+                    <span className="chip ml-1 text-[11px]" style={{ background: GREEN }}>
+                      newly eligible
+                    </span>
+                  )}
+                  {e.deferred && <span className="text-muted"> · {e.deferred}</span>}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p>No ticket is eligible now.</p>
+          )}
+          {plan.waitingOn.length > 0 && (
+            <p className="text-muted">
+              Still waiting on {view.key}: {plan.waitingOn.map((w) => w.key).join(", ")} (its completion has not reached the ticket store yet)
+            </p>
+          )}
+        </div>
+      )}
+    </Section>
   );
 }

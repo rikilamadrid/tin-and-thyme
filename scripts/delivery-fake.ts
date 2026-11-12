@@ -84,7 +84,7 @@ export class World {
   constructor(readonly repo: string) {}
 
   /** Real local git, for commands that neither touch the network nor move a ref. */
-  private static PASS = new Set(["rev-parse", "merge-base", "cat-file", "diff", "merge-tree", "rev-list", "log"]);
+  private static PASS = new Set(["rev-parse", "merge-base", "cat-file", "diff", "merge-tree", "rev-list", "log", "for-each-ref"]);
 
   readonly runner: Runner = async (cmd, args, opts = {}) => {
     this.calls.push({ cmd, args: [...args] });
@@ -121,7 +121,18 @@ export class World {
     return result("", 99, `fake runner: unexpected git ${args.join(" ")}`);
   };
 
+  /** The store as the engine's `board --json` reads it; a claimed ticket not listed here is In Progress with no blockers. */
+  tickets = new Map<string, { status: string; blockers: string[]; title?: string }>();
+
   private engine(args: string[]): RunResult {
+    if (args[1] === "board") {
+      const keys = new Set([...this.tickets.keys(), ...this.claims.keys()]);
+      const tickets = [...keys].map((key) => {
+        const t = this.tickets.get(key) ?? { status: "In Progress", blockers: [] };
+        return { key, title: t.title ?? this.claims.get(key)?.title ?? key, status: t.status, blockers: t.blockers };
+      });
+      return result(JSON.stringify({ store: "fake", tickets }));
+    }
     const key = args[2];
     const c = this.claims.get(key);
     const claim = c ? { key, orphan: false, ...c } : null;
@@ -257,7 +268,8 @@ export function makeScenario(tmp: string, name: string) {
   git(repo, "checkout", "-q", "main");
   // Local-only refs that must never reach the remote.
   git(repo, "update-ref", "refs/backup/10.1-pre-squash", reviewed);
-  git(repo, "update-ref", "refs/pathfinder/claims/10.1", head);
+  // The claim ref records the commit the claim started from, as the engine's claim does.
+  git(repo, "update-ref", "refs/pathfinder/claims/10.1", base);
 
   const world = new World(repo);
   world.remote.set("refs/heads/main", base);
