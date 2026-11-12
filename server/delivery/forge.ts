@@ -17,7 +17,25 @@ export type Program = "git" | "gh" | "node";
 /** Runs one program with a fixed argument vector. Tests inject a fake. */
 export type Runner = (cmd: Program, args: string[], opts?: { cwd?: string; timeoutMs?: number }) => Promise<RunResult>;
 
-export const defaultRunner: Runner = (cmd, args, opts = {}) => run(cmd === "node" ? process.execPath : cmd, args, opts);
+/**
+ * What delivery's `git` and `gh` calls add to the server's environment, so a
+ * missing or expired credential fails at once instead of waiting on a prompt
+ * nobody can answer (the kitchen server may still own the terminal it started
+ * from): no git credential prompt, no Git Credential Manager dialog, no ssh
+ * passphrase or host-key question, no gh prompt. A GIT_SSH_COMMAND the human
+ * already set keeps its options and gains BatchMode; a GIT_SSH program is left
+ * alone. (A `core.sshCommand` setting is overridden by GIT_SSH_COMMAND; it is
+ * kept only when the human also exports GIT_SSH_COMMAND.)
+ */
+export function nonInteractiveEnv(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const out: Record<string, string> = { GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never", GH_PROMPT_DISABLED: "1" };
+  if (env.GIT_SSH_COMMAND) out.GIT_SSH_COMMAND = `${env.GIT_SSH_COMMAND} -o BatchMode=yes`;
+  else if (!env.GIT_SSH) out.GIT_SSH_COMMAND = "ssh -o BatchMode=yes";
+  return out;
+}
+
+export const defaultRunner: Runner = (cmd, args, opts = {}) =>
+  cmd === "node" ? run(process.execPath, args, opts) : run(cmd, args, { ...opts, env: nonInteractiveEnv() });
 
 /** The first meaningful line of a failed command's output, redacted. */
 export function firstLine(r: RunResult, fallback: string): string {
@@ -57,6 +75,9 @@ export interface PrSummary {
   isDraft: boolean;
   headRefName: string;
   headRefOid: string;
+  /** True when the PR's head lives in another repository (a fork). */
+  isCrossRepository: boolean;
+  headRepositoryOwner: { login: string } | null;
 }
 
 export interface PrDetail extends PrSummary {
@@ -77,7 +98,8 @@ export interface Check {
 }
 
 export function summarizeChecks(checks: Check[]): ChecksSummary {
-  if (checks.length === 0) return "none";
+  // Checks that were all skipped verified nothing: that is "none", never "passed".
+  if (checks.every((c) => c.bucket === "skipping")) return "none";
   if (checks.some((c) => c.bucket === "fail" || c.bucket === "cancel")) return "failed";
   if (checks.some((c) => c.bucket !== "pass" && c.bucket !== "skipping")) return "pending";
   return "passed";
@@ -85,6 +107,7 @@ export function summarizeChecks(checks: Check[]): ChecksSummary {
 
 const SHA = /^[0-9a-f]{40}$/;
 const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const PR_FIELDS = "number,url,title,state,isDraft,headRefName,headRefOid,isCrossRepository,headRepositoryOwner";
 
 // ---------------------------------------------------------------- forge
 
@@ -115,13 +138,27 @@ export class Forge {
     await this.gh(["auth", "status", "--hostname", "github.com"], "gh sign-in check", 15_000);
   }
 
-  /** The open PR for the branch if there is one, else a merged one, else null. Closed PRs are ignored. */
+  /**
+   * Refuses a PR whose head is not a branch of this repository itself: a fork
+   * (or any cross-repository PR) can carry the same branch name, and its title
+   * and commits are not the ticket's. Fails closed when GitHub omits the fields.
+   */
+  assertSameRepository(pr: Pick<PrSummary, "number" | "isCrossRepository" | "headRepositoryOwner">): void {
+    const owner = this.repo.split("/")[0].toLowerCase();
+    const headOwner = pr.headRepositoryOwner?.login;
+    if (pr.isCrossRepository !== false || typeof headOwner !== "string" || headOwner.toLowerCase() !== owner)
+      throw new DeliveryError("refused", `PR #${pr.number} comes from another repository (${headOwner ?? "unknown owner"}), not ${this.repo}; delivery never reuses or merges it`);
+  }
+
+  /**
+   * The open PR for the branch if there is one, else a merged one, else null.
+   * Closed PRs are ignored; an open or merged PR from another repository with
+   * the same branch name is refused, never reused.
+   */
   async findPr(branch: string): Promise<PrSummary | null> {
-    const r = await this.gh(
-      ["pr", "list", "-R", this.repo, "--head", branch, "--base", this.base, "--state", "all", "--limit", "20", "--json", "number,url,title,state,isDraft,headRefName,headRefOid"],
-      "listing pull requests",
-    );
-    const prs = this.json<PrSummary[]>(r, "listing pull requests").filter((p) => p.headRefName === branch);
+    const r = await this.gh(["pr", "list", "-R", this.repo, "--head", branch, "--base", this.base, "--state", "all", "--limit", "20", "--json", PR_FIELDS], "listing pull requests");
+    const prs = this.json<PrSummary[]>(r, "listing pull requests").filter((p) => p.headRefName === branch && (p.state === "OPEN" || p.state === "MERGED"));
+    for (const p of prs) this.assertSameRepository(p);
     return prs.find((p) => p.state === "OPEN") ?? prs.find((p) => p.state === "MERGED") ?? null;
   }
 
@@ -136,10 +173,11 @@ export class Forge {
 
   async viewPr(n: number): Promise<PrDetail> {
     const r = await this.gh(
-      ["pr", "view", String(n), "-R", this.repo, "--json", "number,url,title,state,isDraft,headRefName,headRefOid,baseRefName,mergeable,reviewDecision,mergeCommit"],
+      ["pr", "view", String(n), "-R", this.repo, "--json", `${PR_FIELDS},baseRefName,mergeable,reviewDecision,mergeCommit`],
       "reading the pull request",
     );
     const raw = this.json<Omit<PrDetail, "mergeCommit"> & { mergeCommit: { oid: string } | null }>(r, "reading the pull request");
+    this.assertSameRepository(raw);
     return { ...raw, mergeCommit: raw.mergeCommit?.oid ?? null };
   }
 

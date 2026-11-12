@@ -38,15 +38,30 @@ export function isTicketBranch(branch: string, key: string): boolean {
 }
 
 /**
- * The reviewed head the engine's claim records. Workers write it into the
- * claim's `Last:` line ("review PASS on 61cd56e8", "reviewed 64962bf8 …",
- * "review PASS df080b1d"); the first such commit id is the reviewed head.
+ * The reviewed head the engine's claim records. The orchestrator writes the
+ * claim's `Last:` line as exactly `review PASS on <full 40-hex sha>` after an
+ * independent tester's PASS (Feature 10, Notes). Anything else — a short id,
+ * lower-case "pass", extra wording (FINDINGS, FAIL, "not", a round number) —
+ * is not a recorded reviewed head.
  */
 export function reviewedHeadOf(last: string | null): string | null {
-  if (!last) return null;
-  const m = /\breview(?:ed)?\b(?:\s+PASS)?(?:\s+on)?\s+([0-9a-f]{7,40})\b/i.exec(last);
+  if (typeof last !== "string") return null;
+  const m = /^review PASS on ([0-9a-f]{40})$/.exec(last);
   return m ? m[1] : null;
 }
+
+/** `context/tickets/<key>-<slug>.md`: the only file a post-review commit may change. */
+export function isTicketRecord(path: string, key: string): boolean {
+  return new RegExp(`^context/tickets/${key.replace(/\./g, "\\.")}-[^/]+\\.md$`).test(path);
+}
+
+/**
+ * A denylist entry is a lowercase commit id: the full 40 hex digits, or an
+ * abbreviation of at least 7 that must resolve to exactly one commit. Anything
+ * else (an option-looking `-…`, a ref name, upper case) is refused before it
+ * reaches git.
+ */
+export const isDenylistEntry = (v: unknown): v is string => typeof v === "string" && /^[0-9a-f]{7,40}$/.test(v);
 
 const FORBIDDEN_PUSH_FLAGS = /^(?:-f|--force|--force-with-lease(?:=.*)?|--force-if-includes|--all|--mirror|--tags|--follow-tags|--delete|-d|--prune|--set-upstream|-u)$/;
 
@@ -93,31 +108,90 @@ const SECRET_SCAN: [string, RegExp][] = [
 ];
 
 export interface SecretFinding {
+  /** The commit that adds it, when scanning `git log -p` output. */
+  commit?: string;
   file: string;
   line: number;
   kind: string;
 }
 
-/** Added lines of a unified diff (`-U0` or more) that look like secrets. Never returns the text. */
-export function scanDiff(diff: string): SecretFinding[] {
+export interface ScanResult {
+  findings: SecretFinding[];
+  /** Binary files the scan could not read (`commit file` or `file`). */
+  binary: string[];
+}
+
+/** `"b/x"` / `b/x` / `/dev/null` → the path without its a/ or b/ prefix. */
+function diffPath(raw: string): string {
+  const p = raw.trim().replace(/^"(.*)"$/, "$1");
+  return p === "/dev/null" ? p : p.replace(/^[ab]\//, "");
+}
+
+/**
+ * Added lines of unified diffs (`-U0` or more) that look like secrets; never
+ * returns the text. Accepts one diff or `git log -p --format='commit %H'`
+ * output, attributing each finding to its commit. `---`/`+++` are file headers
+ * only between `diff --git` and the first hunk, so an added line that itself
+ * starts with `++ ` is still scanned. Binary files are listed as unscanned.
+ */
+export function scanDiff(diff: string): ScanResult {
   const findings: SecretFinding[] = [];
+  const binary: string[] = [];
+  let commit: string | undefined;
   let file = "";
   let line = 0;
+  let header = false;
+  const at = (f: string) => (commit ? `${commit.slice(0, 12)} ${f}` : f);
   for (const text of diff.split("\n")) {
-    if (text.startsWith("+++ ")) {
-      file = text.slice(4).replace(/^b\//, "");
+    const c = /^commit ([0-9a-f]{40})$/.exec(text);
+    if (c) {
+      commit = c[1];
+      file = "";
+      header = false;
       continue;
     }
-    if (text.startsWith("--- ") || text.startsWith("diff --git")) continue;
+    if (text.startsWith("diff --git ")) {
+      header = true;
+      const b = text.lastIndexOf(" b/");
+      const q = text.lastIndexOf(' "b/');
+      file = q >= 0 ? diffPath(text.slice(q + 1)) : b >= 0 ? diffPath(text.slice(b + 1)) : "";
+      continue;
+    }
     const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(text);
     if (hunk) {
+      header = false;
       line = Number(hunk[1]);
       continue;
     }
+    if (header) {
+      if (text.startsWith("+++ ")) {
+        const p = diffPath(text.slice(4));
+        if (p !== "/dev/null") file = p;
+      } else if (/^Binary files .* differ$/.test(text) || text === "GIT binary patch") binary.push(at(file));
+      continue;
+    }
     if (text.startsWith("+")) {
-      for (const [kind, pattern] of SECRET_SCAN) if (pattern.test(text)) findings.push({ file, line, kind });
+      for (const [kind, pattern] of SECRET_SCAN) if (pattern.test(text)) findings.push({ ...(commit ? { commit } : {}), file, line, kind });
       line++;
     } else if (text.startsWith(" ")) line++;
+  }
+  return { findings, binary: [...new Set(binary)] };
+}
+
+/** Commit messages (`git log --format=%H%x1f%B%x1e`) that look like they hold a secret. */
+export function scanMessages(log: string): SecretFinding[] {
+  const findings: SecretFinding[] = [];
+  for (const record of log.split("\x1e")) {
+    const sep = record.indexOf("\x1f");
+    if (sep < 0) continue;
+    const commit = record.slice(0, sep).trim();
+    if (!isSha(commit)) continue;
+    record
+      .slice(sep + 1)
+      .split("\n")
+      .forEach((text, i) => {
+        for (const [kind, pattern] of SECRET_SCAN) if (pattern.test(text)) findings.push({ commit, file: "(commit message)", line: i + 1, kind });
+      });
   }
   return findings;
 }
@@ -141,6 +215,8 @@ export interface Inspection {
   behind: boolean;
   /** The tree main will have after the squash merge. */
   tree: string;
+  /** Binary files the secret scan could not read, shown to the human (`<commit> <path>`). */
+  unscanned: string[];
   /** The local verification evidence the claim records, shown when GitHub reports no checks. */
   evidence: string | null;
 }
@@ -228,7 +304,6 @@ export class Delivery {
   private readonly base: string;
   private readonly engine: string;
   private readonly forge: Forge;
-  private readonly busy = new Set<string>();
   private readonly now: () => Date;
 
   constructor(private readonly cfg: DeliveryConfig) {
@@ -250,7 +325,8 @@ export class Delivery {
   inspect(key: string): Promise<Outcome<Inspection>> {
     return this.step(key, "inspect", async () => {
       const insp = await this.inspectNow(key);
-      return { data: insp, message: `${insp.branch} at ${insp.head} onto ${this.base} ${insp.base}: tree ${insp.tree}` };
+      const unscanned = insp.unscanned.length ? `; ${insp.unscanned.length} binary file(s) not scanned for secrets` : "";
+      return { data: insp, message: `${insp.branch} at ${insp.head} onto ${this.base} ${insp.base}: tree ${insp.tree}${unscanned}` };
     });
   }
 
@@ -350,62 +426,80 @@ export class Delivery {
   merge(key: string, approval: Approval): Promise<Outcome<MergeResult>> {
     return this.step<MergeResult>(key, "merge", async () => {
       const a = validApproval(key, approval);
-      const claim = await this.validClaim(key);
-      const found = await this.forge.findPr(claim.branch!);
-      if (!found) throw new DeliveryError("refused", `no PR for ${claim.branch}; ensure the PR first`);
-      let pr = await this.forge.viewPr(found.number);
-      const prRef = { number: pr.number, url: pr.url };
-
-      if (pr.state === "MERGED") {
-        const v = await this.verifyMerged(key, a, pr);
-        return { data: { pr: prRef, mergeCommit: v.mergeCommit, already: true, checks: null, evidence: null }, message: `PR #${pr.number} was already merged; verified ${v.mergeCommit}` };
-      }
-      if (pr.state !== "OPEN") throw new DeliveryError("refused", `PR #${pr.number} is ${pr.state}`);
-
-      const insp = await this.inspectNow(key);
-      const reasons = approvalStaleness(a, insp);
-      if (pr.headRefOid !== a.head) reasons.push(`PR #${pr.number} head is ${pr.headRefOid}, not the approved ${a.head}`);
-      if (reasons.length) {
-        this.cfg.store.update(key, (s) => {
-          s.approval = null;
-          s.invalidated = { at: this.now().toISOString(), reasons, approval: a };
-        });
-        throw new DeliveryError("stale", "the approval is stale; inspect and approve again", { reasons });
-      }
-      if (pr.baseRefName !== this.base) throw new DeliveryError("invalid", `PR #${pr.number} targets ${pr.baseRefName}, not ${this.base}`);
-      if (pr.headRefName !== claim.branch) throw new DeliveryError("invalid", `PR #${pr.number} is from ${pr.headRefName}, not ${claim.branch}`);
-      if (pr.isDraft) throw new DeliveryError("blocked", `PR #${pr.number} is a draft`);
-
-      const items = await this.forge.checks(pr.number);
-      const checks = summarizeChecks(items);
-      if (checks === "failed") throw new DeliveryError("blocked", `PR #${pr.number} has a failing check`, { reasons: items.filter((c) => c.bucket === "fail" || c.bucket === "cancel").map((c) => c.name) });
-      if (checks === "pending") throw new DeliveryError("blocked", `PR #${pr.number} has checks still running`, { reasons: items.filter((c) => c.bucket === "pending").map((c) => c.name) });
-      if (checks === "none") {
-        if (!insp.evidence) throw new DeliveryError("blocked", "no checks reported and no local verification evidence recorded for the ticket");
-        if (!a.acknowledgeNoChecks) throw new DeliveryError("blocked", "no checks reported: merging needs your explicit acknowledgement of the local evidence", { reasons: [insp.evidence] });
-      }
-      if (pr.mergeable === "CONFLICTING") throw new DeliveryError("blocked", `PR #${pr.number} conflicts with ${this.base}`);
-      if (pr.mergeable !== "MERGEABLE") throw new DeliveryError("blocked", `GitHub has not computed whether PR #${pr.number} is mergeable yet; try again in a moment`);
-      if (pr.reviewDecision === "CHANGES_REQUESTED") throw new DeliveryError("blocked", `PR #${pr.number} has changes requested`);
-
-      this.cfg.store.update(key, (s) => {
-        s.approval = { ...a, at: s.approval?.at ?? this.now().toISOString() };
-        s.invalidated = null;
-      });
+      // One merge into the base at a time, across every Delivery and kitchen process using this
+      // deliveries folder: held from the pre-merge re-check through the merge and its verification.
+      const release = this.cfg.store.lock("merge", `a merge into ${this.base}`);
       try {
-        await this.forge.squashMerge(pr.number, a.head, `${pr.title} (#${pr.number})`);
-      } catch (err) {
-        // A merge that GitHub completed but reported badly is verified, not retried.
-        pr = await this.forge.viewPr(pr.number).catch(() => pr);
-        if (pr.state !== "MERGED") throw err;
+        return await this.mergeLocked(key, a);
+      } finally {
+        release();
       }
-      pr = pr.state === "MERGED" ? pr : await this.forge.viewPr(pr.number);
-      const v = await this.verifyMerged(key, a, pr);
-      return {
-        data: { pr: prRef, mergeCommit: v.mergeCommit, already: false, checks, evidence: checks === "none" ? insp.evidence : null },
-        message: `merged PR #${pr.number} as ${v.mergeCommit}`,
-      };
     });
+  }
+
+  private async mergeLocked(key: string, a: Approval): Promise<{ data: MergeResult; message: string }> {
+    const claim = await this.validClaim(key);
+    const found = await this.forge.findPr(claim.branch!);
+    if (!found) throw new DeliveryError("refused", `no PR for ${claim.branch}; ensure the PR first`);
+    let pr = await this.forge.viewPr(found.number);
+    const prRef = { number: pr.number, url: pr.url };
+
+    if (pr.state === "MERGED") {
+      const v = await this.verifyAfterMerge(key, a, pr);
+      return { data: { pr: prRef, mergeCommit: v.mergeCommit, already: true, checks: null, evidence: null }, message: `PR #${pr.number} was already merged; verified ${v.mergeCommit}` };
+    }
+    if (pr.state !== "OPEN") throw new DeliveryError("refused", `PR #${pr.number} is ${pr.state}`);
+
+    const insp = await this.inspectNow(key);
+    const reasons = approvalStaleness(a, insp);
+    if (pr.headRefOid !== a.head) reasons.push(`PR #${pr.number} head is ${pr.headRefOid}, not the approved ${a.head}`);
+    if (reasons.length) this.stale(key, a, reasons);
+    if (pr.baseRefName !== this.base) throw new DeliveryError("invalid", `PR #${pr.number} targets ${pr.baseRefName}, not ${this.base}`);
+    if (pr.headRefName !== claim.branch) throw new DeliveryError("invalid", `PR #${pr.number} is from ${pr.headRefName}, not ${claim.branch}`);
+    if (pr.isDraft) throw new DeliveryError("blocked", `PR #${pr.number} is a draft`);
+
+    const items = await this.forge.checks(pr.number);
+    const checks = summarizeChecks(items);
+    if (checks === "failed") throw new DeliveryError("blocked", `PR #${pr.number} has a failing check`, { reasons: items.filter((c) => c.bucket === "fail" || c.bucket === "cancel").map((c) => c.name) });
+    if (checks === "pending") throw new DeliveryError("blocked", `PR #${pr.number} has checks still running`, { reasons: items.filter((c) => c.bucket === "pending").map((c) => c.name) });
+    if (checks === "none") {
+      if (!insp.evidence) throw new DeliveryError("blocked", "no checks reported and no local verification evidence recorded for the ticket");
+      if (!a.acknowledgeNoChecks) throw new DeliveryError("blocked", "no checks reported: merging needs your explicit acknowledgement of the local evidence", { reasons: [insp.evidence] });
+    }
+    if (pr.mergeable === "CONFLICTING") throw new DeliveryError("blocked", `PR #${pr.number} conflicts with ${this.base}`);
+    if (pr.mergeable !== "MERGEABLE") throw new DeliveryError("blocked", `GitHub has not computed whether PR #${pr.number} is mergeable yet; try again in a moment`);
+    if (pr.reviewDecision === "CHANGES_REQUESTED") throw new DeliveryError("blocked", `PR #${pr.number} has changes requested`);
+
+    // Immediately before merging: origin's base is still exactly the approved base.
+    const remoteBase = await this.remoteHead(this.base);
+    if (remoteBase !== a.base) this.stale(key, a, [`origin ${this.base} moved from ${a.base} to ${remoteBase ?? "nothing"}`]);
+
+    this.cfg.store.update(key, (s) => {
+      s.approval = { ...a, at: s.approval?.at ?? this.now().toISOString() };
+      s.invalidated = null;
+    });
+    try {
+      await this.forge.squashMerge(pr.number, a.head, `${pr.title} (#${pr.number})`);
+    } catch (err) {
+      // A merge that GitHub completed but reported badly is verified, not retried.
+      pr = await this.forge.viewPr(pr.number).catch(() => pr);
+      if (pr.state !== "MERGED") throw err;
+    }
+    pr = pr.state === "MERGED" ? pr : await this.forge.viewPr(pr.number);
+    const v = await this.verifyAfterMerge(key, a, pr);
+    return {
+      data: { pr: prRef, mergeCommit: v.mergeCommit, already: false, checks, evidence: checks === "none" ? insp.evidence : null },
+      message: `merged PR #${pr.number} as ${v.mergeCommit}`,
+    };
+  }
+
+  /** Clears an approval that no longer holds, keeping why for the UI, and stops. */
+  private stale(key: string, a: Approval, reasons: string[]): never {
+    this.cfg.store.update(key, (s) => {
+      s.approval = null;
+      s.invalidated = { at: this.now().toISOString(), reasons, approval: a };
+    });
+    throw new DeliveryError("stale", "the approval is stale; inspect and approve again", { reasons });
   }
 
   verify(key: string): Promise<Outcome<VerifyResult>> {
@@ -417,7 +511,7 @@ export class Delivery {
       const s = this.cfg.store.read(key);
       const number = s.pr?.number ?? (s.branch && isTicketBranch(s.branch, key) ? (await this.forge.findPr(s.branch))?.number : undefined);
       if (!number) throw new DeliveryError("refused", `no PR is recorded for ${key}`);
-      const v = await this.verifyMerged(key, a, await this.forge.viewPr(number));
+      const v = await this.verifyAfterMerge(key, a, await this.forge.viewPr(number));
       return { data: v, message: `${this.base} has ${v.mergeCommit}: parent ${v.parent}, tree ${v.tree}` };
     });
   }
@@ -430,21 +524,53 @@ export class Delivery {
       const err = new DeliveryError("invalid", `not a ticket key: ${String(key)}`);
       return { ok: false, kind: err.kind, message: err.message, fix: null, reasons: [], state: emptyState(String(key)) };
     }
-    if (this.busy.has(key)) {
-      return { ok: false, kind: "blocked", message: `another delivery step for ${key} is still running`, fix: null, reasons: [], state: this.cfg.store.read(key) };
+    const failure = (e: unknown, state: DeliveryState): Outcome<T> => {
+      const err = e instanceof DeliveryError ? e : new DeliveryError("failed", e instanceof Error ? e.message : String(e));
+      return { ok: false, kind: err.kind, message: err.message, fix: err.fix, reasons: err.reasons, state };
+    };
+    // Nothing runs unless the step's result can be recorded: an unreadable state file stops here, untouched.
+    try {
+      this.cfg.store.read(key);
+    } catch (e) {
+      return failure(e, emptyState(key));
     }
-    this.busy.add(key);
+    // One step per ticket at a time, across every Delivery and kitchen process using this folder.
+    let release: () => void;
+    try {
+      release = this.cfg.store.lock(key, `another delivery step for ${key}`);
+    } catch (e) {
+      return failure(e, this.safeRead(key));
+    }
     const at = () => this.now().toISOString();
     try {
-      const { data, message, change } = await fn();
-      const state = this.cfg.store.record(key, { step: name, ok: true, at: at(), message: redact(message) }, change);
-      return { ok: true, data: redactDeep(data), state };
-    } catch (e) {
-      const err = e instanceof DeliveryError ? e : new DeliveryError("failed", e instanceof Error ? e.message : String(e));
-      const state = this.cfg.store.record(key, { step: name, ok: false, at: at(), message: err.message, kind: err.kind, fix: err.fix, reasons: err.reasons });
-      return { ok: false, kind: err.kind, message: err.message, fix: err.fix, reasons: err.reasons, state };
+      let result: { data: T; message: string; change?: (s: DeliveryState) => void };
+      try {
+        result = await fn();
+      } catch (e) {
+        const err = e instanceof DeliveryError ? e : new DeliveryError("failed", e instanceof Error ? e.message : String(e));
+        try {
+          const state = this.cfg.store.record(key, { step: name, ok: false, at: at(), message: err.message, kind: err.kind, fix: err.fix, reasons: err.reasons });
+          return failure(err, state);
+        } catch (recordErr) {
+          return failure(new DeliveryError(err.kind, `${err.message} (and the result could not be recorded: ${(recordErr as Error).message})`, { fix: err.fix ?? undefined, reasons: err.reasons }), this.safeRead(key));
+        }
+      }
+      try {
+        const state = this.cfg.store.record(key, { step: name, ok: true, at: at(), message: redact(result.message) }, result.change);
+        return { ok: true, data: redactDeep(result.data), state };
+      } catch (recordErr) {
+        return failure(new DeliveryError("failed", `${redact(result.message)}, but the result could not be recorded: ${(recordErr as Error).message}`), this.safeRead(key));
+      }
     } finally {
-      this.busy.delete(key);
+      release();
+    }
+  }
+
+  private safeRead(key: string): DeliveryState {
+    try {
+      return this.cfg.store.read(key);
+    } catch {
+      return emptyState(key);
     }
   }
 
@@ -489,6 +615,14 @@ export class Delivery {
     const url = await this.gitOk(["remote", "get-url", "origin"], "reading origin");
     const origin = parseGithubRemote(url);
     if (!origin || origin.toLowerCase() !== this.cfg.repo.toLowerCase()) throw new DeliveryError("invalid", `origin is ${url}, not github.com/${this.cfg.repo}`);
+    // Where a push really goes: `pushurl` and `pushInsteadOf` are applied here, and there must be exactly one.
+    const pushUrls = (await this.gitOk(["remote", "get-url", "--push", "--all", "origin"], "reading origin's push URL"))
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean);
+    if (pushUrls.length !== 1) throw new DeliveryError("invalid", `origin has ${pushUrls.length} push URLs; delivery needs exactly one, github.com/${this.cfg.repo}`, { reasons: pushUrls });
+    const pushTo = parseGithubRemote(pushUrls[0]);
+    if (!pushTo || pushTo.toLowerCase() !== this.cfg.repo.toLowerCase()) throw new DeliveryError("invalid", `origin pushes to ${pushUrls[0]}, not github.com/${this.cfg.repo}`);
   }
 
   private async validClaim(key: string, opts: { allowAnyState?: boolean } = {}): Promise<Claim> {
@@ -529,31 +663,39 @@ export class Delivery {
     if (changed.length) throw new DeliveryError("refused", `${claim.worktree} has uncommitted changes`, { reasons: changed.slice(0, 10).map((l) => l.trim()) });
 
     const recorded = reviewedHeadOf(claim.last);
-    if (!recorded) throw new DeliveryError("refused", `${key}'s claim records no reviewed head`);
+    if (!recorded) throw new DeliveryError("refused", `${key}'s claim records no reviewed head (its Last: line is not exactly "review PASS on <full commit id>")`);
     const reviewedHead = await this.commit(recorded, "the reviewed head");
+    if (!claim.ref || !isTicketRecord(claim.ref, key)) throw new DeliveryError("refused", `${key}'s claim names ${claim.ref ?? "no file"} as its record, not context/tickets/${key}-<slug>.md`);
     let recordOnly: string[] = [];
     if (reviewedHead !== head) {
       if (!(await this.isAncestor(reviewedHead, head))) throw new DeliveryError("refused", `${head} does not build on the reviewed head ${reviewedHead}`);
-      const files = (await this.gitOk(["diff", "--name-only", reviewedHead, head], "listing post-review changes")).split("\n").filter(Boolean);
-      const own = (f: string) => (claim.ref ? f === claim.ref : new RegExp(`^context/tickets/${key.replace(".", "\\.")}-[^/]+\\.md$`).test(f));
-      const other = files.filter((f) => !own(f));
+      const files = (await this.gitOk(["diff", "--name-only", "--no-renames", reviewedHead, head], "listing post-review changes")).split("\n").filter(Boolean);
+      const other = files.filter((f) => f !== claim.ref);
       if (other.length) throw new DeliveryError("refused", `commits after the reviewed head change more than the ticket record`, { reasons: other.slice(0, 10) });
       recordOnly = (await this.gitOk(["rev-list", `${reviewedHead}..${head}`], "listing post-review commits")).split("\n").filter(Boolean);
     }
 
-    for (const bad of this.cfg.denylist ?? []) {
-      const exists = await this.git(["cat-file", "-e", `${bad}^{commit}`]);
-      if (!exists.ok) continue; // a commit this repository does not have cannot be in the head's ancestry
-      if (await this.isAncestor(bad, head)) throw new DeliveryError("refused", `denylisted commit ${bad} is reachable from ${head}`);
-    }
+    await this.checkDenylist(head);
 
     const base = await this.fetchBase();
     const mergeBase = await this.gitOk(["merge-base", base, head], "finding the merge base");
     if (!isSha(mergeBase)) throw new DeliveryError("refused", `${branch} shares no history with ${this.base}`);
 
-    const diff = await this.gitOk(["diff", "--no-color", "--no-ext-diff", "--no-textconv", "-U0", mergeBase, head], "reading the diff", { timeoutMs: 60_000 });
-    const findings = scanDiff(diff);
-    if (findings.length) throw new DeliveryError("refused", `the diff contains what looks like a secret`, { reasons: findings.slice(0, 10).map((f) => `${f.file}:${f.line} (${f.kind})`) });
+    // Every commit that will be pushed, not only the combined diff: a secret added and later removed
+    // is still in the pushed history. A merge commit is read against its first parent.
+    const range = `${mergeBase}..${head}`;
+    const patches = await this.gitOk(
+      ["log", "-p", "--no-color", "--no-ext-diff", "--no-textconv", "-U0", "--diff-merges=first-parent", "--format=commit %H", range],
+      "reading the commits to deliver",
+      { timeoutMs: 60_000 },
+    );
+    const scan = scanDiff(patches);
+    const messages = scanMessages(await this.gitOk(["log", "--format=%H%x1f%B%x1e", range], "reading the commit messages"));
+    const findings = [...scan.findings, ...messages];
+    if (findings.length)
+      throw new DeliveryError("refused", `the commits to deliver contain what looks like a secret`, {
+        reasons: findings.slice(0, 10).map((f) => `${f.commit ? `${f.commit.slice(0, 12)} ` : ""}${f.file}:${f.line} (${f.kind})`),
+      });
 
     const merge = await this.git(["merge-tree", "--write-tree", base, head]);
     if (merge.code === 1) throw new DeliveryError("refused", `${branch} conflicts with ${this.base} ${base}`, { reasons: merge.stdout.split("\n").slice(1).filter(Boolean).slice(0, 10) });
@@ -575,6 +717,7 @@ export class Delivery {
       mergeBase,
       behind: mergeBase !== base,
       tree,
+      unscanned: scan.binary,
       evidence: claim.last,
     };
     this.cfg.store.update(key, (s) => {
@@ -593,6 +736,50 @@ export class Delivery {
       }
     });
     return insp;
+  }
+
+  /**
+   * Denylisted commits must not be in the head's ancestry. A full id this
+   * repository lacks cannot be; an abbreviation must resolve to exactly one
+   * commit; anything else is refused, and never passed to git.
+   */
+  private async checkDenylist(head: string): Promise<void> {
+    for (const entry of this.cfg.denylist ?? []) {
+      if (!isDenylistEntry(entry)) throw new DeliveryError("invalid", `denylist entry ${JSON.stringify(String(entry)).slice(0, 80)} is not a commit id (7 to 40 lowercase hex digits)`);
+      let sha = entry;
+      if (isSha(entry)) {
+        if (!(await this.git(["cat-file", "-e", `${entry}^{commit}`])).ok) continue;
+      } else {
+        const r = await this.git(["rev-parse", "--verify", "--quiet", `${entry}^{commit}`]);
+        sha = r.stdout.trim();
+        if (!r.ok || !isSha(sha)) throw new DeliveryError("refused", `denylist entry ${entry} does not resolve to exactly one commit (missing or ambiguous); list its full id`);
+      }
+      if (await this.isAncestor(sha, head)) throw new DeliveryError("refused", `denylisted commit ${sha} is reachable from ${head}`);
+    }
+  }
+
+  /**
+   * Records the merge as merged-but-unverified first, then verifies it. A
+   * verification that fails keeps that record: the PR is merged, so it is
+   * never merged again; it needs verifying (or the human).
+   */
+  private async verifyAfterMerge(key: string, a: Approval, pr: PrDetail): Promise<VerifyResult> {
+    if (pr.state === "MERGED") {
+      const commit = isSha(pr.mergeCommit) ? pr.mergeCommit : null;
+      this.cfg.store.update(key, (s) => {
+        if (!s.merged || s.merged.commit !== commit || s.merged.pr !== pr.number) s.merged = { at: this.now().toISOString(), pr: pr.number, commit };
+        s.mergeCommit = commit;
+        s.verified = false;
+        s.pr = { number: pr.number, url: pr.url };
+      });
+    }
+    try {
+      return await this.verifyMerged(key, a, pr);
+    } catch (e) {
+      if (pr.state !== "MERGED") throw e;
+      const err = e instanceof DeliveryError ? e : new DeliveryError("failed", e instanceof Error ? e.message : String(e));
+      throw new DeliveryError("failed", `PR #${pr.number} is merged${isSha(pr.mergeCommit) ? ` as ${pr.mergeCommit}` : ""} but NOT verified: ${err.message}. Do not merge again; verify it, or leave it to the human`, { reasons: err.reasons });
+    }
   }
 
   /** The PR is merged, as one squash commit on the approved base with the approved tree, and it is on main. */

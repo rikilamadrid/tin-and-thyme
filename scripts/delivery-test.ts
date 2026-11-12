@@ -13,13 +13,27 @@
 //
 //   pnpm exec tsx scripts/delivery-test.ts
 
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { run, type RunResult } from "../server/lib/exec";
-import { summarizeChecks, type Check, type Program, type Runner } from "../server/delivery/forge";
-import { assertSafePushArgs, Delivery, isTicketBranch, parseGithubRemote, pushArgs, reviewedHeadOf, scanDiff, type Inspection, type Outcome } from "../server/delivery/ops";
+import { defaultRunner, nonInteractiveEnv, summarizeChecks, type Check, type Program, type Runner } from "../server/delivery/forge";
+import {
+  assertSafePushArgs,
+  Delivery,
+  isDenylistEntry,
+  isTicketBranch,
+  isTicketRecord,
+  parseGithubRemote,
+  pushArgs,
+  reviewedHeadOf,
+  scanDiff,
+  scanMessages,
+  type Inspection,
+  type Outcome,
+} from "../server/delivery/ops";
 import { DeliveryStore, redact, type Approval } from "../server/delivery/state";
 
 // ---------------------------------------------------------------- harness
@@ -84,6 +98,9 @@ interface FakePr {
   reviewDecision: "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | "";
   mergeCommit: string | null;
   checks: Check[] | "none";
+  /** A PR from a fork: true, with the fork owner. */
+  isCrossRepository?: boolean;
+  headOwner?: string;
 }
 
 interface FakeClaim {
@@ -91,14 +108,21 @@ interface FakeClaim {
   worktree: string;
   state: string;
   last: string;
-  ref: string;
+  ref: string | null;
   title: string;
   orphan?: boolean;
 }
 
 class World {
   originUrl = "https://github.com/owner/project.git";
+  /** `git remote get-url --push --all origin`; null means the origin URL. */
+  pushUrls: string[] | null = null;
+  owner = "owner";
   remote = new Map<string, string>();
+  /** Runs before each ls-remote is answered (to move a remote ref at the last moment). */
+  beforeLsRemote: ((ref: string) => void) | null = null;
+  /** The fake squash merge writes a wrong tree or parent (a merge that cannot be verified). */
+  mergeTamper: "tree" | "parent" | null = null;
   claims = new Map<string, FakeClaim>();
   dirty = "";
   prs: FakePr[] = [];
@@ -112,7 +136,7 @@ class World {
   constructor(readonly repo: string) {}
 
   /** Real local git, for commands that neither touch the network nor move a ref. */
-  private static PASS = new Set(["rev-parse", "merge-base", "cat-file", "diff", "merge-tree", "rev-list"]);
+  private static PASS = new Set(["rev-parse", "merge-base", "cat-file", "diff", "merge-tree", "rev-list", "log"]);
 
   readonly runner: Runner = async (cmd, args, opts = {}) => {
     this.calls.push({ cmd, args: [...args] });
@@ -120,10 +144,15 @@ class World {
     if (cmd === "gh") return this.gh(args);
     const [sub] = args;
     if (sub === "push") return this.push(args);
-    if (sub === "remote") return args[1] === "get-url" && args[2] === "origin" ? result(this.originUrl + "\n") : result("", 2, "unexpected remote call");
+    if (sub === "remote") {
+      if (args.join(" ") === "remote get-url origin") return result(this.originUrl + "\n");
+      if (args.join(" ") === "remote get-url --push --all origin") return result((this.pushUrls ?? [this.originUrl]).map((u) => u + "\n").join(""));
+      return result("", 2, "unexpected remote call");
+    }
     if (sub === "status") return result(this.dirty);
     if (sub === "ls-remote") {
       const ref = args[2];
+      this.beforeLsRemote?.(ref);
       const sha = this.remote.get(ref);
       return result(sha ? `${sha}\t${ref}\n` : "");
     }
@@ -162,8 +191,15 @@ class World {
 
   private view(pr: FakePr) {
     const head = pr.state === "OPEN" ? (this.remote.get(`refs/heads/${pr.headRefName}`) ?? pr.headRefOid) : pr.headRefOid;
-    const { checks: _checks, mergeCommit, ...rest } = pr;
-    return { ...rest, headRefOid: head, url: `https://github.com/owner/project/pull/${pr.number}`, mergeCommit: mergeCommit ? { oid: mergeCommit } : null };
+    const { checks: _checks, mergeCommit, headOwner, isCrossRepository, ...rest } = pr;
+    return {
+      ...rest,
+      headRefOid: head,
+      url: `https://github.com/owner/project/pull/${pr.number}`,
+      mergeCommit: mergeCommit ? { oid: mergeCommit } : null,
+      isCrossRepository: isCrossRepository ?? false,
+      headRepositoryOwner: { id: "MDQ6VXNlcjE=", login: headOwner ?? this.owner },
+    };
   }
 
   private gh(args: string[]): RunResult {
@@ -217,8 +253,10 @@ class World {
       if (pinned !== head) return result("", 1, "Head branch was modified. Review and try the merge again.");
       // A real squash: the merge of the branch onto the current remote main, as one commit.
       const main = this.remote.get(`refs/heads/${pr.baseRefName}`)!;
-      const tree = git(this.repo, "merge-tree", "--write-tree", main, head).split("\n")[0];
-      const commit = git(this.repo, "commit-tree", tree, "-p", main, "-m", this.flag(args, "--subject") ?? pr.title);
+      const merged = git(this.repo, "merge-tree", "--write-tree", main, head).split("\n")[0];
+      const tree = this.mergeTamper === "tree" ? git(this.repo, "rev-parse", `${main}^{tree}`) : merged;
+      const parent = this.mergeTamper === "parent" ? head : main;
+      const commit = git(this.repo, "commit-tree", tree, "-p", parent, "-m", this.flag(args, "--subject") ?? pr.title);
       this.remote.set(`refs/heads/${pr.baseRefName}`, commit);
       Object.assign(pr, { state: "MERGED", headRefOid: head, mergeCommit: commit });
       return result("");
@@ -264,7 +302,7 @@ function scenario(name: string) {
     branch: "ticket/10.1-demo",
     worktree: ".pathfinder/worktrees/10.1",
     state: "done",
-    last: `review PASS on ${reviewed.slice(0, 8)} (round 1); local typecheck, tests and build green`,
+    last: `review PASS on ${reviewed}`,
     ref: "context/tickets/10.1-demo.md",
     title: "Demo feature",
   });
@@ -288,11 +326,51 @@ check("ticket branch for another key", !isTicketBranch("ticket/10.2-delivery-cor
 check("not a ticket branch", !isTicketBranch("feature/10.1-x", "10.1"));
 check("ticket branch with ..", !isTicketBranch("ticket/10.1-a..b", "10.1"));
 
-// The claims' real `Last:` lines.
-eq("reviewed head: review PASS on", reviewedHeadOf("review PASS on 61cd56e8 (round 2); local CI-equivalent green"), "61cd56e8");
-eq("reviewed head: reviewed", reviewedHeadOf("reconciled 2026-11-12: reviewed 64962bf8 (tree 6b0c6ce) + bookkeeping-only b2b92044"), "64962bf8");
-eq("reviewed head: review PASS", reviewedHeadOf("reconciled 2026-11-12: review PASS df080b1d + bookkeeping-only ff00d6ec; docs-only"), "df080b1d");
-eq("reviewed head: none", reviewedHeadOf("Phase A done: automated checks pass"), null);
+// The claims' real `Last:` lines (orchestrator decision: exactly `review PASS on <full sha>`).
+const RV = "64962bf8d259ebe599bcb656b04464f48c38d962";
+eq("reviewed head: the one accepted form", reviewedHeadOf(`review PASS on ${RV}`), RV);
+eq("reviewed head: 01.1's real line", reviewedHeadOf("review PASS on 61cd56e8ed4f3890bca9ff72f717d20e66bf5e4d"), "61cd56e8ed4f3890bca9ff72f717d20e66bf5e4d");
+for (const last of [
+  "review PASS on 61cd56e8",
+  "review PASS on 61cd56e8 (round 2); local CI-equivalent green",
+  `review pass on ${RV}`,
+  `Review PASS on ${RV}`,
+  `review PASS ${RV}`,
+  `reviewed ${RV}`,
+  `review on ${RV}: FINDINGS`,
+  `review FINDINGS on ${RV}`,
+  `review FAIL on ${RV}`,
+  `review PASS on ${RV}: FINDINGS`,
+  `review PASS on ${RV} (round 2)`,
+  `not review PASS on ${RV}`,
+  `review PASS on ${RV} not yet`,
+  `ready for review on ${RV}`,
+  `awaiting review ${RV}`,
+  `not reviewed ${RV} yet`,
+  ` review PASS on ${RV}`,
+  `review PASS on ${RV}\n`,
+  `review PASS on ${RV}0`,
+  `review PASS on ${RV.toUpperCase()}`,
+  "reconciled 2026-11-12: reviewed 64962bf8 (tree 6b0c6ce) + bookkeeping-only b2b92044",
+  "Phase A done: automated checks pass",
+  "",
+]) eq(`reviewed head refused: ${JSON.stringify(last)}`, reviewedHeadOf(last), null);
+eq("reviewed head: none", reviewedHeadOf(null), null);
+
+// The ticket's own record, the only file a post-review commit may touch.
+check("record path ok", isTicketRecord("context/tickets/10.1-delivery-core.md", "10.1"));
+for (const bad of ["src/feature.ts", "context/tickets/10.2-x.md", "context/tickets/10.11-x.md", "context/tickets/1001-x.md", "context/tickets/10.1-a/b.md", "context/tickets/10.1-x.md.ts", "x/context/tickets/10.1-x.md", "context/features/10.1-x.md"])
+  check(`record path refused: ${bad}`, !isTicketRecord(bad, "10.1"));
+
+// Denylist entries: commit ids only.
+for (const good of ["2133c3d", "2133c3dd92ea38e7f98023085b20bb45f43f7fa7"]) check(`denylist entry ok: ${good}`, isDenylistEntry(good));
+for (const bad of ["-abcdef1", "--output=/tmp/x", "2133c3", "2133C3D", "HEAD", "main", "2133c3d^", "2133c3dd92ea38e7f98023085b20bb45f43f7fa70", "", 7])
+  check(`denylist entry malformed: ${JSON.stringify(bad)}`, !isDenylistEntry(bad));
+
+// Delivery's git and gh calls never wait on a prompt.
+eq("non-interactive env", nonInteractiveEnv({}), { GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never", GH_PROMPT_DISABLED: "1", GIT_SSH_COMMAND: "ssh -o BatchMode=yes" });
+eq("non-interactive env keeps a custom ssh command", nonInteractiveEnv({ GIT_SSH_COMMAND: "ssh -i ~/.ssh/k" }).GIT_SSH_COMMAND, "ssh -i ~/.ssh/k -o BatchMode=yes");
+eq("non-interactive env leaves GIT_SSH alone", nonInteractiveEnv({ GIT_SSH: "/usr/local/bin/myssh" }).GIT_SSH_COMMAND, undefined);
 
 const H = "b2b92044de5096248277b8ef9b97e18f0aab30c7";
 eq("push args", pushArgs("05.1", H, "ticket/05.1-adopt"), ["push", "--no-follow-tags", "--porcelain", "origin", `${H}:refs/heads/ticket/05.1-adopt`]);
@@ -327,6 +405,7 @@ eq("checks: none is not passing", summarizeChecks([]), "none");
 eq("checks: failed", summarizeChecks([{ name: "ci", bucket: "pass", state: "SUCCESS", link: "" }, { name: "lint", bucket: "fail", state: "FAILURE", link: "" }]), "failed");
 eq("checks: pending", summarizeChecks([{ name: "ci", bucket: "pending", state: "IN_PROGRESS", link: "" }]), "pending");
 eq("checks: passed", summarizeChecks([{ name: "ci", bucket: "pass", state: "SUCCESS", link: "" }, { name: "x", bucket: "skipping", state: "SKIPPED", link: "" }]), "passed");
+eq("checks: all skipped is none, not passed", summarizeChecks([{ name: "x", bucket: "skipping", state: "SKIPPED", link: "" }, { name: "y", bucket: "skipping", state: "SKIPPED", link: "" }]), "none");
 
 // Redaction.
 for (const [label, text] of [
@@ -352,11 +431,43 @@ const scanned = scanDiff(
     `+fetch(url, { headers: { Authorization: "token ${filler.slice(0, 40)}" } });`,
   ].join("\n"),
 );
-eq("scan finds the token and the literal header", scanned, [
+eq("scan finds the token and the literal header", scanned.findings, [
   { file: "src/x.ts", line: 10, kind: "GitHub token" },
   { file: "src/x.ts", line: 12, kind: "Authorization header with a literal credential" },
 ]);
 check("scan never returns the secret", !JSON.stringify(scanned).includes(GH_TOKEN));
+// An added line that itself starts with "++ " is content, not a file header.
+const plusplus = scanDiff(["diff --git a/notes.txt b/notes.txt", "--- a/notes.txt", "+++ b/notes.txt", "@@ -0,0 +1,2 @@", "+ok", `+++ ${GH_TOKEN}`, `--- removed`].join("\n"));
+eq("scan reads an added '++ ' line", plusplus.findings, [{ file: "notes.txt", line: 2, kind: "GitHub token" }]);
+// `git log -p` output: each finding names its commit; binary files are listed as unscanned.
+const C1 = "1".repeat(40);
+const C2 = "2".repeat(40);
+const logScan = scanDiff(
+  [
+    `commit ${C1}`,
+    "",
+    "diff --git a/a.ts b/a.ts",
+    "new file mode 100644",
+    "--- /dev/null",
+    "+++ b/a.ts",
+    "@@ -0,0 +1 @@",
+    `+const t = "${GH_TOKEN}";`,
+    `commit ${C2}`,
+    "",
+    "diff --git a/img.png b/img.png",
+    "new file mode 100644",
+    "Binary files /dev/null and b/img.png differ",
+    "diff --git a/a.ts b/a.ts",
+    "deleted file mode 100644",
+    "--- a/a.ts",
+    "+++ /dev/null",
+    "@@ -1 +0,0 @@",
+    `-const t = "${GH_TOKEN}";`,
+  ].join("\n"),
+);
+eq("log scan attributes the finding to its commit", logScan.findings, [{ commit: C1, file: "a.ts", line: 1, kind: "GitHub token" }]);
+eq("log scan lists binary files as unscanned", logScan.binary, [`${C2.slice(0, 12)} img.png`]);
+eq("message scan", scanMessages(`${C1}\x1fFix things\n\nused ${GH_TOKEN} to test\n\x1e\n${C2}\x1fclean\n\x1e`), [{ commit: C1, file: "(commit message)", line: 3, kind: "GitHub token" }]);
 
 // ---------------------------------------------------------------- scenarios
 
@@ -370,7 +481,8 @@ async function main() {
     eq("inspect record-only commits", i.recordOnly, [s.head]);
     eq("inspect base is fetched origin/main", i.base, s.base);
     eq("inspect expected tree is the real merge tree", i.tree, git(s.repo, "merge-tree", "--write-tree", s.base, s.head));
-    check("inspect evidence comes from the claim", i.evidence?.includes("local typecheck"));
+    check("inspect evidence comes from the claim", i.evidence === `review PASS on ${s.reviewed}`);
+    eq("inspect: nothing unscanned", i.unscanned, []);
     const stored = JSON.parse(readFileSync(join(s.stateDir, "10.1.json"), "utf8"));
     eq("state records the inspected head/base/tree", [stored.head, stored.base, stored.tree], [i.head, i.base, i.tree]);
     check("state records the inspect step", stored.steps.inspect?.ok === true);
@@ -539,7 +651,6 @@ async function main() {
     eq("status head", st.head, s.head);
     eq("status mergeable", st.mergeable, "MERGEABLE");
     refused("no checks without acknowledgement", await s.delivery.merge("10.1", approvalOf(s.i)), "blocked", /acknowledgement/);
-    s.world.claims.get("10.1")!.last = `review PASS on ${s.reviewed.slice(0, 8)}`;
     ok("approval recorded", await s.delivery.approve("10.1", approvalOf(s.i, { acknowledgeNoChecks: true })));
     eq("approval stored as {key, head, base, tree}", (({ key, head, base, tree }) => ({ key, head, base, tree }))(s.delivery.read("10.1").approval!), { key: "10.1", head: s.head, base: s.base, tree: s.i.tree });
     eq("no merge attempted while blocked", s.world.count("gh", "pr", "merge"), 0);
@@ -620,6 +731,274 @@ async function main() {
     refused("approve against a stale view", await t.delivery.approve("10.1", approvalOf(t.i)), "stale", /base moved/);
   }
 
+  // ---- repair round 1: the reviewed head is only `review PASS on <full sha>` (H1)
+  {
+    const s = scenario("h1-forms");
+    const c = s.world.claims.get("10.1")!;
+    for (const last of [`review PASS on ${s.reviewed.slice(0, 8)}`, `review PASS on ${s.reviewed} (round 2)`, `review FINDINGS on ${s.reviewed}`, `reviewed ${s.reviewed}`, `ready for review on ${s.reviewed}`, `review on ${s.reviewed}: FINDINGS`]) {
+      c.last = last;
+      refused(`claim Last refused: ${last.replace(s.reviewed, "<sha>")}`, await s.delivery.inspect("10.1"), "refused", /no reviewed head/);
+    }
+    c.last = `review PASS on ${"0".repeat(40)}`;
+    refused("claim names a commit the repository lacks", await s.delivery.inspect("10.1"), "invalid", /reviewed head/);
+    c.last = `review PASS on ${s.reviewed}`;
+    ok("exact form accepted", await s.delivery.inspect("10.1"));
+  }
+
+  // ---- the claim's record path (M1)
+  {
+    const s = scenario("m1-ref");
+    git(s.repo, "checkout", "-q", "ticket/10.1-demo");
+    s.write("src/feature.ts", "export const feature = 'after review';\n");
+    s.commit("code after review");
+    git(s.repo, "checkout", "-q", "main");
+    const c = s.world.claims.get("10.1")!;
+    c.ref = "src/feature.ts";
+    refused("Store: naming a code file", await s.delivery.inspect("10.1"), "refused", /names src\/feature\.ts as its record/);
+    c.ref = "context/tickets/10.2-other.md";
+    refused("Store: naming another ticket's record", await s.delivery.inspect("10.1"), "refused", /as its record/);
+    c.ref = null;
+    refused("no record path", await s.delivery.inspect("10.1"), "refused", /no file as its record/);
+    c.ref = "context/tickets/10.1-demo.md";
+    refused("the code change is still caught with the right record", await s.delivery.inspect("10.1"), "refused", /more than the ticket record.*src\/feature\.ts/);
+  }
+
+  // ---- the push URL (M2)
+  {
+    const s = scenario("m2-pushurl");
+    for (const [label, urls, why] of [
+      ["pushurl to another repository", ["https://github.com/someone-else/project.git"], /pushes to https:\/\/github\.com\/someone-else/],
+      ["pushInsteadOf to another host", ["https://gitlab.com/owner/project.git"], /pushes to/],
+      ["two push URLs", ["https://github.com/owner/project.git", "https://github.com/someone-else/project.git"], /2 push URLs/],
+      ["no push URL", [], /0 push URLs/],
+    ] as const) {
+      s.world.pushUrls = [...urls];
+      refused(label, await s.delivery.push("10.1", s.head), "invalid", why);
+    }
+    eq("no push with a bad push URL", s.world.count("git", "push"), 0);
+    s.world.pushUrls = ["git@github.com:owner/project.git"];
+    ok("an ssh push URL to the same repository", await s.delivery.push("10.1", s.head));
+  }
+
+  // ---- fork / cross-repository PRs (M3)
+  {
+    const fork = (s: ReturnType<typeof scenario>, extra: Partial<FakePr>): FakePr => ({
+      number: 9,
+      title: "Totally the ticket",
+      state: "OPEN",
+      isDraft: false,
+      headRefName: "ticket/10.1-demo",
+      headRefOid: s.head,
+      baseRefName: "main",
+      mergeable: "MERGEABLE",
+      reviewDecision: "",
+      mergeCommit: null,
+      checks: [{ name: "ci", bucket: "pass", state: "SUCCESS", link: "" }],
+      ...extra,
+    });
+    const s = scenario("m3-fork");
+    ok("push before a fork PR", await s.delivery.push("10.1", s.head));
+    const i = ok("inspect before a fork PR", await s.delivery.inspect("10.1"));
+    s.world.prs.push(fork(s, { isCrossRepository: true, headOwner: "mallory" }));
+    refused("fork PR is not reused", await s.delivery.ensurePr("10.1"), "refused", /another repository \(mallory\)/);
+    eq("no PR created beside a fork PR", s.world.count("gh", "pr", "create"), 0);
+    refused("fork PR status", await s.delivery.status("10.1"), "refused", /another repository/);
+    refused("fork PR is never merged", await s.delivery.merge("10.1", approvalOf(i)), "refused", /another repository/);
+    s.world.prs[0] = fork(s, { isCrossRepository: false, headOwner: "mallory" });
+    refused("head owner other than the repository owner", await s.delivery.ensurePr("10.1"), "refused", /another repository \(mallory\)/);
+    s.world.prs[0] = fork(s, { state: "MERGED", isCrossRepository: true, headOwner: "mallory", mergeCommit: s.head });
+    refused("merged fork PR is not taken as this ticket's merge", await s.delivery.merge("10.1", approvalOf(i)), "refused", /another repository/);
+    eq("fork: no merge", s.world.count("gh", "pr", "merge"), 0);
+    s.world.prs[0] = fork(s, { state: "CLOSED", isCrossRepository: true, headOwner: "mallory" });
+    const created = ok("a closed fork PR is ignored", await s.delivery.ensurePr("10.1"));
+    check("own PR created", created.created);
+  }
+
+  // ---- denylist entries (M6)
+  {
+    const s = scenario("m6-denylist");
+    for (const bad of ["--output=/tmp/pwned", "-abcdef1", "HEAD", "ABCDEF1234567", "2133c3", `${s.reviewed}^`]) {
+      refused(`denylist entry ${bad}`, await s.make({ denylist: [bad] }).inspect("10.1"), "invalid", /not a commit id/);
+    }
+    check("a malformed entry never reaches git", !s.world.calls.some((c) => c.args.some((a) => a.includes("--output=") || a.includes("-abcdef1") || a.includes("ABCDEF"))));
+    refused("abbreviation that resolves to nothing", await s.make({ denylist: ["0000000"] }).inspect("10.1"), "refused", /does not resolve to exactly one commit/);
+    // Two commits sharing a 7-digit prefix, found offline and written as real objects.
+    const emptyTree = git(s.repo, "hash-object", "-t", "tree", "-w", "--stdin");
+    const seen = new Map<string, string>();
+    let pair: [string, string] | null = null;
+    for (let n = 0; !pair; n++) {
+      const body = `tree ${emptyTree}\nauthor Test <test@example.invalid> 0 +0000\ncommitter Test <test@example.invalid> 0 +0000\n\nn${n}\n`;
+      const id = createHash("sha1").update(`commit ${Buffer.byteLength(body)}\0${body}`).digest("hex");
+      const prev = seen.get(id.slice(0, 7));
+      if (prev !== undefined) pair = [prev, body];
+      else seen.set(id.slice(0, 7), body);
+    }
+    const ids = pair.map((body) => execFileSync("git", ["hash-object", "-t", "commit", "-w", "--stdin"], { cwd: s.repo, input: body, encoding: "utf8" }).trim());
+    check("two commits share a 7-digit prefix", ids[0] !== ids[1] && ids[0].slice(0, 7) === ids[1].slice(0, 7), ids);
+    refused("ambiguous abbreviation", await s.make({ denylist: [ids[0].slice(0, 7)] }).inspect("10.1"), "refused", /does not resolve to exactly one commit/);
+    ok("the full ids are fine (not in the ancestry)", await s.make({ denylist: ids }).inspect("10.1"));
+    refused("abbreviation of a commit in the ancestry", await s.make({ denylist: [s.reviewed.slice(0, 10)] }).inspect("10.1"), "refused", new RegExp(`denylisted commit ${s.reviewed}`));
+  }
+
+  // ---- per-commit secret scan (M7), commit messages, binary files (L1)
+  {
+    const s = scenario("m7-history");
+    git(s.repo, "checkout", "-q", "ticket/10.1-demo");
+    s.write("src/config.ts", `export const token = "${GH_TOKEN}";\n`);
+    const added = s.commit("add config");
+    rmSync(join(s.repo, "src/config.ts"));
+    const removed = s.commit("remove config");
+    git(s.repo, "checkout", "-q", "main");
+    s.world.claims.get("10.1")!.last = `review PASS on ${removed}`;
+    check("the combined diff no longer has the secret", !git(s.repo, "diff", s.base, removed).includes(GH_TOKEN));
+    const o = await s.delivery.inspect("10.1");
+    refused("secret added then removed is still refused", o, "refused", new RegExp(`${added.slice(0, 12)} src/config\\.ts:1 \\(GitHub token\\)`));
+    check("history secret not in the refusal", !JSON.stringify(o).includes(GH_TOKEN));
+  }
+  {
+    const s = scenario("m7-message");
+    git(s.repo, "checkout", "-q", "ticket/10.1-demo");
+    s.write("src/more.ts", "export const more = 1;\n");
+    const c = s.commit(`more\n\ndebugged with ${GH_TOKEN}`);
+    git(s.repo, "checkout", "-q", "main");
+    s.world.claims.get("10.1")!.last = `review PASS on ${c}`;
+    const o = await s.delivery.inspect("10.1");
+    refused("secret in a commit message", o, "refused", /\(commit message\):3 \(GitHub token\)/);
+    check("message secret not in the refusal or state", !JSON.stringify(o).includes(GH_TOKEN) && !readFileSync(join(s.stateDir, "10.1.json"), "utf8").includes(GH_TOKEN));
+  }
+  {
+    const s = scenario("l1-binary");
+    git(s.repo, "checkout", "-q", "ticket/10.1-demo");
+    writeFileSync(join(s.repo, "src", "blob.bin"), Buffer.from([0, 1, 2, 3, 0, 255, 0, 10]));
+    const c = s.commit("binary");
+    git(s.repo, "checkout", "-q", "main");
+    s.world.claims.get("10.1")!.last = `review PASS on ${c}`;
+    const i = ok("binary file is inspected", await s.delivery.inspect("10.1"));
+    eq("binary file listed as unscanned", i.unscanned, [`${c.slice(0, 12)} src/blob.bin`]);
+    check("the inspect message says so", /1 binary file\(s\) not scanned/.test(s.delivery.read("10.1").steps.inspect?.message ?? ""));
+  }
+
+  // ---- concurrency and the cross-instance merge lock (M4, L6)
+  /** A second ticket, 10.2, on its own branch from the same base, pushed with an open PR. */
+  const second = async (s: Awaited<ReturnType<typeof ready>>) => {
+    git(s.repo, "checkout", "-q", "-b", "ticket/10.2-other", s.base);
+    s.write("src/other.ts", "export const other = 1;\n");
+    s.write("context/tickets/10.2-other.md", "# Other\n");
+    const reviewed = s.commit("other");
+    git(s.repo, "checkout", "-q", "main");
+    s.world.claims.set("10.2", { branch: "ticket/10.2-other", worktree: ".pathfinder/worktrees/10.2", state: "done", last: `review PASS on ${reviewed}`, ref: "context/tickets/10.2-other.md", title: "Other" });
+    ok("10.2 push", await s.delivery.push("10.2", reviewed));
+    ok("10.2 PR", await s.delivery.ensurePr("10.2"));
+    return ok("10.2 inspect", await s.delivery.inspect("10.2"));
+  };
+  const pass: Check[] = [{ name: "ci", bucket: "pass", state: "SUCCESS", link: "" }];
+  {
+    // Two simultaneous merges of different tickets, from one Delivery.
+    const s = await ready("m4-two-merges", pass);
+    const i2 = await second(s);
+    const [o1, o2] = await Promise.all([s.delivery.merge("10.1", approvalOf(s.i)), s.delivery.merge("10.2", approvalOf(i2))]);
+    check("exactly one of two simultaneous merges runs", [o1, o2].filter((o) => o.ok).length === 1, [o1.ok, o2.ok]);
+    refused("the other is blocked by the merge lock", o1.ok ? o2 : o1, "blocked", /merge into main is already running/);
+    eq("one merge call", s.world.count("gh", "pr", "merge"), 1);
+    const main1 = s.world.remote.get("refs/heads/main")!;
+    eq("main moved by exactly one squash on the approved base", git(s.repo, "rev-parse", `${main1}^`), s.base);
+    const loser = o1.ok ? "10.2" : "10.1";
+    const loserApproval = o1.ok ? approvalOf(i2) : approvalOf(s.i);
+    refused("retrying the other after the first landed: its approval is stale", await s.delivery.merge(loser, loserApproval), "stale", /base moved/);
+    eq("still one merge call", s.world.count("gh", "pr", "merge"), 1);
+    check("no lock left behind", !readdirSync(s.stateDir).some((f) => f.endsWith(".lock")), readdirSync(s.stateDir));
+  }
+  {
+    // Two Delivery instances (as two kitchen processes would be) on the same ticket.
+    const s = await ready("m4-two-instances", pass);
+    const other = s.make();
+    const [o1, o2] = await Promise.all([s.delivery.merge("10.1", approvalOf(s.i)), other.merge("10.1", approvalOf(s.i))]);
+    check("exactly one instance merges", [o1, o2].filter((o) => o.ok).length === 1, [o1.ok, o2.ok]);
+    refused("the other instance is blocked", o1.ok ? o2 : o1, "blocked", /another delivery step for 10\.1 is already running/);
+    eq("two instances: one merge call", s.world.count("gh", "pr", "merge"), 1);
+    const again = ok("the other instance retries: already merged, verified", await other.merge("10.1", approvalOf(s.i)));
+    check("retry merged nothing", again.already && s.world.count("gh", "pr", "merge") === 1);
+  }
+  {
+    // Another process holds the merge lock; a crashed holder's lock is reclaimed.
+    const s = await ready("m4-held-lock", pass);
+    const release = new DeliveryStore(s.stateDir).lock("merge", "a merge elsewhere");
+    refused("merge waits for another process's merge", await s.delivery.merge("10.1", approvalOf(s.i)), "blocked", /already running/);
+    eq("held lock: no merge", s.world.count("gh", "pr", "merge"), 0);
+    release();
+    const dead = spawnSync(process.execPath, ["-e", ""]).pid;
+    writeFileSync(join(s.stateDir, "merge.lock"), JSON.stringify({ pid: dead, token: "crashed", at: new Date(0).toISOString() }));
+    writeFileSync(join(s.stateDir, "10.1.lock"), JSON.stringify({ pid: dead, token: "crashed", at: new Date(0).toISOString() }));
+    ok("a crashed holder's locks are reclaimed", await s.delivery.merge("10.1", approvalOf(s.i)));
+    check("locks released after the merge", !existsSync(join(s.stateDir, "merge.lock")) && !existsSync(join(s.stateDir, "10.1.lock")));
+  }
+  {
+    // origin main moves between the re-check and the merge.
+    const s = await ready("m4-ls-remote", pass);
+    ok("approve", await s.delivery.approve("10.1", approvalOf(s.i)));
+    s.write("docs.md", "raced\n");
+    const raced = s.commit("someone merged at the last moment");
+    s.world.beforeLsRemote = (ref) => {
+      if (ref === "refs/heads/main") s.world.remote.set("refs/heads/main", raced);
+    };
+    refused("main moved just before the merge", await s.delivery.merge("10.1", approvalOf(s.i)), "stale", /origin main moved from .* to /);
+    eq("last-moment move: no merge", s.world.count("gh", "pr", "merge"), 0);
+    check("approval invalidated", s.delivery.read("10.1").approval === null && !!s.delivery.read("10.1").invalidated);
+    const lsMain = s.world.calls.findIndex((c) => c.args[0] === "ls-remote" && c.args[2] === "refs/heads/main");
+    check("ls-remote of main is the last git call before the (refused) merge", lsMain >= 0 && !s.world.calls.slice(lsMain + 1).some((c) => c.cmd === "gh" && c.args[1] === "merge"));
+  }
+
+  // ---- merged but unverified (M5)
+  for (const tamper of ["tree", "parent"] as const) {
+    const s = await ready(`m5-unverified-${tamper}`, pass);
+    s.world.mergeTamper = tamper;
+    const o = await s.delivery.merge("10.1", approvalOf(s.i));
+    refused(`merged, wrong ${tamper}: reported merged but not verified`, o, "failed", /merged as [0-9a-f]{40} but NOT verified/);
+    const m = s.world.remote.get("refs/heads/main")!;
+    const st = s.delivery.read("10.1");
+    check(`merged-unverified recorded (${tamper})`, st.merged?.commit === m && st.mergeCommit === m && st.verified === false && st.merged?.pr === s.world.prs[0].number, st);
+    check(`the merge step is a failure (${tamper})`, st.steps.merge?.ok === false);
+    refused(`retry does not merge again (${tamper})`, await s.delivery.merge("10.1", approvalOf(s.i)), "failed", /NOT verified/);
+    refused(`verify still fails (${tamper})`, await s.delivery.verify("10.1"), "failed", /NOT verified/);
+    eq(`one merge call (${tamper})`, s.world.count("gh", "pr", "merge"), 1);
+    check(`still merged-unverified (${tamper})`, s.delivery.read("10.1").merged?.commit === m && !s.delivery.read("10.1").verified);
+  }
+
+  // ---- state file: permissions, unique temp files, corrupt state (L5)
+  {
+    const s = scenario("l5-perms");
+    mkdirSync(s.stateDir, { recursive: true, mode: 0o755 });
+    chmodSync(s.stateDir, 0o755);
+    ok("inspect with a wide existing folder", await s.delivery.inspect("10.1"));
+    eq("deliveries folder tightened to 0700", statSync(s.stateDir).mode & 0o777, 0o700);
+    eq("state file is 0600", statSync(join(s.stateDir, "10.1.json")).mode & 0o777, 0o600);
+    eq("no temp or lock files left", readdirSync(s.stateDir), ["10.1.json"]);
+    const release = new DeliveryStore(s.stateDir).lock("10.1", "probe");
+    eq("lock file is 0600", statSync(join(s.stateDir, "10.1.lock")).mode & 0o777, 0o600);
+    release();
+
+    writeFileSync(join(s.stateDir, "10.1.json"), "{ not json");
+    const before = s.world.calls.length;
+    const o = await s.delivery.push("10.1", s.head);
+    refused("corrupt state returns an Outcome", o, "failed", /unreadable/);
+    check("corrupt state: nothing ran", s.world.calls.length === before && s.world.count("git", "push") === 0);
+    eq("corrupt state left as it was", readFileSync(join(s.stateDir, "10.1.json"), "utf8"), "{ not json");
+    check("corrupt state: no lock left", !existsSync(join(s.stateDir, "10.1.lock")));
+  }
+
+  // ---- the real runner never prompts (L2)
+  {
+    const saved = { cmd: process.env.GIT_SSH_COMMAND, ssh: process.env.GIT_SSH, prompt: process.env.GIT_TERMINAL_PROMPT };
+    delete process.env.GIT_SSH_COMMAND;
+    delete process.env.GIT_SSH;
+    delete process.env.GIT_TERMINAL_PROMPT;
+    const r = await defaultRunner("git", ["-c", 'alias.envprobe=!printf "%s|%s|%s|%s" "$GIT_TERMINAL_PROMPT" "$GCM_INTERACTIVE" "$GIT_SSH_COMMAND" "$GH_PROMPT_DISABLED"', "envprobe"], { cwd: tmp });
+    eq("git runs without prompts", r.stdout, "0|never|ssh -o BatchMode=yes|1");
+    Object.assign(process.env, { GIT_TERMINAL_PROMPT: saved.prompt ?? "0" });
+    if (saved.cmd !== undefined) process.env.GIT_SSH_COMMAND = saved.cmd;
+    if (saved.ssh !== undefined) process.env.GIT_SSH = saved.ssh;
+  }
+
   // ---- the 05.1 → 05.2 replay
   await replay();
 }
@@ -660,23 +1039,27 @@ async function replay() {
   git(repo, "update-ref", `refs/heads/${R.b52}`, R.h52);
   git(repo, "update-ref", "refs/backup/05.1-bookkeeping-v1", R.r51);
   git(repo, "update-ref", "refs/pathfinder/claims/05.1", R.h51);
-  const denylist = R.denylist.map((c) => {
+  // The real (abbreviated) denylist, as configured: each must resolve to exactly one commit here.
+  const denylist = R.denylist.filter((c) => {
     try {
-      return git(repo, "rev-parse", "--verify", `${c}^{commit}`);
+      git(repo, "rev-parse", "--verify", `${c}^{commit}`);
+      return true;
     } catch {
-      return c;
+      return false;
     }
   });
+  eq("replay denylist resolves in this clone", denylist, R.denylist);
 
   const world = new World(repo);
   world.originUrl = "https://github.com/rikilamadrid/tin-and-thyme.git";
+  world.owner = "rikilamadrid";
   world.remote.set("refs/heads/main", R.base);
   // The claims' real Last lines.
   world.claims.set("05.1", {
     branch: R.b51,
     worktree: ".pathfinder/worktrees/05.1",
     state: "done",
-    last: "reconciled 2026-11-12: reviewed 64962bf8 (tree 6b0c6ce) + bookkeeping-only b2b92044; local CI-equivalent green on PR head and on expected post-merge tree 4ef46c87",
+    last: `review PASS on ${R.r51}`,
     ref: "context/tickets/05.1-adopt-and-repair-run-policy.md",
     title: "Adopt and repair the run policy draft",
   });
@@ -684,7 +1067,7 @@ async function replay() {
     branch: R.b52,
     worktree: ".pathfinder/worktrees/05.2",
     state: "done",
-    last: "reconciled 2026-11-12: review PASS df080b1d + bookkeeping-only ff00d6ec; docs-only; check candidate; merges after 05.1",
+    last: `review PASS on ${R.r52}`,
     ref: "context/tickets/05.2-land-project-overview-and-feature-08.md",
     title: "Land the project overview and the credential-separation feature record",
   });

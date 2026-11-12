@@ -5,7 +5,8 @@
 // step result here, so the UI can show exactly which steps succeeded. Nothing in
 // this file talks to git or GitHub.
 
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -118,6 +119,12 @@ export interface DeliveryState {
   approval: Approval | null;
   /** Why the last approval stopped being valid, for the UI. */
   invalidated: { at: string; reasons: string[]; approval: Approval } | null;
+  /**
+   * Set as soon as GitHub reports the PR merged, before verification runs, so a
+   * merge whose verification fails or is interrupted is recorded as
+   * merged-but-unverified (`merged` set, `verified` false), never as "not merged".
+   */
+  merged: { at: string; pr: number; commit: string | null } | null;
   mergeCommit: string | null;
   verified: boolean;
   steps: Partial<Record<StepName, StepResult>>;
@@ -140,6 +147,7 @@ export function emptyState(key: string): DeliveryState {
     pr: null,
     approval: null,
     invalidated: null,
+    merged: null,
     mergeCommit: null,
     verified: false,
     steps: {},
@@ -161,12 +169,88 @@ export function deliveriesDir(kitchen: string, home = homedir()): string {
   return join(home, ".controlroom", kitchen, "deliveries");
 }
 
+/** A lock file's holder is gone when its process no longer exists. */
+function holderAlive(pid: unknown): boolean {
+  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+const LOCK_SETTLE_MS = 60_000;
+
 export class DeliveryStore {
   constructor(readonly dir: string) {}
 
   private file(key: string): string {
     if (!isTicketKey(key)) throw new DeliveryError("invalid", `not a ticket key: ${String(key)}`);
     return join(this.dir, `${key}.json`);
+  }
+
+  /** The folder, owner-only, even when it already existed with a wider mode. */
+  private ensureDir(): void {
+    mkdirSync(this.dir, { recursive: true, mode: 0o700 });
+    chmodSync(this.dir, 0o700);
+  }
+
+  /**
+   * Takes a lock file in the deliveries folder, shared by every Delivery and
+   * every kitchen process using this folder: `<key>.lock` for one ticket's
+   * steps, `merge.lock` for any merge into the integration branch. Returns the
+   * release function, or throws a `blocked` DeliveryError while another live
+   * holder has it. A lock whose holder process is gone (a crash) is reclaimed.
+   */
+  lock(name: string, what: string): () => void {
+    if (!isTicketKey(name) && name !== "merge") throw new DeliveryError("invalid", `not a lock name: ${String(name)}`);
+    this.ensureDir();
+    const path = join(this.dir, `${name}.lock`);
+    const token = randomBytes(12).toString("hex");
+    const body = JSON.stringify({ pid: process.pid, token, at: new Date().toISOString() }) + "\n";
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const fd = openSync(path, "wx", 0o600);
+        try {
+          writeSync(fd, body);
+        } finally {
+          closeSync(fd);
+        }
+        return () => {
+          try {
+            if ((JSON.parse(readFileSync(path, "utf8")) as { token?: unknown }).token === token) unlinkSync(path);
+          } catch {
+            // already gone, or not ours: leave it
+          }
+        };
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw new DeliveryError("failed", `cannot take the ${what} lock: ${(e as Error).message}`);
+      }
+      let raw = "";
+      let holder: { pid?: unknown } | null = null;
+      try {
+        raw = readFileSync(path, "utf8");
+        holder = JSON.parse(raw) as { pid?: unknown };
+      } catch {
+        holder = null;
+      }
+      let settled = false;
+      try {
+        settled = Date.now() - statSync(path).mtimeMs > LOCK_SETTLE_MS;
+      } catch {
+        continue; // released meanwhile: try again
+      }
+      // A holder that is alive, or a lock still being written, is respected.
+      const stale = holder ? !holderAlive(holder.pid) : settled;
+      if (!stale) throw new DeliveryError("blocked", `${what} is already running${holder && typeof holder.pid === "number" ? ` (process ${holder.pid})` : ""}; wait for it to finish`, { reasons: [path] });
+      try {
+        if (readFileSync(path, "utf8") === raw) unlinkSync(path);
+      } catch {
+        // someone else reclaimed it first
+      }
+    }
+    throw new DeliveryError("blocked", `${what} is already running; wait for it to finish`, { reasons: [path] });
   }
 
   /** The stored state, or a fresh empty one. An unreadable file is not silently replaced. */
@@ -184,14 +268,23 @@ export class DeliveryStore {
     return { ...emptyState(key), ...s, steps: s.steps ?? {}, history: s.history ?? [] };
   }
 
-  /** Writes atomically (temp file + rename), owner-only, with every string redacted. */
+  /** Writes atomically (a uniquely named temp file + rename), owner-only, with every string redacted. */
   write(state: DeliveryState): DeliveryState {
     const file = this.file(state.key);
-    mkdirSync(this.dir, { recursive: true, mode: 0o700 });
+    this.ensureDir();
     const clean = redactDeep(state);
-    const tmp = `${file}.${process.pid}.tmp`;
-    writeFileSync(tmp, JSON.stringify(clean, null, 2) + "\n", { mode: 0o600 });
-    renameSync(tmp, file);
+    const tmp = `${file}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+    try {
+      writeFileSync(tmp, JSON.stringify(clean, null, 2) + "\n", { mode: 0o600, flag: "wx" });
+      renameSync(tmp, file);
+    } catch (e) {
+      try {
+        unlinkSync(tmp);
+      } catch {
+        // nothing to clean up
+      }
+      throw new DeliveryError("failed", `cannot write the delivery state for ${state.key}: ${(e as Error).message}`);
+    }
     return clean;
   }
 
