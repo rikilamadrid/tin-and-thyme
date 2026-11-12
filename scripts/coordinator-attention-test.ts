@@ -190,7 +190,7 @@ const helpers = (w: World) => w.hub.snap.workflow?.helpers ?? [];
 }
 {
   // Who raised a gate: only a session's own matching GATE report. Never timing, never being the one live session.
-  const cand = (id: string, o: Partial<Parameters<typeof gateOwner>[2][number]> = {}) => ({ id, name: id, session: "implementation", live: false, end: 2000, report: null, outcome: null, ...o });
+  const cand = (id: string, o: Partial<Parameters<typeof gateOwner>[2][number]> = {}) => ({ id, name: id, session: "implementation", live: false, end: 2000, report: null, outcome: null, consumed: false, ...o });
   eq("unit: same question ignores case, emphasis and closing punctuation", sameQuestion("**Which account** should we use?", "which account should we use"), true);
   eq("unit: a different question never matches, even as a prefix", sameQuestion("Which account should we use?", "Which account should we use (2)?"), false);
   eq("unit: a session whose own report raised this gate owns it", gateOwner("02.1", "Q?", [cand("s1", { report: { verdict: "GATE", text: "Q" }, outcome: "gate" })]).owner?.id, "s1");
@@ -201,6 +201,8 @@ const helpers = (w: World) => w.hub.snap.workflow?.helpers ?? [];
   eq("unit: a finished session that reported something else never owns it", gateOwner("02.1", "Q?", [cand("s1", { report: { verdict: "DONE", text: "abc" }, outcome: "handed-off" })]).owner, null);
   eq("unit: an earlier gate session never owns a later gate", gateOwner("02.1", "Q2?", [cand("s1", { report: { verdict: "GATE", text: "Q1" }, outcome: "gate" })]).owner, null);
   eq("unit: a prefix of the question is not the question", gateOwner("02.1", "Q (2)?", [cand("s1", { report: { verdict: "GATE", text: "Q" }, outcome: "gate" })]).owner, null);
+  const spent = gateOwner("02.1", "Q?", [cand("s1", { report: { verdict: "GATE", text: "Q" }, outcome: "gate", consumed: true })]);
+  check("unit: a GATE report consumed by a resolved gate never owns the same question again", spent.owner === null && /since it was last resolved/.test(spent.diagnostic ?? ""), spent);
   check("unit: no session at all: unidentified, and it says so", /No session on 02\.1 was seen/.test(gateOwner("02.1", "Q?", []).diagnostic ?? ""));
   const base = { turnEnded: true, liveWorkers: 0, openGates: [] as string[], asking: null };
   eq("unit: turn ended with live workers → waiting", coordinatorAttention({ ...base, liveWorkers: 2 })?.state, "waiting");
@@ -677,6 +679,79 @@ w.run.deliveryOf = () => null;
     const it = (w.hub.snap.actionItems ?? []).find((i) => i.id === "gate-02.1")!;
     eq("M1 matching report: the worker whose own GATE line states this question owns it", [it.request?.owner, it.request?.session, it.request?.diagnostic, it.fromId], [workers(w).get("ad")?.hqId, "implementation", null, workers(w).get("ad")?.hqId]);
   }
+}
+
+// ================================================================ review 3: a resolved gate consumes the reports behind it
+
+{
+  // Session A raises Q in its own GATE report → the human answers and Pathfinder records Q resolved → another
+  // session runs → the identical Q is raised again → restart. A is credited for the first request only.
+  const repo = makeRepo("repo-r3-consumed");
+  const w = boot(repo, "tt-r3-consumed");
+  const q = "Repair budget exhausted: accept, repair again, or drop?";
+  const gateItem = (x: World) => (x.hub.snap.actionItems ?? []).find((i) => i.id === "gate-02.1");
+  preAgent(w, "tu_a", brief("02.1"), "02.1 dev");
+  postAgent(w, "tu_a", brief("02.1"), "aA");
+  writeSub(w, "aA", { prompt: brief("02.1"), toolUseId: "tu_a" });
+  subStart(w, "aA");
+  stateFile(w, "02.1", { State: "human-gate", Gate: q, Updated: new Date().toISOString() });
+  setRows(w, [row("02.1", "human-gate", { gate: q })]);
+  writeSub(w, "aA", { prompt: brief("02.1"), toolUseId: "tu_a", report: `GATE: ${q}`, finished: true });
+  subStop(w, "aA");
+  await refresh(w);
+  const aHq = workers(w).get("aA")?.hqId;
+  const first = gateItem(w)!;
+  eq("R3: A's own unconsumed GATE report owns the open gate", [first.request?.owner, first.request?.diagnostic], [aHq, null]);
+  await w.run.answerGate("gate-02.1", "repair again", first.request!.revision);
+  stateFile(w, "02.1", { State: "working", Updated: new Date().toISOString() });
+  setRows(w, [row("02.1", "working")]);
+  await refresh(w);
+  eq("R3: the answer is Recorded once Pathfinder shows Q resolved", [first.status, first.answer?.state], ["done", "recorded"]);
+  const book = () => JSON.parse(readFileSync(join(tmp, ".controlroom", "tt-r3-consumed", "sessions.json"), "utf8")) as Record<string, { consumed?: string }>;
+  eq("R3: the resolution consumes A's report in sessions.json", book().aA?.consumed, q);
+  // Another session runs and finishes; then the coordinator raises the identical question.
+  preAgent(w, "tu_b", brief("02.1"), "02.1 dev 2");
+  postAgent(w, "tu_b", brief("02.1"), "aB");
+  writeSub(w, "aB", { prompt: brief("02.1"), toolUseId: "tu_b" });
+  subStart(w, "aB");
+  writeSub(w, "aB", { prompt: brief("02.1"), toolUseId: "tu_b", report: "DONE: def", finished: true });
+  subStop(w, "aB");
+  stateFile(w, "02.1", { State: "human-gate", Gate: q, Updated: new Date().toISOString() });
+  setRows(w, [row("02.1", "human-gate", { gate: q })]);
+  await refresh(w);
+  const again = gateItem(w)!;
+  check("R3: a new request opens for the identical question", again !== first && again.status === "open" && again.answer === null, again);
+  eq("R3: before the restart, A isn't credited for the new gate", [again.request?.owner, again.request?.session, again.fromId], [null, null, COORDINATOR_ID]);
+  check("R3: …and the diagnostic says its report was spent on the resolved gate", /No session on 02\.1 reported this gate since it was last resolved/.test(again.request?.diagnostic ?? ""), again.request?.diagnostic);
+  // A repeated stop for A (its transcript still ends with the old report) keeps the report consumed.
+  subStop(w, "aA");
+  eq("R3: settling A's old report again keeps it consumed", book().aA?.consumed, q);
+  // Restart: the kitchen rebuilds every session from transcripts and sessions.json.
+  const w2 = boot(repo, "tt-r3-consumed", w.rows);
+  await refresh(w2);
+  const after = gateItem(w2)!;
+  eq("R3: after the restart, A is rebuilt finished at its gate", [workers(w2).get("aA")?.live, workers(w2).get("aA")?.ended?.outcome], [false, "gate"]);
+  eq("R3: after the restart, A still isn't credited for the new gate", [after.request?.owner, after.request?.session, after.fromId], [null, null, COORDINATOR_ID]);
+  check("R3: after the restart, the diagnostic still says why", /since it was last resolved/.test(after.request?.diagnostic ?? ""), after.request?.diagnostic);
+  eq("R3: the ticket and the question are kept", [after.request?.key, after.details, after.status], ["02.1", q, "open"]);
+  await w2.run.answerGate("gate-02.1", "drop it", after.request!.revision);
+  eq("R3: Send answer still reaches the coordinator", [after.answer?.state, w2.typed.length], ["delivered", 1]);
+  check("R3: …saying an unidentified session raised it", (w2.typed[0] ?? "").includes("raised by an unidentified session"), w2.typed[0]);
+  // A new session that raises Q in its own report, after the resolution, is credited (the positive case holds).
+  preAgent(w2, "tu_c", brief("02.1"), "02.1 dev 3");
+  postAgent(w2, "tu_c", brief("02.1"), "aC");
+  writeSub(w2, "aC", { prompt: brief("02.1"), toolUseId: "tu_c" });
+  subStart(w2, "aC");
+  writeSub(w2, "aC", { prompt: brief("02.1"), toolUseId: "tu_c", report: `GATE: ${q}`, finished: true });
+  subStop(w2, "aC");
+  await refresh(w2);
+  eq("R3: a later session's own unconsumed GATE report for Q is credited", gateItem(w2)?.request?.owner, workers(w2).get("aC")?.hqId);
+  // Q replaced by a different question: the replaced question's reports are spent too.
+  const q2 = "Accept the partial fix?";
+  stateFile(w2, "02.1", { State: "human-gate", Gate: q2, Updated: new Date().toISOString() });
+  setRows(w2, [row("02.1", "human-gate", { gate: q2 })]);
+  await refresh(w2);
+  eq("R3: a replaced question consumes the reports behind it", book().aC?.consumed, q);
 }
 
 console.log(`\n${passes} passed, ${failures} failed`);

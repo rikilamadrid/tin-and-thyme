@@ -33,7 +33,7 @@ import type { Sessions } from "./sessions";
 import { newAgent } from "./store";
 import { log } from "./lib/log";
 import { Attribution, readReport, type Evidence, type Identity } from "./attribution";
-import { coordinatorAttention, gateOwner, sessionEnding, ticketView, type GateCandidate } from "./workflowState";
+import { coordinatorAttention, gateOwner, sameQuestion, sessionEnding, ticketView, type GateCandidate } from "./workflowState";
 import { subagentMeta, subagentPrompt, subagentReport } from "./transcripts";
 import type { ActionAnswer, ActionRequest, DeliveryStage } from "../src/data/types";
 import { requestShelf } from "../src/data/requests";
@@ -82,13 +82,15 @@ interface Worker {
   ended: SessionEnd | null;
   /** When a finished session was resumed under the same subagent id (its earlier `finished` predates this). */
   resumedAt?: number;
-  /** When the kitchen first saw this session (epoch ms): its start when its transcript has no time yet. */
-  seenAt: number;
 }
 
-/** A saved session outcome, with the ticket and stage it belongs to (absent in files from before they were kept). */
-type BookEntry = SessionEnd & { key?: string; session?: string };
-const stripBook = ({ key: _key, session: _session, ...ended }: BookEntry): SessionEnd => ended;
+/**
+ * A saved session outcome, with the ticket and stage it belongs to (absent in files from before they were kept).
+ * `consumed`: the gate question its GATE report raised, once Pathfinder recorded that gate resolved after it.
+ * A consumed report credits no later gate, even an identical one, across restarts.
+ */
+type BookEntry = SessionEnd & { key?: string; session?: string; consumed?: string };
+const stripBook = ({ key: _key, session: _session, consumed: _consumed, ...ended }: BookEntry): SessionEnd => ended;
 
 /** How a stopped session ended from its ticket's recorded state alone (see workflowState.ts). */
 export { sessionOutcome } from "./workflowState";
@@ -475,7 +477,7 @@ let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
     if (!saved) this.crewBook({ ...this.crewBook(), [agentId]: c });
     const transcript = this.subagentTranscript(agentId);
     const ended = finished ? this.restoredEnding(agentId, b.key, b.session, transcript) : null;
-    const w: Worker = { agentId, hqId, key: b.key, session: b.session, role, worktree: b.worktree, live: !finished, tools: 0, character: c.id, transcript, ended, seenAt: Date.now() };
+    const w: Worker = { agentId, hqId, key: b.key, session: b.session, role, worktree: b.worktree, live: !finished, tools: 0, character: c.id, transcript, ended };
     this.workers.set(agentId, w);
     const cfg = newAgent(hqId, c.name, role, ROLE_COLOR[role] ?? "#c2c3c7", false);
     cfg.mode = "local";
@@ -568,12 +570,35 @@ let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
     };
   }
 
-  /** Keep one session's outcome under its own subagent id, with its own ticket and stage. */
+  /**
+   * Keep one session's outcome under its own subagent id, with its own ticket and stage. A report already consumed
+   * by a resolved gate stays consumed when the same GATE question is settled again (a repeated stop, or a resumed
+   * session whose transcript still ends with that old report).
+   */
   private settleAs(agentId: string, key: string, ended: SessionEnd, session?: string): SessionEnd {
     const w = this.workers.get(agentId);
     if (w) w.ended = ended;
-    this.endBook({ ...this.endBook(), [agentId]: { ...ended, key, session: session ?? w?.session } });
+    const book = this.endBook();
+    const was = book[agentId]?.key === key ? book[agentId]?.consumed : undefined;
+    const consumed = was && ended.verdict === "GATE" && sameQuestion(ended.result ?? "", was) ? { consumed: was } : {};
+    this.endBook({ ...book, [agentId]: { ...ended, key, session: session ?? w?.session, ...consumed } });
     return ended;
+  }
+
+  /**
+   * Pathfinder recorded `key`'s gate `question` resolved (or replaced by another): every saved GATE report on that
+   * ticket that raised it is consumed, in sessions.json, so it never credits a later gate, even an identical one.
+   * Decided by event order (reports saved before this resolution), never by time.
+   */
+  private consumeGate(key: string, question: string) {
+    const book = this.endBook();
+    let changed = false;
+    for (const e of Object.values(book)) {
+      if (e.key !== key || e.consumed || e.verdict !== "GATE" || !sameQuestion(e.result ?? "", question)) continue;
+      e.consumed = question;
+      changed = true;
+    }
+    if (changed) this.endBook(book);
   }
 
   /** A session stopped: its own report decides how it ended, else its ticket's recorded state. */
@@ -1020,6 +1045,8 @@ let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
         }
         continue;
       }
+      // A changed request: the replaced question is no longer open, so the reports behind it are spent.
+      if (existing?.status === "open" && !sameQuestion(existing.details, text)) this.consumeGate(row.key, existing.details);
       // A new or changed request: never another session's, never an older request's answer.
       const item: ActionItem = {
         id, fromId: request.owner ?? COORDINATOR_ID, taskId: row.key, title: `${row.key} needs your decision`,
@@ -1039,6 +1066,8 @@ let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
         item.status = "done";
         item.closedAt = new Date().toISOString();
         item.note = `Pathfinder: ${key} is now ${now}`;
+        // Resolved: the GATE reports that raised it credit no later request, even the same question asked again.
+        this.consumeGate(key, item.details);
         if (item.answer && item.request && item.answer.revision === item.request.revision && item.answer.state === "delivered") {
           item.answer = { ...item.answer, state: "recorded", at: item.closedAt, detail: `Pathfinder recorded it: ${key} is now ${now}` };
         }
@@ -1056,19 +1085,20 @@ let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
     const revision = createRevision(key, text);
     const base = { kind: "gate" as const, key, revision };
     const ws = [...this.workers.values()].filter((w) => w.key === key);
-    const candidates = ws.map((w): GateCandidate & { w: Worker } => ({ w, ...this.gateCandidate(w) }));
+    const book = this.endBook();
+    const candidates = ws.map((w): GateCandidate & { w: Worker } => ({ w, ...this.gateCandidate(w, !!book[w.agentId]?.consumed) }));
     const { owner, diagnostic } = gateOwner(key, text, candidates);
     if (!owner) return { ...base, stage: gateStage, owner: null, session: null, diagnostic };
     const w = (owner as GateCandidate & { w: Worker }).w;
     return { ...base, stage: gateStage ?? w.session, owner: w.hqId, session: w.session, diagnostic: null };
   }
 
-  /** A session as the gate-owner decision sees it: its own report, and when it ended (to order reporters only). */
-  private gateCandidate(w: Worker): GateCandidate {
+  /** A session as the gate-owner decision sees it: its own report, whether a resolved gate consumed it, and when it ended (to order reporters only). */
+  private gateCandidate(w: Worker, consumed: boolean): GateCandidate {
     const at = w.ended ? Date.parse(w.ended.at) : NaN;
     const end = !w.live && Number.isFinite(at) ? at : null;
     const report = w.ended?.verdict ? { verdict: w.ended.verdict, text: w.ended.result ?? "" } : null;
-    return { id: w.hqId, name: this.hub.name(w.hqId), session: w.session, live: w.live, end, report, outcome: w.ended?.outcome ?? null };
+    return { id: w.hqId, name: this.hub.name(w.hqId), session: w.session, live: w.live, end, report, outcome: w.ended?.outcome ?? null, consumed };
   }
 
   /** The human answered a gate in the UI: hand the text to the coordinator, verbatim, exactly once per request. */

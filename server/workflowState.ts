@@ -86,6 +86,8 @@ export interface GateCandidate {
   /** Its own report, once it ended with one. */
   report: { verdict: string; text: string } | null;
   outcome: SessionEnd["outcome"] | null;
+  /** Its GATE report was consumed: Pathfinder recorded that gate resolved after the report, so it credits no later gate. */
+  consumed: boolean;
 }
 
 /** The same question, ignoring case, emphasis, spacing and closing punctuation (never a partial match). */
@@ -96,16 +98,22 @@ export function sameQuestion(a: string, b: string): boolean {
 
 /**
  * Who raised a ticket's gate, credited only on positive evidence: a session whose own report says
- * `GATE: <this question>` (sameQuestion; the latest such session). Nothing else credits a session: not when it
- * ran or when Pathfinder recorded the gate, not being the only live one, not being the latest, not having stopped
- * at some earlier gate. A gate the coordinator recorded, or one a session raised without reporting it, stays
+ * `GATE: <this question>` (sameQuestion; the latest such session) and whose report no resolved gate has consumed.
+ * Nothing else credits a session: not when it ran or when Pathfinder recorded the gate, not being the only live
+ * one, not being the latest, not having stopped at some earlier gate, not having asked the same question before
+ * that gate was resolved. A gate the coordinator recorded, or one a session raised without reporting it, stays
  * unidentified, with a diagnostic saying why.
  */
 export function gateOwner(key: string, gate: string, sessions: GateCandidate[]): { owner: GateCandidate | null; diagnostic: string | null } {
-  const reported = sessions.filter((s) => s.report?.verdict === "GATE" && sameQuestion(s.report.text, gate));
+  const asked = sessions.filter((s) => s.report?.verdict === "GATE" && sameQuestion(s.report.text, gate));
+  const reported = asked.filter((s) => !s.consumed);
   if (reported.length) return { owner: reported.reduce((a, b) => ((b.end ?? Infinity) >= (a.end ?? Infinity) ? b : a)), diagnostic: null };
   if (!sessions.length) return { owner: null, diagnostic: `No session on ${key} was seen by this kitchen, so none reported this gate (it may predate the kitchen's start, or the coordinator recorded it).` };
   const who = (s: GateCandidate) => `${s.name} (${s.session})`;
+  if (asked.length) {
+    const prev = asked.at(-1)!;
+    return { owner: null, diagnostic: `No session on ${key} reported this gate since it was last resolved: ${who(prev)} asked the same question before, but Pathfinder recorded that gate resolved, so its report can't be credited for this one (the coordinator may have raised it again).` };
+  }
   const last = sessions.at(-1)!;
   const how = last.live ? `is still running and hasn't reported` : `ended ${last.outcome ?? "without a recorded outcome"}${last.report?.verdict === "GATE" ? ` at a different gate ("${last.report.text}")` : ""}`;
   return { owner: null, diagnostic: `No session on ${key} reported this gate in its own GATE line, so Tin & Thyme can't tell who raised it (the coordinator may have recorded it). The latest, ${who(last)}, ${how}.` };
