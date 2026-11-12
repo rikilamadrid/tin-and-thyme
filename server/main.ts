@@ -4,6 +4,10 @@
 //
 // Users start it through `tin-and-thyme open` (bin/tin-and-thyme.mjs), which picks the port, passes
 // --kitchen and reuses a running kitchen. --dev: the UI is served by Vite (pnpm dev:hq).
+//
+//   node dist-server/main.mjs --preview --port <n> --reviewed <sha> [--repo <path>] [--no-open]
+//
+// serves a reviewed build beside the running kitchen, delivery only (server/preview/server.ts).
 
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -30,6 +34,7 @@ import { COORDINATOR_ID, detectPathfinder, PathfinderRun } from "./pathfinder";
 import { attachDelivery } from "./delivery/preview";
 import { unavailableBoard, unavailableRpc } from "./delivery/service";
 import { adoptLegacyState, APP, canonicalRoot, claimStateDir, clearRecord, kitchenKey, writeRecord } from "./kitchen";
+import { runPreview } from "./preview/server";
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -38,6 +43,11 @@ function arg(name: string): string | undefined {
 const flag = (name: string) => process.argv.includes(`--${name}`);
 
 async function main() {
+  // A preview of a reviewed build: delivery only, beside the running kitchen (docs/delivery-bootstrap.md).
+  if (flag("preview")) {
+    const entry = fileURLToPath(import.meta.url);
+    return runPreview({ buildRoot: dirname(dirname(entry)), entry, port: arg("port"), repo: arg("repo"), reviewed: arg("reviewed"), open: !flag("no-open") });
+  }
   ensurePtyHelperExecutable();
   const dev = flag("dev");
   const port = Number(arg("port") ?? process.env.HQ_PORT ?? 7420);
