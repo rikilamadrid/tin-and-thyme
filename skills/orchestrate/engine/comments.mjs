@@ -100,6 +100,21 @@ export function gateResolvedNote({ key, question, answer, now, occurrence = null
   };
 }
 
+/**
+ * A gate occurrence ended by a state change rather than an answer. It carries
+ * the resolved marker of that occurrence, so the occurrence is closed in the
+ * store, and records no decision because none was given.
+ */
+export function gateClosedNote({ key, question, state, now, occurrence }) {
+  return {
+    marker: marker("gate-resolved", ...gateFacts(key, question, occurrence)),
+    body: [
+      marker("gate-resolved", ...gateFacts(key, question, occurrence)),
+      `**Human gate closed** on ${day(now)} by a state change: worker \`${key}\` was set to \`${state}\`. No decision was recorded.`,
+    ].join("\n"),
+  };
+}
+
 /** Why an unfinished ticket was not dispatched. */
 export function blockedNote({ key, waiting, reason }) {
   const facts = waiting.length > 0 ? waiting.join(",") : digest(reason);

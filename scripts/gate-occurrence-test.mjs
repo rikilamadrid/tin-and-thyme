@@ -11,10 +11,15 @@
 // `state --set human-gate` path writes a marker; a fresh process reads the same
 // identities; old-format markers parse as "no identity" and are never
 // rewritten or given one; read-only commands still work.
+//
+// Review repair 1 adds: `state --set human-gate` refuses what `gate open`
+// refuses; leaving a gate through `state` writes the resolved marker of its
+// occurrence; a gate an earlier engine left behind, opened again, gets an
+// occurrence; and each path's retry hint names that same path.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -69,9 +74,16 @@ const gateMarkers = (key) =>
   readFileSync(ticketPath(key), "utf8").split(/\r?\n/).map(parseGateMarker).filter(Boolean);
 const gateId = (key) => (/^-\s*Gate-Id:\s*(\S+)\s*$/m.exec(readFileSync(statePath(key), "utf8")) ?? [])[1] ?? null;
 const D = (question) => digest(normaliseQuestion(question));
+const stateField = (key, name) => (new RegExp(`^-\\s*${name}:\\s*(.*?)\\s*$`, "m").exec(readFileSync(statePath(key), "utf8")) ?? [])[1] ?? null;
+const local = (key) => ({
+  store: { kind: "local" },
+  ticket: { key, ref: `context/tickets/${key}-t.md` },
+  worktree: join(root, ".pathfinder", "worktrees", key),
+});
 
 // --- the scratch project -----------------------------------------------------
 
+const KEYS = ["99.1", "99.2", "99.3", "99.4", "99.5", "99.6", "99.7"];
 const root = realpathSync(mkdtempSync(join(tmpdir(), "gate-occurrence-")));
 try {
   git(["init", "--quiet", "--initial-branch=main"], root);
@@ -83,7 +95,7 @@ try {
   }
   writeFileSync(join(root, ".gitignore"), "/context/current-ticket.md\n/.pathfinder/\n");
   writeFileSync(join(root, "context", "execution-mode.md"), "# Execution Mode\n\n<!-- pathfinder:execution-mode orchestrator -->\n");
-  for (const key of ["99.1", "99.2", "99.3"]) {
+  for (const key of KEYS) {
     writeFileSync(
       join(root, "context", "tickets", `${key}-t.md`),
       `# Ticket ${key}\n\n## Status\n\nProposed\n\n## Parent Feature\n\n\`99-x.md\`\n\n## Blocked by\n\nNone\n\n## Goal\n\nSomething.\n\n## Notes / Decisions\n\n- Existing note.\n`,
@@ -91,7 +103,7 @@ try {
   }
   git(["add", "-A"], root);
   git(["commit", "--quiet", "-m", "initial"], root);
-  for (const key of ["99.1", "99.2", "99.3"]) ok("claim", key, "--now", NOW);
+  for (const key of KEYS) ok("claim", key, "--now", NOW);
 
   const Q = "Authorize repair?";
 
@@ -183,6 +195,7 @@ try {
   check("leaving human-gate through state clears Gate-Id, and the next gate is new", () => {
     ok("state", "99.2", "--set", "working", "--now", NOW);
     assert.equal(gateId("99.2"), null);
+    assert.deepEqual(gateMarkers("99.2").at(-1), { event: "gate-resolved", key: "99.2", digest: D(Q), occurrence: viaState }, "its occurrence is closed in the store");
     ok("state", "99.2", "--set", "human-gate", "--gate", Q, "--now", NOW);
     assert.notEqual(gateId("99.2"), viaState);
     assert.equal(gateMarkers("99.2").filter((m) => m.event === "gate-opened").length, 2);
@@ -220,20 +233,17 @@ try {
     assert.equal(parseGateMarker("<!-- pathfinder:orchestrate claimed 99.3 ticket/99.3-t -->"), null);
   });
 
-  check("a gate an earlier engine opened stays without identity and is never rewritten", () => {
+  check("a gate an earlier engine opened is never rewritten or given an occurrence", () => {
     // What the old engine left: its three-fact note, and a state file at the
-    // gate with no Gate-Id.
-    const worktree = join(root, ".pathfinder", "worktrees", "99.3");
-    const ticket = { key: "99.3", ref: "context/tickets/99.3-t.md" };
-    postNote({ store: { kind: "local" }, ticket, worktree, note: gateOpenedNote({ key: "99.3", question: Q, now: NOW }) });
+    // gate with no Gate-Id. Resolving it names no occurrence, because it has
+    // none.
+    const { worktree, ticket, store } = local("99.3");
+    postNote({ store, ticket, worktree, note: gateOpenedNote({ key: "99.3", question: Q, now: NOW }) });
     updateStateFile(worktree, { set: { State: "human-gate", Gate: Q, Updated: NOW } });
     const before = readFileSync(ticketPath("99.3"), "utf8");
 
-    ok("gate", "99.3", "open", "--question", Q, "--now", NOW);
-    assert.equal(gateId("99.3"), null, "no invented occurrence for the legacy gate");
-    assert.equal(readFileSync(ticketPath("99.3"), "utf8"), before, "nothing new posted, nothing rewritten");
-
     ok("gate", "99.3", "resolve", "--answer", "ok", "--now", NOW);
+    assert.equal(gateId("99.3"), null, "no invented occurrence for the legacy gate");
     const after = readFileSync(ticketPath("99.3"), "utf8");
     assert.ok(after.startsWith(before.trimEnd()), "the old record is untouched");
     assert.deepEqual(
@@ -246,6 +256,122 @@ try {
     assert.ok(isGateOccurrence(fresh), "a genuinely new opening after it gets an occurrence");
     assert.deepEqual(gateMarkers("99.3").at(-1), { event: "gate-opened", key: "99.3", digest: D(Q), occurrence: fresh });
     assert.equal(gateMarkers("99.3").filter((m) => m.occurrence === null).length, 2, "the legacy pair keeps no identity");
+  });
+
+  check("a legacy gate opened again gets a new occurrence; the old note is never rewritten", () => {
+    // Review scenario E: the old engine opened Q, its `state --set working`
+    // closed it with no note, and the worker set human-gate Q again by hand.
+    // That record reads exactly like an old gate still open and now retried,
+    // so both get a new occurrence: the new opening is never left without
+    // identity, and the old three-fact note keeps none.
+    const { worktree, ticket, store } = local("99.6");
+    postNote({ store, ticket, worktree, note: gateOpenedNote({ key: "99.6", question: Q, now: NOW }) });
+    updateStateFile(worktree, { set: { State: "working", Updated: NOW }, unset: ["Gate"] });
+    updateStateFile(worktree, { set: { State: "human-gate", Gate: Q, Updated: NOW } });
+    const before = readFileSync(ticketPath("99.6"), "utf8");
+
+    ok("gate", "99.6", "open", "--question", Q, "--now", NOW);
+    const id = gateId("99.6");
+    assert.ok(isGateOccurrence(id), "the opening has an occurrence");
+    assert.ok(readFileSync(ticketPath("99.6"), "utf8").startsWith(before.trimEnd()), "the old record is untouched");
+    ok("gate", "99.6", "open", "--question", Q, "--now", NOW);
+    assert.equal(gateId("99.6"), id, "a retry now reuses it");
+    ok("gate", "99.6", "resolve", "--now", NOW);
+    assert.deepEqual(
+      gateMarkers("99.6").map((m) => [m.event, m.occurrence]),
+      [["gate-opened", null], ["gate-opened", id], ["gate-resolved", id]],
+    );
+  });
+
+  // --- state --set human-gate refuses what gate open refuses --------------------
+
+  check("state --set human-gate refuses a different question while a gate is open", () => {
+    ok("gate", "99.4", "open", "--question", "Q1?", "--now", NOW);
+    const id = gateId("99.4");
+    const markersBefore = gateMarkers("99.4");
+    const viaState = orchestrate("state", "99.4", "--set", "human-gate", "--gate", "Q2?", "--now", NOW);
+    assert.equal(viaState.status, 1, viaState.stderr);
+    assert.match(viaState.stderr, /already at a human gate: Q1\?/);
+    const viaGate = orchestrate("gate", "99.4", "open", "--question", "Q2?", "--now", NOW);
+    assert.equal(viaGate.status, 1, "gate open refuses it too");
+    assert.equal(stateField("99.4", "Gate"), "Q1?");
+    assert.equal(gateId("99.4"), id, "the open occurrence is untouched");
+    assert.deepEqual(gateMarkers("99.4"), markersBefore, "nothing posted");
+  });
+
+  check("state --set human-gate refuses a done or failed claim", () => {
+    for (const final of ["done", "failed"]) {
+      ok("state", "99.5", "--set", final, "--now", NOW);
+      const viaState = orchestrate("state", "99.5", "--set", "human-gate", "--gate", Q, "--now", NOW);
+      assert.equal(viaState.status, 1, viaState.stderr);
+      assert.match(viaState.stderr, new RegExp(`is ${final}; a gate stops a worker`));
+      assert.equal(orchestrate("gate", "99.5", "open", "--question", Q, "--now", NOW).status, 1, "gate open refuses it too");
+      assert.equal(stateField("99.5", "State"), final);
+      assert.equal(gateId("99.5"), null);
+      assert.deepEqual(gateMarkers("99.5"), [], "no opened note on a finished claim");
+    }
+  });
+
+  // --- leaving a gate through state ---------------------------------------------
+
+  check("leaving a gate through state writes the resolved marker of its occurrence, with no decision", () => {
+    const id = gateId("99.4"); // Q1?, opened above
+    ok("state", "99.4", "--set", "review", "--now", NOW);
+    assert.deepEqual(
+      gateMarkers("99.4").map((m) => [m.event, m.digest, m.occurrence]),
+      [["gate-opened", D("Q1?"), id], ["gate-resolved", D("Q1?"), id]],
+    );
+    const text = readFileSync(ticketPath("99.4"), "utf8");
+    assert.match(text, /\*\*Human gate closed\*\* on 2026-11-12 by a state change: worker `99\.4` was set to `review`\. No decision was recorded\./);
+    assert.ok(!/Decision:/.test(text), "no invented decision");
+    assert.equal(gateId("99.4"), null);
+    assert.equal(stateField("99.4", "Gate"), null);
+    ok("state", "99.4", "--set", "working", "--now", NOW);
+    assert.equal(gateMarkers("99.4").length, 2, "no gate open, nothing more to close");
+
+    // A gate with no occurrence (set by hand) has none to close: nothing posted.
+    updateStateFile(local("99.4").worktree, { set: { State: "human-gate", Gate: "By hand?", Updated: NOW } });
+    ok("state", "99.4", "--set", "working", "--now", NOW);
+    assert.equal(gateMarkers("99.4").length, 2);
+  });
+
+  // --- retry hints ----------------------------------------------------------------
+
+  check("each path's retry hint names that same path, and the retry reuses the occurrence", () => {
+    const file = ticketPath("99.7");
+    const hidden = `${file}.away`;
+    const failing = (...args) => {
+      renameSync(file, hidden); // the store cannot be read: the note fails
+      try {
+        const result = orchestrate(...args);
+        assert.equal(result.status, 1, result.stderr);
+        return result.stderr;
+      } finally {
+        renameSync(hidden, file);
+      }
+    };
+
+    // state --set human-gate: retry by state, never by gate open (which would
+    // also add the label this path leaves alone).
+    const viaState = failing("state", "99.7", "--set", "human-gate", "--gate", Q, "--now", NOW);
+    assert.match(viaState, /Retry with: orchestrate state 99\.7 --set human-gate --gate "<the same question>"/);
+    assert.ok(!/orchestrate gate 99\.7 open/.test(viaState), viaState);
+    const id = gateId("99.7");
+    assert.ok(isGateOccurrence(id));
+    ok("state", "99.7", "--set", "human-gate", "--gate", Q, "--now", NOW);
+    assert.equal(gateId("99.7"), id);
+    assert.deepEqual(gateMarkers("99.7").map((m) => [m.event, m.occurrence]), [["gate-opened", id]]);
+
+    // Closing through state: the gate stays open and the same command retries.
+    const closing = failing("state", "99.7", "--set", "working", "--now", NOW);
+    assert.match(closing, /Retry with: orchestrate state 99\.7 --set working/);
+    assert.equal(gateId("99.7"), id, "still at its gate");
+    ok("state", "99.7", "--set", "working", "--now", NOW);
+    assert.deepEqual(gateMarkers("99.7").map((m) => [m.event, m.occurrence]), [["gate-opened", id], ["gate-resolved", id]]);
+
+    // gate open keeps its own hint.
+    const viaGate = failing("gate", "99.7", "open", "--question", "Again?", "--now", NOW);
+    assert.match(viaGate, /Retry with: orchestrate gate 99\.7 open --question "<the same question>"/);
   });
 
   // --- read-only commands -----------------------------------------------------

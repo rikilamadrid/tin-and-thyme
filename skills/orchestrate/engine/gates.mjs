@@ -20,6 +20,10 @@
  * re-writes the same marker, which the store already holds; a new opening
  * draws a new nonce, so its notes never merge with an earlier one's.
  *
+ * Every way an occurrence ends writes its resolved marker: `gate resolve`, with
+ * the human's decision, or `state --set` to any other state, with a note that
+ * a state change closed it and no decision.
+ *
  * Markers written before occurrences existed have three facts. They parse with
  * `occurrence: null` — no identity — and nothing here rewrites them or gives
  * them one.
@@ -27,7 +31,7 @@
 
 import { randomBytes } from "node:crypto";
 
-import { digest, normaliseQuestion } from "./comments.mjs";
+import { normaliseQuestion } from "./comments.mjs";
 
 /** The state-file field holding the open gate's occurrence. */
 export const GATE_ID_FIELD = "Gate-Id";
@@ -63,28 +67,22 @@ export function parseGateMarker(line) {
  *
  * - The claim's own recorded `Gate-Id`, when it is already at a gate with this
  *   question: a retry, which reuses it.
- * - `null` when it is already at this gate, has no `Gate-Id`, and the store's
- *   latest gate marker for the key is an opening of this question without an
- *   occurrence: a gate an earlier engine opened. It stays without identity
- *   rather than being given an invented one.
  * - Otherwise a new occurrence.
  *
- * `markers` is every marker line in the ticket's store, in the order written;
- * it is consulted only for the second case.
+ * A claim at this gate with no `Gate-Id` — one a worker set by hand, or one an
+ * earlier engine opened — gets a new occurrence too. The durable record cannot
+ * tell an earlier engine's still-open gate from one that engine closed without
+ * a note (its `state --set` wrote none) and a worker then reopened by hand: the
+ * state file and the three-fact marker read the same either way. Treating both
+ * as new is the safe error. At worst one physical gate carries two openings,
+ * the earlier engine's note without identity and this one with it, and nothing
+ * is lost; the opposite error would leave a genuinely new opening with no
+ * identity at all. The earlier note is never rewritten or given an occurrence.
  *
- * @returns {{occurrence: string|null, reused: boolean, legacy: boolean}}
+ * @returns {{occurrence: string, reused: boolean}}
  */
-export function occurrenceForOpen({ claim, key, question, markers = () => [] }) {
+export function occurrenceForOpen({ claim, question }) {
   const atThisGate = claim.state === "human-gate" && claim.gate === normaliseQuestion(question);
-  if (atThisGate && isGateOccurrence(claim.gateId)) return { occurrence: claim.gateId, reused: true, legacy: false };
-  if (atThisGate && !claim.gateId) {
-    const latest = (typeof markers === "function" ? markers() : markers)
-      .map(parseGateMarker)
-      .filter((parsed) => parsed && parsed.key === key)
-      .at(-1);
-    if (latest && latest.event === "gate-opened" && latest.occurrence === null && latest.digest === digest(normaliseQuestion(question))) {
-      return { occurrence: null, reused: true, legacy: true };
-    }
-  }
-  return { occurrence: newGateOccurrence(), reused: false, legacy: false };
+  if (atThisGate && isGateOccurrence(claim.gateId)) return { occurrence: claim.gateId, reused: true };
+  return { occurrence: newGateOccurrence(), reused: false };
 }
