@@ -64,6 +64,37 @@ export function postNote({ root, store, ticket, note, gh = "gh", worktree = null
 }
 
 /**
+ * Every marker line already in a ticket's store, in the order written: the
+ * first line of each GitHub comment that is a marker, or each marker line of a
+ * local ticket file in its claim's worktree. Reads only.
+ *
+ * @returns {{ok: true, markers: string[]} | {ok: false, message: string}}
+ */
+export function readMarkers({ store, ticket, gh = "gh", worktree = null }) {
+  const isMarker = (line) => line.startsWith("<!-- pathfinder:orchestrate ");
+  if (store.kind === "github-issues") {
+    const existing = run(gh, ["issue", "view", String(ticket.number), "--repo", store.repo, "--json", "comments"]);
+    if (!existing.ok) return existing;
+    try {
+      const comments = JSON.parse(existing.stdout).comments ?? [];
+      return { ok: true, markers: comments.map((comment) => String(comment.body ?? "").split(/\r?\n/, 1)[0].trim()).filter(isMarker) };
+    } catch (error) {
+      return { ok: false, message: `\`${gh} issue view\` did not return JSON: ${error.message}` };
+    }
+  }
+  if (store.kind === "local") {
+    if (!worktree) return { ok: true, markers: [] };
+    try {
+      const text = readFileSync(join(worktree, ...ticket.ref.split("/")), "utf8");
+      return { ok: true, markers: text.split(/\r?\n/).map((line) => line.trim()).filter(isMarker) };
+    } catch (error) {
+      return { ok: false, message: `cannot read ${ticket.ref}: ${error.message}` };
+    }
+  }
+  return { ok: false, message: store.message ?? "the ticket store cannot be read" };
+}
+
+/**
  * Add or remove the gate label. A local store has no labels and reports
  * `changed: false` without failing.
  *

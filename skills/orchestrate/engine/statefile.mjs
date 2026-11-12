@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { CLAIM_STATES } from "./claims.mjs";
 
 /** The fields this module may write. Anything else in the file is the worker's. */
-export const WRITABLE = Object.freeze(["State", "Gate", "Last", "Next", "Updated"]);
+export const WRITABLE = Object.freeze(["State", "Gate", "Gate-Id", "Last", "Next", "Updated"]);
 
 /**
  * Apply `set` (field → value) and `unset` (fields) to a state file's text.
