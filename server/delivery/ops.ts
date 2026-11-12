@@ -9,8 +9,8 @@
 //   verify(key)             the new main has the expected parent and tree
 //
 // Every process call goes through an injectable runner (execFile, fixed argument
-// vectors, no shell). Nothing here is reachable from the browser or an agent
-// yet; 10.2 wires it to the human's explicit action in the UI. Every write is
+// vectors, no shell). It is reached only through service.ts, on a request from
+// the kitchen's browser page (the delivery drawer). Every write is
 // preceded by a fresh validation, and every result is recorded per ticket in
 // the delivery state, redacted.
 
@@ -93,6 +93,25 @@ export function pushArgs(key: string, head: string, branch: string): string[] {
   const args = ["push", "--no-follow-tags", "--porcelain", "origin", `${head}:refs/heads/${branch}`];
   assertSafePushArgs(args);
   return args;
+}
+
+/**
+ * Whether git itself reported the push rejected because the remote branch moved
+ * (non-fast-forward, fetch first, stale info). Judged only from the program's own
+ * output, never from Node's error text, which echoes the argv and so the branch
+ * name (a slug containing "non-fast-forward" must not read as a rejection):
+ * - the `--porcelain` status line on stdout, by its fields: flag `!`, exactly our
+ *   `<sha>:refs/heads/<branch>`, summary `[rejected]`;
+ * - or the program's own stderr (`processStderr`), with the branch name removed.
+ */
+export function pushRejected(r: RunResult, head: string, branch: string): boolean {
+  const spec = `${head}:refs/heads/${branch}`;
+  for (const line of r.stdout.split("\n")) {
+    const [flag, ref, summary] = line.split("\t");
+    if (flag === "!" && ref === spec && /^\[rejected\]/.test(summary ?? "")) return true;
+  }
+  const own = (r.processStderr ?? (/^Command failed: /.test(r.stderr) ? "" : r.stderr)).split(branch).join(" ");
+  return /\[rejected\]|non-fast-forward|fetch first|stale info/i.test(own);
 }
 
 /** Strict token shapes for the diff scan; ordinary code that mentions a header is not a finding. */
@@ -376,8 +395,7 @@ export class Delivery {
       if (remote) throw new DeliveryError("refused", `origin ${insp.branch} is ${remote}, expected ${head}; not overwriting it`);
       const r = await this.git(pushArgs(key, head, insp.branch), { timeoutMs: 120_000 });
       if (!r.ok) {
-        if (/\[rejected\]|non-fast-forward|fetch first|stale info/i.test(r.stderr + r.stdout))
-          throw new DeliveryError("refused", `origin refused ${insp.branch}: it changed on the remote; not overwriting it`);
+        if (pushRejected(r, head, insp.branch)) throw new DeliveryError("refused", `origin refused ${insp.branch}: it changed on the remote; not overwriting it`);
         throw commandFailure(r, `pushing ${insp.branch}`, "git");
       }
       const after = await this.remoteHead(insp.branch);

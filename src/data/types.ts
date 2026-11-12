@@ -1,3 +1,4 @@
+import type { DeliveryBoard } from "./delivery";
 import type { CharacterId } from "./crew";
 import type { StackConfig } from "./stack";
 // Domain types shared by the data source, the store, the office and the HUD.
@@ -426,6 +427,8 @@ export interface OfficeSnapshot {
   actionItems?: ActionItem[];
   /** Set when a workflow adapter owns the roster and the board. */
   workflow?: WorkflowInfo;
+  /** In-app delivery (Feature 10): restored from here on every (re)connect. */
+  delivery?: DeliveryBoard;
 }
 
 export interface WorkflowInfo {

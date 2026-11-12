@@ -54,8 +54,27 @@ interface Options {
   distDir: string | null;
   allowedOrigins: string[];
   commands: Record<string, (...args: unknown[]) => unknown>;
+  /**
+   * Request/reply handlers, by the message's `rpc` name (`{ rpc: "delivery", id, … }`).
+   * Each gets the whole message, the Origin the socket sent at upgrade ("" when none:
+   * a non-browser client) and a reply function that answers this socket only.
+   */
+  rpc?: Record<string, RpcHandler>;
   /** A workflow adapter that takes this agent's hooks (its whole session tree). */
   hookRouter?: { agentId: string; handle: (event: string, body: Record<string, unknown>) => { ok: boolean; response?: Record<string, unknown> } };
+}
+
+export interface RpcContext {
+  /** The browser Origin the WebSocket sent at upgrade; "" for a client that sent none. */
+  origin: string;
+  /** Sends an event to the requesting socket only. */
+  reply: (e: OfficeEvent) => void;
+}
+export type RpcHandler = (msg: Record<string, unknown>, ctx: RpcContext) => unknown;
+
+/** A handler by name, own properties only: "constructor", "__proto__" or "toString" is never a command. */
+export function ownHandler<T>(map: Record<string, T> | undefined, name: unknown): T | undefined {
+  return map && typeof name === "string" && Object.hasOwn(map, name) ? map[name] : undefined;
 }
 
 export function startHttp(o: Options) {
@@ -121,18 +140,24 @@ export function startHttp(o: Options) {
       socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
       return socket.destroy();
     }
-    wss.handleUpgrade(req, socket, head, (ws) => onClient(ws));
+    wss.handleUpgrade(req, socket, head, (ws) => onClient(ws, origin));
   });
 
-  function onClient(ws: WebSocket) {
+  function onClient(ws: WebSocket, origin: string) {
     const sendEvent = (e: OfficeEvent) => ws.readyState === ws.OPEN && ws.send(JSON.stringify(e));
     sendEvent({ type: "snapshot", snapshot: o.hub.snap });
     const unsub = o.hub.subscribe(sendEvent);
     ws.on("message", async (raw) => {
       try {
-        const msg = JSON.parse(String(raw)) as { cmd?: string; args?: unknown[] };
-        const fn = msg.cmd ? o.commands[msg.cmd] : undefined;
-        if (!fn) return log.warn("unknown command", msg.cmd);
+        const msg = JSON.parse(String(raw)) as { cmd?: unknown; args?: unknown[]; rpc?: unknown };
+        if (!msg || typeof msg !== "object") return log.warn("malformed message");
+        if (msg.rpc !== undefined) {
+          const handler = ownHandler(o.rpc, msg.rpc);
+          if (!handler) return log.warn("unknown request", typeof msg.rpc === "string" ? msg.rpc.slice(0, 40) : typeof msg.rpc);
+          return void (await handler(msg as Record<string, unknown>, { origin, reply: sendEvent }));
+        }
+        const fn = ownHandler(o.commands, msg.cmd);
+        if (!fn) return log.warn("unknown command", typeof msg.cmd === "string" ? msg.cmd.slice(0, 40) : typeof msg.cmd);
         await fn(...(Array.isArray(msg.args) ? msg.args : []));
       } catch (err) {
         log.warn("command failed:", err instanceof Error ? err.message : err);

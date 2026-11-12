@@ -48,6 +48,8 @@ function summary(e: OfficeEvent): string {
     case "mcp.updated": return `${e.mcp.servers.length} MCP servers`;
     case "access.updated": return `${e.request.agentId} ${e.request.domain} ${e.request.status}`;
     case "workflow.updated": return `context alert ${e.workflow.contextAlertPct ?? "—"}% · ${Object.keys(e.workflow.handoffs ?? {}).length} handoffs`;
+    case "delivery.updated": return `${e.view.key} ${e.view.outcome}${e.view.running ? ` · ${e.view.running}` : ""}`;
+    case "delivery.reply": return `${e.reply.op ?? "?"} ${e.reply.ok ? "ok" : e.reply.kind}`;
   }
 }
 
