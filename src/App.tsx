@@ -9,6 +9,7 @@ import { DebugPanel } from "./ui/DebugPanel";
 import { DrawerHost } from "./ui/drawers/Drawer";
 import { ActivityFeed } from "./ui/hud/ActivityFeed";
 import { ConnectionBanner } from "./ui/hud/ConnectionBanner";
+import { PreviewBanner } from "./ui/hud/PreviewBanner";
 import { SetupChecklist } from "./ui/setup/SetupChecklist";
 import { WelcomeModal } from "./ui/setup/WelcomeModal";
 import { CREW_W, CrewPanel } from "./ui/hud/CrewPanel";
@@ -89,6 +90,7 @@ export function App() {
     <>
       <GalleyCanvas left={16 + CREW_W + 16} right={dock.docked ? dock.width + 32 : 16} />
       <ConnectionBanner />
+      <PreviewBanner />
       {ready && (
         <>
           <TopBar />
