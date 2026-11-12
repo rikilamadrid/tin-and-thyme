@@ -29,6 +29,7 @@ export interface StateStyle {
 export const stateStyle: Record<AgentState, StateStyle> = {
   working: { label: "Working", color: colors.blue, dim: "#1d6fb8" },
   "needs-input": { label: "Needs input", color: colors.red, dim: "#7e0f33" },
+  waiting: { label: "Waiting on workers", color: colors.lav, dim: "#5a5170" },
   "in-review": { label: "In review", color: colors.orange, dim: "#a86a00" },
   "review-passed": { label: "Review passed", color: colors.green, dim: "#00873a" },
   idle: { label: "Idle", color: colors.lav, dim: "#5a5170" },

@@ -45,6 +45,7 @@ function markFor(c: CrewMember): Mark {
   if (c.state === "needs") return "needs";
   if (c.state === "review") return "review";
   if (c.state === "work") return "work";
+  if (c.state === "wait") return "wait";
   if (c.state === "idle") return "idle";
   return "off";
 }
@@ -181,9 +182,9 @@ function HelperList({ helpers }: { helpers: WorkflowHelper[] }) {
   const live = helpers.filter((h) => !h.finished);
   const done = helpers.filter((h) => h.finished);
   const row = (h: WorkflowHelper) => (
-    <li key={h.id} className="flex min-w-0 gap-1.5 text-[11px] leading-[15px]" title={h.label}>
+    <li key={h.id} className="flex min-w-0 gap-1.5 text-[11px] leading-[15px]" title={h.unknown ? `Subagent ${h.id}: which session this is can't be established yet` : h.label}>
       <b className={`shrink-0 ${h.finished ? "text-[#7f8bb5]" : "text-[#9fe7ff]"}`}>{h.type}</b>
-      <span className={`truncate ${h.finished ? "text-[#7f8bb5]" : "text-[#cfd8ec]"}`}>{h.label}</span>
+      <span className={`truncate ${h.unknown ? "italic text-[#ffb35c]" : h.finished ? "text-[#7f8bb5]" : "text-[#cfd8ec]"}`}>{h.unknown ? "Unknown session" : h.label}</span>
     </li>
   );
   return (
@@ -209,7 +210,8 @@ const OUTCOME: Record<string, string> = { "handed-off": "Handed off", gate: "Sto
 /** One finished session in a ticket's history: who, which stage, how it ended, its result and last readings. */
 function HistoryRow({ c, helpers }: { c: CrewMember; helpers: WorkflowHelper[] }) {
   const e = c.ended;
-  const how = e ? `${OUTCOME[e.outcome]}${e.outcome === "handed-off" && e.next ? ` → ${e.next}` : ""}` : "Finished";
+  const reported = e?.outcome === "handed-off" && e.verdict && e.verdict !== "DONE" ? `Reported ${e.verdict}` : null;
+  const how = e ? `${reported ?? OUTCOME[e.outcome]}${e.outcome === "handed-off" && e.next ? ` → ${e.next}` : ""}` : "Finished";
   return (
     <li className="border-t border-[#26335c] pt-1.5 first:border-t-0 first:pt-0">
       <button type="button" className="flex w-full cursor-pointer items-center gap-1.5 bg-transparent p-0 text-left text-[#eef6ff] hover:underline" onClick={() => ui.openAgent(c.id)} aria-label={`${c.name}, ${c.role}, ${c.session ?? ""} session: ${how}`}>
@@ -277,6 +279,8 @@ function TicketCardView({ t, helpers, selected }: { t: TicketCard; helpers: Work
           {t.gate}
         </button>
       )}
+      {t.blocker && <div className="mt-1 text-[11px] leading-[14px] text-[#ff8fab]">Blocked: {t.blocker}</div>}
+      {t.next && !c && <div className="mt-1 text-[11px] leading-[14px] text-[#a8b8d8]">Next: {t.next}</div>}
       {c && (
         <button
           type="button"

@@ -32,6 +32,10 @@ import { handleHook } from "./hooks";
 import type { Sessions } from "./sessions";
 import { newAgent } from "./store";
 import { log } from "./lib/log";
+import { Attribution, readReport, type Evidence, type Identity } from "./attribution";
+import { coordinatorAttention, sessionEnding, ticketView } from "./workflowState";
+import { subagentMeta, subagentPrompt, subagentReport } from "./transcripts";
+import type { DeliveryStage } from "../src/data/types";
 
 export const COORDINATOR_ID = "coordinator";
 const ENGINE = join("skills", "orchestrate", "engine", "bin", "orchestrate.mjs");
@@ -73,24 +77,18 @@ interface Worker {
   tools: number;
   character: CharacterId;
   transcript: string | null;
-  /** How the session ended (from Pathfinder's checkpoint at that moment); null while live. */
+  /** How the session ended (its own report, else Pathfinder's checkpoint at that moment); null while live. */
   ended: SessionEnd | null;
+  /** When a finished session was resumed under the same subagent id (its earlier `finished` predates this). */
+  resumedAt?: number;
 }
 
-/** The checkpoint state a session of this kind works in; recording anything else is its handoff. */
-const OWN_STATE: Record<string, string> = { adversary: "adversary", review: "review", repair: "repair" };
+/** A saved session outcome, with the ticket and stage it belongs to (absent in files from before they were kept). */
+type BookEntry = SessionEnd & { key?: string; session?: string };
+const stripBook = ({ key: _key, session: _session, ...ended }: BookEntry): SessionEnd => ended;
 
-/**
- * How a stopped session ended, from the state Pathfinder recorded for its ticket when it stopped. Only a
- * recorded next stage (or done / integrated) is a handoff; a session that stopped leaving its own stage
- * in place was interrupted.
- */
-export function sessionOutcome(session: string, recorded: string | null): SessionEnd["outcome"] {
-  if (recorded === "human-gate") return "gate";
-  if (recorded === "failed") return "failed";
-  if (!recorded || recorded === (OWN_STATE[session] ?? "working")) return "interrupted";
-  return "handed-off";
-}
+/** How a stopped session ended from its ticket's recorded state alone (see workflowState.ts). */
+export { sessionOutcome } from "./workflowState";
 
 /** The ticket keys a `plan` run lists as eligible, from its --json output or its printed text. */
 export function parsePlanOutput(out: string): Omit<PlanSeen, "at"> | null {
@@ -132,9 +130,6 @@ export const BLOCKED_COMMANDS = String.raw`\bgit(\s+(-C|-c)\s+\S+|\s+--?[\w-]+(=
 
 export class PathfinderRun {
   private workers = new Map<string, Worker>();
-  private pendingBriefs: string[] = [];
-  /** Delegated helpers launched but not yet started: who launched them, and what for. */
-  private pendingHelpers: { parent: string; label: string; type: string }[] = [];
   /** Helper subagent id → who launched it (seen through hooks). */
   private helperInfo = new Map<string, { parent: string; label: string; type: string; finished: boolean }>();
   private rows: StatusRow[] = [];
@@ -144,8 +139,10 @@ export class PathfinderRun {
   private seq = 0;
   /** The coordinator's Claude Code transcript (from its hooks, or found once at start-up). */
   private transcript: string | null = null;
-  /** True while the "waiting for you" state came from the transcript, not a hook. */
-  private awaitingFromTranscript = false;
+  /** The coordinator's turn ended (its Stop hook, or its transcript's last word); a new prompt reopens it. */
+  private turnEnded = false;
+  /** The note of the attention state this run last set on the coordinator (so a real ask set elsewhere is kept). */
+  private attentionNote: string | null = null;
   /** Ticket keys already integrated when this run was first read: only later ones are deliveries. */
   private integratedAtStart: Set<string> | null = null;
   private startedAt = Date.now();
@@ -329,9 +326,9 @@ export class PathfinderRun {
     return f;
   }
 
-  /** The coordinator ended its turn on a question (read from its transcript) and nobody has answered yet. */
+  /** The coordinator ended its turn and nobody has answered yet: its ready prompt is not "idle". */
   isAsking(hqId: string) {
-    return hqId === COORDINATOR_ID && this.awaitingFromTranscript;
+    return hqId === COORDINATOR_ID && this.turnEnded;
   }
 
   isExternal(hqId: string) {
@@ -386,14 +383,11 @@ let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
     const agentId = typeof body.agent_id === "string" ? body.agent_id : null;
     if (agentId) return this.workerHook(agentId, event, body);
     if (typeof body.transcript_path === "string" && body.transcript_path) this.rememberTranscript(body.transcript_path);
-    if (event === "UserPromptSubmit") this.awaitingFromTranscript = false;
+    if (event === "UserPromptSubmit") this.turnEnded = false;
 
-    // The coordinator itself.
+    // The coordinator itself. An Agent call is remembered by its tool_use_id, never queued by position.
     if (event === "PreToolUse" && (body.tool_name === "Agent" || body.tool_name === "Task")) {
-      const input = (body.tool_input ?? {}) as Record<string, unknown>;
-      const prompt = String(input.prompt ?? "");
-      if (parseBrief(prompt)) this.pendingBriefs.push(prompt);
-      else this.pendingHelpers.push({ parent: COORDINATOR_ID, label: String(input.description ?? prompt.split("\n")[0]).slice(0, 80) || "Subagent", type: String(input.subagent_type ?? "subagent") });
+      this.attribution.launch(body.tool_use_id, (body.tool_input ?? {}) as Record<string, unknown>, COORDINATOR_ID);
     }
     if (event === "PostToolUse" && body.tool_name === "Bash") {
       const cmd = String((body.tool_input as Record<string, unknown>)?.command ?? "");
@@ -403,12 +397,7 @@ let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
         if (seen) this.notePlan({ ...seen, at: new Date().toISOString() });
       }
     }
-    if (event === "PostToolUse" && (body.tool_name === "Agent" || body.tool_name === "Task")) {
-      const r = (body.tool_response ?? {}) as Record<string, unknown>;
-      const id = typeof r.agentId === "string" ? r.agentId : null;
-      const prompt = String((body.tool_input as Record<string, unknown>)?.prompt ?? r.prompt ?? "");
-      if (id && !this.workers.has(id) && parseBrief(prompt)) this.addWorker(id, prompt);
-    }
+    if (event === "PostToolUse" && (body.tool_name === "Agent" || body.tool_name === "Task")) this.agentLaunched(COORDINATOR_ID, body);
     if (event === "PreToolUse" && body.tool_name === "Bash") {
       const cmd = String((body.tool_input as Record<string, unknown>)?.command ?? "");
       if (/orchestrate\.mjs/.test(cmd)) {
@@ -419,8 +408,13 @@ let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
     }
     const r = handleHook(this.hub, this.inbox, COORDINATOR_ID, event, body as never);
     if (event === "Stop" && r.ok && !r.response) {
-      // A coordinator that ends its turn mid-run is asking the human (the approval gate or a question).
-      this.hub.setStatus(COORDINATOR_ID, { state: "needs-input", note: "Asking: answer the coordinator in its terminal" });
+      // Its turn ended: asking the human (a gate, the approval, a question), or waiting on workers it dispatched.
+      this.turnEnded = true;
+      this.attentionNote = null;
+      this.applyAttention();
+    } else if (this.turnEnded && event === "Notification") {
+      // Claude Code's idle reminder ("waiting for your input") would read as idle: the same rule decides.
+      this.applyAttention();
     }
     this.queueRefresh(800);
     return r;
@@ -428,6 +422,40 @@ let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
 
   private subagentTranscript(agentId: string): string | null {
     return this.transcript ? join(this.transcript.replace(/\.jsonl$/, ""), "subagents", `agent-${agentId}.jsonl`) : null;
+  }
+
+  // ---------------------------------------------------------------- attribution
+
+  /** Which subagent is which, from exact evidence only (attribution.ts). */
+  private attribution = new Attribution((prompt) => parseBrief(prompt) !== null);
+  /** Subagents seen through hooks whose identity can't be established yet: shown as unknown, never guessed. */
+  private unknownAgents = new Map<string, { type: string; finished: boolean }>();
+
+  /** What a subagent's own files say about it (null fields while they don't exist yet). */
+  private evidence(agentId: string, file = this.subagentTranscript(agentId)): Evidence {
+    const meta = file ? subagentMeta(file) : null;
+    // Launched by a subagent: its parent is that worker when known; never assumed to be the coordinator.
+    const parent = !meta ? null : meta.parentAgentId ? (this.workers.get(meta.parentAgentId)?.hqId ?? null) : COORDINATOR_ID;
+    return { toolUseId: meta?.toolUseId ?? null, prompt: file ? subagentPrompt(file) : null, parent, description: meta?.description ?? "", agentType: meta?.agentType ?? "" };
+  }
+
+  /** An identified subagent joins: a worker gets its own ticket and stage, a helper only its launcher. */
+  private adopt(agentId: string, identity: Identity | null, finished = false): Worker | null {
+    if (!identity) return null;
+    const unknown = this.unknownAgents.get(agentId);
+    this.unknownAgents.delete(agentId);
+    if (identity.kind === "worker") return this.workers.get(agentId) ?? this.addWorker(agentId, identity.prompt, finished || !!unknown?.finished);
+    if (!this.helperInfo.has(agentId)) this.helperInfo.set(agentId, { parent: identity.parent ?? "unknown", label: identity.label, type: identity.type, finished: finished || !!unknown?.finished });
+    return null;
+  }
+
+  /** PostToolUse(Agent) from `parent`: the tool's result names the subagent it started, exactly. */
+  private agentLaunched(parent: string, body: Record<string, unknown>) {
+    const r = (body.tool_response ?? {}) as Record<string, unknown>;
+    const id = typeof r.agentId === "string" ? r.agentId : null;
+    if (!id) return;
+    const prompt = String((body.tool_input as Record<string, unknown>)?.prompt ?? r.prompt ?? "");
+    this.adopt(id, this.attribution.bind(body.tool_use_id, id, prompt, parent));
   }
 
   /** A worker session joins the room. `finished` restores one that already ended (from its transcript). */
@@ -442,8 +470,9 @@ let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
     const saved = this.crewBook()[agentId];
     const c = saved ?? assignCharacter(role, [...this.workers.values()].filter((x) => x.live).map((x) => x.character));
     if (!saved) this.crewBook({ ...this.crewBook(), [agentId]: c });
-    const ended = finished ? (this.endBook()[agentId] ?? null) : null;
-    const w: Worker = { agentId, hqId, key: b.key, session: b.session, role, worktree: b.worktree, live: !finished, tools: 0, character: c.id, transcript: this.subagentTranscript(agentId), ended };
+    const transcript = this.subagentTranscript(agentId);
+    const ended = finished ? this.restoredEnding(agentId, b.key, b.session, transcript) : null;
+    const w: Worker = { agentId, hqId, key: b.key, session: b.session, role, worktree: b.worktree, live: !finished, tools: 0, character: c.id, transcript, ended };
     this.workers.set(agentId, w);
     const cfg = newAgent(hqId, c.name, role, ROLE_COLOR[role] ?? "#c2c3c7", false);
     cfg.mode = "local";
@@ -465,8 +494,32 @@ let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
     if (!finished) hub.activity("task.started", hqId, `${cfg.name} (${role}, ${b.session} ${b.key}) started in ${b.worktree ?? "its worktree"}`);
     if (!finished) this.handoffs.onWorkerStarted(b.key, hqId);
     hub.terminal(hqId, `\x1b[1mPathfinder ${b.session} session for ${b.key}\x1b[0m — ${b.title}\r\nsubagent ${agentId}\r\nworktree ${b.worktree}\r\n${finished ? "\r\n\x1b[1m■ session finished\x1b[0m (restored from its transcript)\r\n" : ""}\r\n`);
+    this.applyAttention();
     this.queueRefresh(500);
     return w;
+  }
+
+  /**
+   * A finished session restored after a restart: the outcome saved for this session and ticket, else its own
+   * report. A saved outcome from before tickets were recorded with it is used only when there is no report.
+   */
+  private restoredEnding(agentId: string, key: string, session: string, transcript: string | null): SessionEnd | null {
+    const saved = this.endBook()[agentId];
+    if (saved?.key === key) return stripBook(saved);
+    const report = transcript ? subagentReport(transcript) : null;
+    if (readReport(report)) return this.settleAs(agentId, key, sessionEnding(session, report, this.recorded(key)));
+    return saved && !saved.key ? stripBook(saved) : null;
+  }
+
+  /** A finished session is running again (resumed with the same subagent id): it keeps only its own identity. */
+  private resumeWorker(w: Worker) {
+    w.live = true;
+    w.ended = null;
+    w.resumedAt = Date.now();
+    this.hub.setSession(w.hqId, { state: "running", detail: `Background subagent ${w.agentId} of the coordinator (resumed)` });
+    this.hub.setStatus(w.hqId, { state: "working", note: `Resumed ${w.session} session`, ended: null, currentTaskId: w.key });
+    this.hub.activity("task.started", w.hqId, `${this.hub.name(w.hqId)} (${w.role}, ${w.session} ${w.key}) resumed`);
+    this.applyAttention();
   }
 
   /** What was requested for this worker itself: the model Claude Code picked at launch. Effort isn't recorded until a call runs. */
@@ -486,15 +539,15 @@ let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
     return { context: u.context, telemetry };
   }
 
-  /** Session outcomes, kept in ~/.controlroom by subagent id so a restart reads the same history. */
-  private endBook(next?: Record<string, SessionEnd>) {
+  /** Session outcomes, kept in ~/.controlroom by subagent id (with its ticket) so a restart reads the same history. */
+  private endBook(next?: Record<string, BookEntry>) {
     const file = join(this.stateDir, "sessions.json");
     if (next) {
       writeFileSync(file, JSON.stringify(next, null, 2));
       return next;
     }
     try {
-      return JSON.parse(readFileSync(file, "utf8")) as Record<string, SessionEnd>;
+      return JSON.parse(readFileSync(file, "utf8")) as Record<string, BookEntry>;
     } catch {
       return {};
     }
@@ -512,33 +565,38 @@ let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
     };
   }
 
-  private settle(w: Worker, outcome: SessionEnd["outcome"], rec: { state: string | null; last: string | null; gate: string | null }) {
-    const ended: SessionEnd = { outcome, next: outcome === "handed-off" ? rec.state : null, result: outcome === "gate" ? rec.gate ?? rec.last : rec.last, at: new Date().toISOString() };
-    w.ended = ended;
-    this.endBook({ ...this.endBook(), [w.agentId]: ended });
+  /** Keep one session's outcome under its own subagent id, with its own ticket and stage. */
+  private settleAs(agentId: string, key: string, ended: SessionEnd, session?: string): SessionEnd {
+    const w = this.workers.get(agentId);
+    if (w) w.ended = ended;
+    this.endBook({ ...this.endBook(), [agentId]: { ...ended, key, session: session ?? w?.session } });
     return ended;
   }
 
-  private endWorker(w: Worker, why: string) {
+  /** A session stopped: its own report decides how it ended, else its ticket's recorded state. */
+  private endWorker(w: Worker, why: string, report: string | null = null) {
     const hub = this.hub;
     w.live = false;
-    const rec = this.recorded(w.key);
-    const ended = this.settle(w, sessionOutcome(w.session, rec.state), rec);
+    const own = readReport(report) ? report : w.transcript ? subagentReport(w.transcript) : null;
+    const ended = this.settleAs(w.agentId, w.key, sessionEnding(w.session, own ?? report, this.recorded(w.key)), w.session);
     const note =
-      ended.outcome === "handed-off" ? `Handed off — Pathfinder recorded ${ended.next}` : ended.outcome === "gate" ? "Stopped at a human gate" : ended.outcome === "failed" ? "Reported failure — a human decides" : "Interrupted — stopped without recording a handoff";
+      ended.outcome === "handed-off"
+        ? ended.verdict && ended.verdict !== "DONE" ? `Reported ${ended.verdict}${ended.next ? ` — Pathfinder recorded ${ended.next}` : ""}` : `Handed off — ${ended.next ? `Pathfinder recorded ${ended.next}` : "reported done"}`
+        : ended.outcome === "gate" ? "Stopped at a human gate" : ended.outcome === "failed" ? "Reported failure — a human decides" : "Interrupted — stopped without recording a handoff";
     hub.setSession(w.hqId, { state: "stopped", detail: why });
     hub.setStatus(w.hqId, { state: "idle", note, ended });
     hub.terminal(w.hqId, `\r\n\x1b[1m■ session ended\x1b[0m (${w.tools} tool calls) — ${note}\r\n`);
     const name = hub.name(w.hqId);
     const text =
       ended.outcome === "handed-off"
-        ? `${name} handed off ${w.key} (${w.session}); Pathfinder recorded ${ended.next}`
+        ? ended.verdict && ended.verdict !== "DONE" ? `${name} reported ${ended.verdict} on ${w.key} (${w.session})` : `${name} handed off ${w.key} (${w.session})${ended.next ? `; Pathfinder recorded ${ended.next}` : ""}`
         : ended.outcome === "gate"
           ? `${name} stopped ${w.key} at a human gate`
           : ended.outcome === "failed"
             ? `${name} reported ${w.key} failed; a human decides`
             : `${name}'s ${w.session} session on ${w.key} was interrupted (no handoff recorded)`;
     hub.activity(ended.outcome === "handed-off" ? "review.started" : ended.outcome === "interrupted" ? "session" : "agent.needs-input", w.hqId, text);
+    this.applyAttention();
   }
 
   /** Finished sessions restored from transcripts with no saved outcome: infer it once, then keep it. */
@@ -548,8 +606,14 @@ let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
       if (w.live || w.ended) continue;
       const later = all.some((x) => x !== w && x.key === w.key && x.transcript && w.transcript && this.startOf(x) > this.startOf(w));
       const rec = this.recorded(w.key);
-      const outcome = later ? "handed-off" : sessionOutcome(w.session, rec.state);
-      const ended = this.settle(w, outcome, later ? { ...rec, state: rec.state ?? "next stage" } : rec);
+      const report = w.transcript ? subagentReport(w.transcript) : null;
+      // Its own report first; else a later session on the same ticket means it handed off; else the recorded state.
+      const ended = readReport(report)
+        ? sessionEnding(w.session, report, rec)
+        : later
+          ? { outcome: "handed-off" as const, next: rec.state ?? "next stage", result: rec.last, at: new Date().toISOString() }
+          : sessionEnding(w.session, null, rec);
+      this.settleAs(w.agentId, w.key, ended, w.session);
       this.hub.setStatus(w.hqId, { ended });
     }
   }
@@ -569,32 +633,37 @@ let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
       // Running ones work at the subagent stations; finished ones (the latest few) are their launcher's history.
       const recs = subagents(this.transcript);
       for (const r of recs) this.subagentStarts.set(r.agentId, r.startedAt);
-      const all: WorkflowHelper[] = recs
-        .filter((r) => !parseBrief(r.prompt))
-        .map((r) => {
-          const seen = this.helperInfo.get(r.agentId);
-          return {
-            id: r.agentId,
-            label: r.description || seen?.label || r.prompt.split("\n")[0].slice(0, 80) || "Subagent",
-            type: r.agentType || seen?.type || "subagent",
-            parent: seen?.parent ?? COORDINATOR_ID,
-            finished: r.finished || !coordAlive || !!seen?.finished,
-          };
-        });
-      const helpers = [...all.filter((h) => !h.finished), ...all.filter((h) => h.finished).slice(-8)];
-      if (hub.snap.workflow && JSON.stringify(helpers) !== JSON.stringify(hub.snap.workflow.helpers ?? [])) {
-        hub.snap.workflow = { ...hub.snap.workflow, helpers };
-        this.emitWorkflow();
-      }
-      for (const rec of subagents(this.transcript)) {
+      // Every subagent is identified from its own transcript and meta.json (workers get their own brief).
+      // Parents first, so a helper a worker launched finds that worker.
+      for (const rec of [...recs].sort((a, b) => Number(!!a.parentAgentId) - Number(!!b.parentAgentId))) {
         const known = this.workers.get(rec.agentId);
         if (!known) {
           // An unfinished subagent is live only while its coordinator runs; give the reattach a few seconds first.
           if (!rec.finished && !coordAlive && Date.now() - this.startedAt < 15_000) continue;
-          if (parseBrief(rec.prompt)) this.addWorker(rec.agentId, rec.prompt, rec.finished || !coordAlive);
+          this.adopt(rec.agentId, this.attribution.identify(rec.agentId, this.evidence(rec.agentId, rec.file)), rec.finished || !coordAlive);
           continue;
         }
-        if (known.live && rec.finished) this.endWorker(known, `Session ended after ${known.tools} tool calls (transcript)`);
+        // A resumed session's earlier `finished` predates its resume: only a clearly newer one ends it (its
+        // SubagentStop hook ends it in any case).
+        const finishedNow = rec.finished && !(known.resumedAt && rec.metaUpdatedAt < known.resumedAt + 1000);
+        if (known.live && finishedNow) this.endWorker(known, `Session ended after ${known.tools} tool calls (transcript)`);
+      }
+      const all: WorkflowHelper[] = recs
+        .filter((r) => !this.workers.has(r.agentId))
+        .map((r) => {
+          const seen = this.helperInfo.get(r.agentId);
+          const finished = r.finished || !coordAlive || !!seen?.finished;
+          if (!seen) return { id: r.agentId, label: "Unidentified subagent", type: r.agentType || "subagent", finished, unknown: true };
+          return { id: r.agentId, label: r.description || seen.label, type: r.agentType || seen.type, parent: seen.parent, finished };
+        });
+      // Seen through hooks only, with no transcript yet: unknown until its own evidence appears.
+      for (const [id, u] of this.unknownAgents) {
+        if (!recs.some((r) => r.agentId === id)) all.push({ id, label: "Unidentified subagent", type: u.type || "subagent", finished: u.finished || !coordAlive, unknown: true });
+      }
+      const helpers = [...all.filter((h) => !h.finished), ...all.filter((h) => h.finished).slice(-8)];
+      if (hub.snap.workflow && JSON.stringify(helpers) !== JSON.stringify(hub.snap.workflow.helpers ?? [])) {
+        hub.snap.workflow = { ...hub.snap.workflow, helpers };
+        this.emitWorkflow();
       }
       this.settleRestored();
     }
@@ -615,50 +684,85 @@ let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
       const fresh = this.handoffs.readiness(this.handoffWorker(w));
       if (JSON.stringify(fresh) !== JSON.stringify(hub.status(w.hqId)?.fresh ?? null)) hub.setStatus(w.hqId, { fresh });
     }
-    // After a restart no Stop hook arrives: a coordinator whose last turn ended is waiting on the human.
-    const st = hub.status(COORDINATOR_ID);
-    if (st && coordAlive && this.transcript) {
-      const waiting = awaitingHuman(this.transcript);
-      if (waiting && !this.awaitingFromTranscript) {
-        this.awaitingFromTranscript = true;
-        hub.setStatus(COORDINATOR_ID, { state: "needs-input", note: "Asking: its turn ended — answer the coordinator in its terminal" });
-      } else if (waiting && st.state !== "needs-input") {
-        hub.setStatus(COORDINATOR_ID, { state: "needs-input", note: "Asking: its turn ended — answer the coordinator in its terminal" });
-      } else if (!waiting && this.awaitingFromTranscript) {
-        this.awaitingFromTranscript = false;
-        if (st.state === "needs-input") hub.setStatus(COORDINATOR_ID, { state: "working", note: "Working" });
+    // After a restart no Stop hook arrives: the transcript says whether the coordinator's last turn ended.
+    // The same rule as the Stop hook decides what that means (asking, or waiting on its workers).
+    if (coordAlive && this.transcript && existsSync(this.transcript)) {
+      const ended = awaitingHuman(this.transcript);
+      if (ended !== this.turnEnded) {
+        this.turnEnded = ended;
+        if (!ended) this.reopenTurn();
       }
+      this.applyAttention();
     }
+  }
+
+  /** The coordinator's turn reopened without a prompt hook (seen in its transcript): drop an attention state this run set. */
+  private reopenTurn() {
+    const st = this.hub.status(COORDINATOR_ID);
+    if (st && (st.state === "waiting" || (st.state === "needs-input" && st.note === this.attentionNote))) this.hub.setStatus(COORDINATOR_ID, { state: "working", note: "Working" });
+    this.attentionNote = null;
+  }
+
+  /** Open human gates: `human-gate` rows and open `gate-*` action items. */
+  private openGates(): string[] {
+    const rows = this.rows.filter((r) => r.state === "human-gate").map((r) => r.key);
+    const items = (this.hub.snap.actionItems ?? []).filter((i) => i.status === "open" && i.id.startsWith("gate-")).map((i) => i.taskId ?? i.id.replace(/^gate-/, ""));
+    return [...new Set([...rows, ...items])];
+  }
+
+  /** The coordinator's attention once its turn ended: needs you for a real ask, else waiting on live workers. */
+  private applyAttention() {
+    const st = this.hub.status(COORDINATOR_ID);
+    if (!st || !this.turnEnded || st.session.state !== "running") return;
+    // A question or permission prompt raised elsewhere (a hook, the screen) is a real ask: keep it.
+    const asking = st.state === "needs-input" && st.note !== this.attentionNote ? st.note : null;
+    const next = coordinatorAttention({ turnEnded: true, liveWorkers: [...this.workers.values()].filter((w) => w.live).length, openGates: this.openGates(), asking });
+    if (!next || (next.state === st.state && next.note === st.note)) return;
+    this.attentionNote = next.note;
+    this.hub.setStatus(COORDINATOR_ID, next);
   }
 
   private workerHook(agentId: string, event: string, body: Record<string, unknown>) {
     let w = this.workers.get(agentId) ?? null;
-    if (!w && event === "SubagentStart" && !this.helperInfo.has(agentId)) {
-      const prompt = this.pendingBriefs.shift();
-      if (prompt) w = this.addWorker(agentId, prompt);
-      else {
-        const h = this.pendingHelpers.shift();
-        if (h) this.helperInfo.set(agentId, { ...h, finished: false });
+    if (!w && !this.helperInfo.has(agentId)) {
+      // Not identified yet: only its own evidence (meta.json's tool_use_id, its own first prompt) can say who it
+      // is. SubagentStart carries neither, so until they exist it stays unknown; the Agent call's result or the
+      // transcript poll identifies it later. Never the oldest pending brief.
+      const file = typeof body.agent_transcript_path === "string" && body.agent_transcript_path ? body.agent_transcript_path : this.subagentTranscript(agentId);
+      const finished = event === "SubagentStop";
+      w = this.adopt(agentId, this.attribution.identify(agentId, this.evidence(agentId, file)), finished);
+      if (!w && !this.helperInfo.has(agentId)) {
+        const u = this.unknownAgents.get(agentId) ?? { type: typeof body.agent_type === "string" ? body.agent_type : "", finished: false };
+        u.finished ||= finished;
+        this.unknownAgents.set(agentId, u);
+        if (event === "SubagentStart") log.info(`subagent ${agentId} started; its session can't be identified yet`);
+      }
+      if (w && finished) {
+        // It finished before it could be identified: added as finished, with its own report.
+        this.queueRefresh(500);
+        return { ok: true };
       }
     }
     if (!w) {
-      // A delegated helper (e.g. a search): it shows at the subagent stations while it runs.
+      // A delegated helper (e.g. a search), or a subagent not identified yet: it shows at the subagent stations.
       const h = this.helperInfo.get(agentId);
       if (h && event === "SubagentStop") h.finished = true;
+      // A helper's own Agent calls: their subagents are its helpers.
+      if (h && event === "PreToolUse" && (body.tool_name === "Agent" || body.tool_name === "Task")) this.attribution.launch(body.tool_use_id, (body.tool_input ?? {}) as Record<string, unknown>, h.parent);
+      if (h && event === "PostToolUse" && (body.tool_name === "Agent" || body.tool_name === "Task")) this.agentLaunched(h.parent, body);
       if (event === "SubagentStart" || event === "SubagentStop") this.queueRefresh(500);
       return { ok: true };
     }
     const hub = this.hub;
     switch (event) {
       case "SubagentStart":
-        w.live = true;
+        // The same subagent id starting again is that session resuming: never another session's identity.
+        if (!w.live) this.resumeWorker(w);
         break;
       case "PreToolUse": {
         w.tools += 1;
         const input = (body.tool_input ?? {}) as Record<string, unknown>;
-        if (body.tool_name === "Agent" || body.tool_name === "Task") {
-          this.pendingHelpers.push({ parent: w.hqId, label: String(input.description ?? "").slice(0, 80) || "Subagent", type: String(input.subagent_type ?? "subagent") });
-        }
+        if (body.tool_name === "Agent" || body.tool_name === "Task") this.attribution.launch(body.tool_use_id, input, w.hqId);
         const detail = String(input.command ?? input.file_path ?? input.pattern ?? input.skill ?? "");
         const note = `${body.tool_name}${detail ? ": " + clip(detail.replace(/\s+/g, " "), 70) : ""}`;
         hub.setStatus(w.hqId, { state: "working", note });
@@ -667,13 +771,15 @@ let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
         break;
       }
       case "PostToolUse": {
+        if (body.tool_name === "Agent" || body.tool_name === "Task") this.agentLaunched(w.hqId, body);
         const res = body.tool_response as Record<string, unknown> | undefined;
         const failed = res && (res.interrupted || (typeof res.stderr === "string" && /(Tin & Thyme|Tin & Thyme) run policy/.test(res.stderr)));
         if (failed) hub.terminal(w.hqId, `\x1b[33m  blocked by run policy\x1b[0m\r\n`);
         break;
       }
       case "SubagentStop": {
-        if (w.live) this.endWorker(w, `Session ended after ${w.tools} tool calls`);
+        const last = typeof body.last_assistant_message === "string" ? body.last_assistant_message : null;
+        if (w.live) this.endWorker(w, `Session ended after ${w.tools} tool calls`, last);
         break;
       }
     }
@@ -682,6 +788,12 @@ let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
   }
 
   // ---------------------------------------------------------------- engine → board
+
+  /**
+   * A ticket's delivery stage (PR open, merged), from its delivery record. Feature 10 sets this; until then no
+   * ticket has one, and the board shows reviewed tickets as ready to deliver.
+   */
+  deliveryOf: (key: string) => DeliveryStage | null = () => null;
 
   liveKeys(): string[] {
     return [...new Set([...this.workers.values()].filter((w) => w.live).map((w) => w.key))];
@@ -778,10 +890,6 @@ let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
 
   private applyBoard() {
     const hub = this.hub;
-    const map: Record<string, TaskStatus> = {
-      ready: "todo", blocked: "blocked", working: "in-progress", adversary: "in-review", review: "in-review", repair: "in-progress",
-      "human-gate": "blocked", done: "in-review", stale: "blocked", failed: "blocked", integrated: "done",
-    };
     const features = new Map<string, StatusRow[]>();
     for (const row of this.rows) {
       const f = row.key.split(".")[0];
@@ -816,18 +924,25 @@ let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
         sf.Updated ? `Updated: ${sf.Updated}` : "",
       ].filter(Boolean);
       const gate = row.state === "human-gate" ? sf.Gate ?? row.gate : null;
+      // One shared mapping decides label, column, next step and blocker: `done` is never "in review".
+      const recordedState = row.recordedState ?? (sf.State ? sf.State.split(/\s/)[0] : null);
+      const liveSession = [...this.workers.values()].filter((w) => w.live && w.key === row.key).at(-1)?.session ?? null;
+      const view = ticketView({ state: row.state, lifecycle: row.lifecycle, recorded: recordedState, gate: gate ?? row.gate, liveSession, delivery: this.deliveryOf(row.key) });
+      const status: TaskStatus = view.column;
       return {
         id: row.key,
         boardId: `F${row.key.split(".")[0]}`,
         title: row.title,
         ownerId: this.ownerFor(row.key),
-        status: map[row.state] ?? "blocked",
+        status,
         needs: [],
         prNumber: null,
         description: evidence.join("\n"),
         pf: {
           state: row.state, lifecycle: row.lifecycle, role: (row as { role?: string | null }).role ?? null, gate: gate ?? (row.gate && row.gate !== "—" ? row.gate : null),
-          recorded: row.recordedState ?? (sf.State ? sf.State.split(/\s/)[0] : null),
+          recorded: recordedState,
+          delivery: this.deliveryOf(row.key),
+          view,
         },
         note: gate ? `◆ Needs you: ${gate}` : row.gate && row.gate !== "—" ? row.gate : row.state === "stale" ? "stale: claim with no live session" : null,
       };
@@ -895,6 +1010,7 @@ let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
         hub.emit({ type: "action.updated", item });
       }
     }
+    this.applyAttention();
   }
 
   /** The human answered a gate in the UI: hand the text to the coordinator, verbatim. */

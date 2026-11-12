@@ -126,6 +126,14 @@ export function firstPrompt(file: string): string {
   return "";
 }
 
+function mtime(file: string): number {
+  try {
+    return statSync(file).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
 function firstTimestamp(file: string): string {
   try {
     for (const r of lines(head(file, 64 * 1024))) if (r.timestamp) return String(r.timestamp);
@@ -144,6 +152,68 @@ export interface SubagentRecord {
   /** From the subagent's meta.json: what it was launched to do, and its agent type. */
   description: string;
   agentType: string;
+  /** From meta.json: the Agent tool call that launched it (the same `tool_use_id` its launcher's hooks carry). */
+  toolUseId: string | null;
+  /** From meta.json: the subagent that launched it, when a subagent did (absent for the coordinator's own). */
+  parentAgentId: string | null;
+  /** When meta.json last changed (ms), 0 without one: a resumed session's earlier `finished` predates its resume. */
+  metaUpdatedAt: number;
+}
+
+/** What Claude Code records next to a subagent's transcript (`agent-<id>.meta.json`); null until it exists. */
+export interface SubagentMeta {
+  finished: boolean;
+  description: string;
+  agentType: string;
+  toolUseId: string | null;
+  parentAgentId: string | null;
+}
+
+export function subagentMeta(transcript: string): SubagentMeta | null {
+  try {
+    const meta = JSON.parse(readFileSync(transcript.replace(/\.jsonl$/, ".meta.json"), "utf8"));
+    const str = (v: unknown) => (typeof v === "string" ? v : "");
+    return {
+      finished: meta.finished === true,
+      description: str(meta.description),
+      agentType: str(meta.agentType),
+      toolUseId: str(meta.toolUseId) || null,
+      parentAgentId: str(meta.parentAgentId) || null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** The first prompt of a subagent's own transcript, or null while the file doesn't exist yet. */
+export function subagentPrompt(transcript: string): string | null {
+  if (!existsSync(transcript)) return null;
+  const p = firstPrompt(transcript);
+  return p || null;
+}
+
+/**
+ * The report a subagent finished with, from its own transcript: its last SubagentHandback message, else the
+ * text of its last assistant message. Null when there is none (or the transcript can't be read).
+ */
+export function subagentReport(transcript: string): string | null {
+  if (!existsSync(transcript)) return null;
+  let recs: Record<string, any>[];
+  try {
+    recs = lines(tail(transcript, 512 * 1024));
+  } catch {
+    return null;
+  }
+  for (let i = recs.length - 1; i >= 0; i--) {
+    const r = recs[i];
+    if (r.type !== "assistant" || !Array.isArray(r.message?.content)) continue;
+    for (const p of r.message.content) {
+      if (p?.type === "tool_use" && p.name === "SubagentHandback" && typeof p.input?.message === "string") return p.input.message;
+    }
+    const text = r.message.content.filter((p: any) => p?.type === "text" && typeof p.text === "string").map((p: any) => p.text).join("\n").trim();
+    if (text) return text;
+  }
+  return null;
 }
 
 /** Background subagents of one session, oldest first. */
@@ -159,18 +229,13 @@ export function subagents(sessionFile: string): SubagentRecord[] {
   for (const f of names) {
     const agentId = f.replace(/^agent-/, "").replace(/\.jsonl$/, "");
     const file = join(dir, f);
-    let finished = false;
-    let description = "";
-    let agentType = "";
-    try {
-      const meta = JSON.parse(readFileSync(join(dir, `agent-${agentId}.meta.json`), "utf8"));
-      finished = meta.finished === true;
-      description = typeof meta.description === "string" ? meta.description : "";
-      agentType = typeof meta.agentType === "string" ? meta.agentType : "";
-    } catch {
-      /* no meta yet: still starting */
-    }
-    out.push({ agentId, file, prompt: firstPrompt(file), finished, startedAt: firstTimestamp(file), description, agentType });
+    // No meta yet: still starting.
+    const meta = subagentMeta(file);
+    out.push({
+      agentId, file, prompt: firstPrompt(file), finished: meta?.finished ?? false, startedAt: firstTimestamp(file),
+      description: meta?.description ?? "", agentType: meta?.agentType ?? "", toolUseId: meta?.toolUseId ?? null, parentAgentId: meta?.parentAgentId ?? null,
+      metaUpdatedAt: meta ? mtime(join(dir, `agent-${agentId}.meta.json`)) : 0,
+    });
   }
   return out.sort((a, b) => a.startedAt.localeCompare(b.startedAt));
 }

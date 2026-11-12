@@ -18,7 +18,8 @@ export function CrewHeader({ id }: { id: string }) {
         <span className="flex flex-wrap items-center gap-1.5">
           <TicketBadge id={c.ticket} />
           <span className="truncate">{task?.title ?? ""}</span>
-          {task?.pf && <span className="text-[#a8b8d8]">· Pathfinder: {task.pf.state}</span>}
+          {task?.pf && <span className="text-[#a8b8d8]">· {task.pf.view?.label ?? `Pathfinder: ${task.pf.state}`}</span>}
+          {task?.pf?.view?.next && <span className="w-full text-[12px] text-[#a8b8d8]">Next: {task.pf.view.next}</span>}
         </span>
       ) : (
         <span className="text-[#a8b8d8]">—</span>

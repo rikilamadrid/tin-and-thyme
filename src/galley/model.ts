@@ -12,11 +12,12 @@
 // Empty stations stay empty: a ticket is only "ready for next round" when the coordinator's plan says so.
 
 import { assignCharacter, CHARACTERS, characterForRole, type CharacterId } from "../data/crew";
-import type { AgentConfig, AgentStatus, OfficeSnapshot, SessionEnd, SessionTelemetry, Task, WorkflowHelper } from "../data/types";
+import type { AgentConfig, AgentStatus, OfficeSnapshot, SessionEnd, SessionTelemetry, Task, TaskStatus, WorkflowHelper } from "../data/types";
 import type { IconKind } from "./robots";
 import { selectAttention } from "../store/office";
 
-export type CrewState = "needs" | "work" | "review" | "idle" | "off";
+/** `wait`: the coordinator's turn ended while workers it dispatched run (not asking you). */
+export type CrewState = "needs" | "work" | "review" | "wait" | "idle" | "off";
 /** "gone" = a finished workflow session: it has beamed out and lives only in its ticket's history. */
 export type Place = "island" | "pod" | "pass" | "lounge" | "gone";
 
@@ -75,6 +76,9 @@ export interface TicketCard {
   gate: string | null;
   /** True whenever a human gate is open on the ticket (it stays after the worker leaves). */
   needsYou: boolean;
+  /** The verified next step and any real blocker (src/data/ticketStage.ts), when the workflow reports them. */
+  next: string | null;
+  blocker: string | null;
 }
 
 export interface RoleInfo {
@@ -131,6 +135,7 @@ function effState(t: Task): string | undefined {
   return s;
 }
 const COLS = ["New", "Cooking", "At the pass", "Served"] as const;
+const COLUMN_OF: Record<TaskStatus, number> = { todo: 0, blocked: 0, "in-progress": 1, "in-review": 2, reviewed: 2, done: 3 };
 export const COLUMN_NAMES = COLS;
 
 const keyNum = (k: string) => k.split(/[.-]/).map((n) => Number(n.replace(/\D/g, "")) || 0);
@@ -155,6 +160,8 @@ export function crewIdentity(snap: OfficeSnapshot, config: AgentConfig): { chara
 }
 
 function column(t: Task): number {
+  // The shared mapping decides the column (reviewed tickets wait at the pass, never as "in review").
+  if (t.pf?.view) return COLUMN_OF[t.pf.view.column];
   const s = effState(t);
   if (s) {
     if (s === "ready" || s === "blocked") return 0;
@@ -162,7 +169,7 @@ function column(t: Task): number {
     if (s === "integrated") return 3;
     return 1; // working, repair, stale, failed, human-gate, unknown words
   }
-  return { todo: 0, blocked: 0, "in-progress": 1, "in-review": 2, done: 3 }[t.status];
+  return COLUMN_OF[t.status];
 }
 
 export function buildGalley(snap: OfficeSnapshot, podOf?: Map<string, number>): GalleyModel {
@@ -182,8 +189,8 @@ export function buildGalley(snap: OfficeSnapshot, podOf?: Map<string, number>): 
     let place: Place;
     if (isLead) {
       place = "island";
-      state = !running ? "off" : agent.state === "needs-input" ? "needs" : agent.state === "working" ? "work" : "idle";
-      status = !running ? "not running" : state === "needs" ? "Needs you" : state === "work" ? "running the pass" : "on watch";
+      state = !running ? "off" : agent.state === "needs-input" ? "needs" : agent.state === "working" ? "work" : agent.state === "waiting" ? "wait" : "idle";
+      status = !running ? "not running" : state === "needs" ? "Needs you" : state === "work" ? "running the pass" : state === "wait" ? "waiting on workers" : "on watch";
     } else if (running) {
       place = reviewRole ? "pass" : "pod";
       state = agent.state === "needs-input" ? "needs" : reviewRole ? "review" : "work";
@@ -244,7 +251,7 @@ export function buildGalley(snap: OfficeSnapshot, podOf?: Map<string, number>): 
         atPass.push(t.id);
       }
     } else {
-      mark = t.status === "in-progress" ? (live ? "work" : "idle") : t.status === "in-review" ? "review" : t.status === "blocked" ? "lock" : null;
+      mark = t.status === "in-progress" ? (live ? "work" : "idle") : t.status === "in-review" ? "review" : t.status === "reviewed" ? "done" : t.status === "blocked" ? "lock" : null;
       if (t.status === "in-review") atPass.push(t.id);
     }
     columns[column(t)].push({ id: t.id, boardId: t.boardId, title: t.title, mark, dim });
@@ -292,10 +299,12 @@ export function buildGalley(snap: OfficeSnapshot, podOf?: Map<string, number>): 
     let phase: TicketPhase | null = null;
     let label = "";
     let stage: string | null = null;
+    const view = t.pf?.view ?? null;
     if (current) {
       stage = current.session;
       phase = current.state === "needs" || s === "human-gate" ? "needs" : "live";
-      label = phase === "needs" ? `Needs you · ${stageWords(stage)}` : stageWords(stage);
+      const doing = view && view.stage !== "needs-you" ? view.label : stageWords(stage);
+      label = phase === "needs" ? `Needs you · ${doing}` : doing;
     } else if (s === "human-gate") {
       phase = "needs";
       label = "Needs you";
@@ -320,9 +329,10 @@ export function buildGalley(snap: OfficeSnapshot, podOf?: Map<string, number>): 
         phase = "stale";
         label = "Claimed · no live session";
       }
-    } else if (s === "done") {
+    } else if (s === "done" || view?.stage === "completing") {
+      // Ready to deliver, awaiting merge, or integrated with completion pending: the shared mapping's words.
       phase = "done";
-      label = "Done · ready to integrate";
+      label = view?.label ?? "Ready to deliver";
     } else if (s === "ready" && planned.has(t.id)) {
       phase = "next-round";
       label = "Ready for next round";
@@ -332,7 +342,7 @@ export function buildGalley(snap: OfficeSnapshot, podOf?: Map<string, number>): 
       label = "No live session";
     }
     if (!phase) continue;
-    tickets.push({ key: t.id, title: t.title, phase, label, stage, current, history, gate, needsYou: s === "human-gate" || current?.state === "needs" });
+    tickets.push({ key: t.id, title: t.title, phase, label, stage, current, history, gate, needsYou: s === "human-gate" || current?.state === "needs", next: view?.next ?? null, blocker: view && view.blocker !== gate ? view.blocker : null });
   }
   const order: Record<TicketPhase, number> = { needs: 0, failed: 1, interrupted: 2, live: 3, waiting: 4, done: 5, stale: 6, "next-round": 7 };
   tickets.sort((a, b) => order[a.phase] - order[b.phase] || byKey(a.key, b.key));

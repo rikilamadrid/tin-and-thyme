@@ -8,8 +8,9 @@ import { DrawerHeader } from "./Drawer";
 const COLUMNS: { id: TaskStatus; label: string; color: string }[] = [
   { id: "todo", label: "To do", color: "#83769c" },
   { id: "in-progress", label: "Doing", color: "#29adff" },
-  { id: "in-review", label: "Review", color: "#ffa300" },
-  { id: "done", label: "Done", color: "#00e436" },
+  { id: "in-review", label: "In review", color: "#ffa300" },
+  { id: "reviewed", label: "Ready to deliver", color: "#7fe0a8" },
+  { id: "done", label: "Done / Served", color: "#00e436" },
   { id: "blocked", label: "Blocked", color: "#ff004d" },
 ];
 
@@ -100,7 +101,14 @@ function TaskCard({ task }: { task: Task }) {
       >
         {task.title}
       </div>
-      {task.status === "blocked" && task.note && <div className="text-[12px] text-[#ff7a9c]">{task.note}</div>}
+      {task.status === "blocked" && task.note && !task.pf?.view && <div className="text-[12px] text-[#ff7a9c]">{task.note}</div>}
+      {task.pf?.view && (
+        <div className="mt-0.5 text-[12px] leading-tight">
+          <b>{task.pf.view.label}</b>
+          {task.pf.view.blocker && <div className="text-[#ff7a9c]">Blocked: {task.pf.view.blocker}</div>}
+          {task.pf.view.next && <div className="text-muted">Next: {task.pf.view.next}</div>}
+        </div>
+      )}
       <div className="mt-1 flex items-center gap-1.5 text-[12px]">
         {owner ? (
           <>

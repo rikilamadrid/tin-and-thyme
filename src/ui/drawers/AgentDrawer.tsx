@@ -304,7 +304,7 @@ function TaskTab({ snap, agent, taskId }: { snap: OfficeSnapshot; agent: AgentCo
             <button key={b.id} className="panel mb-2 block w-full px-3 py-2 text-left" onClick={() => ui.openBoards(b.id)}>
               <b>{b.title}</b>
               <div className="font-term text-[17px] text-muted">
-                {count("todo")} to do · {count("in-progress")} in progress · {count("in-review")} in review · {count("done")} done
+                {count("todo")} to do · {count("in-progress")} in progress · {count("in-review")} in review · {count("reviewed")} reviewed · {count("done")} done
               </div>
             </button>
           );

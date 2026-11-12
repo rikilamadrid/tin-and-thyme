@@ -504,7 +504,7 @@ export class Sessions {
     }
     if (dialog) return set("needs-input", "Asking: answer the question in the terminal");
     // A missed UserPromptSubmit: the agent is busy, so don't type into it.
-    if (st.state === "idle" && busy) return set("working", "Working");
+    if ((st.state === "idle" || st.state === "waiting") && busy) return set("working", "Working");
     if (st.state === "working" && !busy && cli === "claude") {
       // Twice in a row, so a gap between two steps isn't mistaken for the end of the turn.
       const n = (this.idleScreens.get(agentId) ?? 0) + 1;

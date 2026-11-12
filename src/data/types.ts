@@ -129,9 +129,12 @@ export interface AccessRequest {
 
 export type AccessDecision = "agent" | "everyone" | "deny";
 
+import type { TicketView } from "./ticketStage";
+
 // ---------------------------------------------------------------- Live state
 
-export type AgentState = "idle" | "working" | "needs-input" | "in-review" | "review-passed";
+/** `waiting`: a workflow coordinator whose turn ended while workers it dispatched are still running (not asking you). */
+export type AgentState = "idle" | "working" | "needs-input" | "waiting" | "in-review" | "review-passed";
 
 /** The agent's process: its tmux session running `sbx run` (Sandbox) or `claude` (Local). */
 export type SessionState = "stopped" | "starting" | "running" | "failed";
@@ -173,8 +176,10 @@ export interface SessionEnd {
   outcome: "handed-off" | "gate" | "failed" | "interrupted";
   /** The stage Pathfinder recorded next (adversary, review, repair, done, integrated), when handed off. */
   next: string | null;
-  /** The session's last recorded result (Pathfinder `Last`), verbatim. */
+  /** The session's last recorded result (Pathfinder `Last`), verbatim; or its own report's headline. */
   result: string | null;
+  /** The verdict the session itself reported (DONE, PASS, FINDINGS, GATE, FAILED), when it reported one. */
+  verdict?: "DONE" | "PASS" | "FINDINGS" | "GATE" | "FAILED" | null;
   at: string;
 }
 
@@ -217,7 +222,11 @@ export interface Board {
   order: number;
 }
 
-export type TaskStatus = "todo" | "in-progress" | "in-review" | "done" | "blocked";
+/** `reviewed`: review passed, ready to deliver (a workflow ticket waiting for its PR or merge). */
+export type TaskStatus = "todo" | "in-progress" | "in-review" | "reviewed" | "done" | "blocked";
+
+/** A reviewed ticket's delivery, from its delivery record (Feature 10): a PR is open, or it was merged. */
+export type DeliveryStage = "pr-open" | "merged";
 
 export interface Task {
   id: string; // "P3-T02"
@@ -239,6 +248,10 @@ export interface Task {
     gate: string | null;
     /** The state the claim's checkpoint records (e.g. "adversary" while the engine shows a pending stage as stale). */
     recorded?: string | null;
+    /** Delivery input for a reviewed ticket (PR open, merged); null until a delivery record says so (Feature 10). */
+    delivery?: DeliveryStage | null;
+    /** What every surface shows for this ticket: label, column, next step, blocker (src/data/ticketStage.ts). */
+    view?: TicketView;
   };
 }
 
@@ -454,6 +467,8 @@ export interface WorkflowHelper {
   /** HQ id of the session that launched it (the coordinator unless a worker did). */
   parent?: string;
   finished?: boolean;
+  /** Seen through its hooks, but which session it is can't be established yet: shown as unknown, never guessed. */
+  unknown?: boolean;
 }
 
 export interface PlanSeen {
