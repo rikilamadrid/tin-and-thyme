@@ -18,6 +18,7 @@ const { ticketView, STAGE_LABEL } = await import("../src/data/ticketStage");
 // The galley model (the sidebar and the plan wall) lives in the UI bundle; its store reads the page URL.
 Object.assign(globalThis, { location: { href: "http://127.0.0.1/" } });
 const { buildGalley } = await import("../src/galley/model");
+const { needsYou, requestShelf } = await import("../src/data/requests");
 const { Hub } = await import("../server/hub");
 const { COORDINATOR_ID, PathfinderRun, parseBrief } = await import("../server/pathfinder");
 type Run = InstanceType<typeof PathfinderRun>;
@@ -47,6 +48,8 @@ interface World {
   hub: InstanceType<typeof Hub>;
   run: Run;
   typed: string[];
+  /** Set to make typing into the coordinator fail (its terminal unreachable). */
+  link: { up: boolean; delayMs: number };
 }
 
 function makeRepo(name: string) {
@@ -73,12 +76,20 @@ function boot(repo: { root: string; coord: string; engine: string }, slug: strin
   hub.persist = false;
   hub.setSession(COORDINATOR_ID, { state: "running" });
   const typed: string[] = [];
+  const link = { up: true, delayMs: 0 };
   const inbox = { noteHook() {}, takeForStop: () => null } as never;
-  const sessions = { typeInto: async (_id: string, text: string) => (typed.push(text), true) } as never;
+  const sessions = {
+    typeInto: async (_id: string, text: string) => {
+      if (link.delayMs) await new Promise((r) => setTimeout(r, link.delayMs));
+      if (!link.up) return false;
+      typed.push(text);
+      return true;
+    },
+  } as never;
   const run = new PathfinderRun(hub, inbox, sessions, { mode: "orchestrator", engine: repo.engine }, 7999, "token", "/orchestrate start");
   run.start();
   run.stop();
-  return { root: repo.root, coord: repo.coord, rows, hub, run, typed };
+  return { root: repo.root, coord: repo.coord, rows, hub, run, typed, link };
 }
 
 const setRows = (w: World, rows: Record<string, unknown>[]) => {
@@ -377,6 +388,117 @@ w.run.deliveryOf = () => null;
   await refresh(w3);
   eq("restart: a live worker is rebuilt live", workers(w3).get("alive")?.live, true);
   eq("restart: the transcript poll follows the same rule (waiting on workers)", coordinator(w3).state, "waiting");
+}
+
+// ================================================================ Action items: truthful, answerable, exactly once
+
+{
+  const wa = boot(makeRepo("repo-actions"), "tt-actions");
+  const gateItem = (key: string) => (wa.hub.snap.actionItems ?? []).find((i) => i.id === `gate-${key}`)!;
+  const counted = () => {
+    const n = needsYou(wa.hub.snap);
+    return { items: n.items.map((i) => i.id).sort(), asking: n.asking.map((a) => a.agentId) };
+  };
+
+  // A real pending decision, raised by a live worker: its own ticket, stage, session and owner.
+  preAgent(wa, "tu_g1", brief("02.1"), "02.1 developer");
+  postAgent(wa, "tu_g1", brief("02.1"), "ag1");
+  subStart(wa, "ag1");
+  // A finished session on another ticket that ended handed off: history, never an owner of a later gate.
+  preAgent(wa, "tu_h1", brief("03.1", "review", "tester"), "03.1 review");
+  postAgent(wa, "tu_h1", brief("03.1", "review", "tester"), "ah1");
+  subStart(wa, "ah1");
+  writeSub(wa, "ah1", { prompt: brief("03.1", "review", "tester"), report: "VERDICT: PASS" });
+  subStop(wa, "ah1");
+  stateFile(wa, "02.1", { State: "human-gate", Gate: "Which account should the live check use?", "Gate stage": "implementation" });
+  stateFile(wa, "03.1", { State: "human-gate", Gate: "Approve the copy change?" });
+  setRows(wa, [row("02.1", "human-gate", { gate: "Which account should the live check use?" }), row("03.1", "human-gate", { gate: "Approve the copy change?" })]);
+  coordinatorTurn(wa, true);
+  stopTurn(wa);
+  await refresh(wa);
+  const g1 = gateItem("02.1");
+  eq("pending decision: ticket, stage, session and owner are its own", [g1.request?.key, g1.request?.stage, g1.request?.session, g1.request?.owner, g1.fromId], ["02.1", "implementation", "implementation", workers(wa).get("ag1")?.hqId, workers(wa).get("ag1")?.hqId]);
+  eq("pending decision: the question is Pathfinder's gate, verbatim", g1.details, "Which account should the live check use?");
+  const g3 = gateItem("03.1");
+  eq("a historical session never inherits a later gate", [g3.request?.owner, g3.fromId], [null, COORDINATOR_ID]);
+  check("…and the request says it can't identify the session, and why", /ended handed-off, not at this gate/.test(g3.request?.diagnostic ?? ""), g3.request?.diagnostic);
+  eq("both identifiable requests count toward Needs you, nothing else does", counted(), { items: ["gate-02.1", "gate-03.1"], asking: [] });
+  eq("the coordinator relays the open gates (it needs you)", [coordinator(wa).state, coordinator(wa).relaying], ["needs-input", ["02.1", "03.1"]]);
+
+  // Dismiss/snooze sends nothing and resolves nothing.
+  wa.run.snoozeGate("gate-03.1");
+  eq("snooze: nothing is sent to any agent", wa.typed, []);
+  eq("snooze: the gate stays open", [gateItem("03.1").status, requestShelf(gateItem("03.1"))], ["open", "snoozed"]);
+  eq("snooze: it leaves Needs you", counted().items, ["gate-02.1"]);
+  await refresh(wa);
+  eq("snooze: a refresh doesn't bring it back or send anything", [requestShelf(gateItem("03.1")), wa.typed.length], ["snoozed", 0]);
+
+  // An empty answer is never sent (the old "Done" with no note became a dismissal message).
+  await wa.run.answerGate("gate-02.1", "   ", g1.request!.revision);
+  eq("an empty answer is rejected and nothing is sent", [gateItem("02.1").answer?.state, wa.typed.length], ["rejected", 0]);
+
+  // A delivery failure: the coordinator's terminal can't be reached.
+  wa.link.up = false;
+  await wa.run.answerGate("gate-02.1", "Use the work account", g1.request!.revision);
+  eq("delivery failure: a specific failure, nothing delivered", [gateItem("02.1").answer?.state, wa.typed.length], ["failed", 0]);
+  check("delivery failure: it says why", /Couldn't reach the coordinator's terminal/.test(gateItem("02.1").answer?.detail ?? ""));
+  eq("delivery failure: the request still needs you", counted().items, ["gate-02.1"]);
+
+  // A double-clicked submission: sent exactly once.
+  wa.link.up = true;
+  wa.link.delayMs = 30;
+  const states: string[] = [];
+  const unsub = wa.hub.subscribe((e) => e.type === "action.updated" && e.item.id === "gate-02.1" && e.item.answer && states.push(e.item.answer.state));
+  await Promise.all([wa.run.answerGate("gate-02.1", "Use the work account", g1.request!.revision), wa.run.answerGate("gate-02.1", "Use the work account", g1.request!.revision)]);
+  unsub();
+  wa.link.delayMs = 0;
+  eq("double click: typed into the coordinator exactly once", wa.typed.length, 1);
+  check("the answer names the ticket and the session that asked", wa.typed[0].includes("02.1 gate") && wa.typed[0].includes(wa.hub.name(workers(wa).get("ag1")!.hqId)), wa.typed[0]);
+  eq("the answer shows Sending → Delivered", states, ["sending", "delivered"]);
+  eq("delivered is not resolved: the gate stays open until Pathfinder records it", gateItem("02.1").status, "open");
+  eq("delivered: no longer counted as Needs you", counted().items, []);
+  await wa.run.answerGate("gate-02.1", "Use the work account", g1.request!.revision);
+  eq("a third send after delivery is refused", wa.typed.length, 1);
+
+  // A reconnect: refreshing (or a browser reconnecting to the same snapshot) changes nothing.
+  await refresh(wa);
+  await refresh(wa);
+  eq("reconnect: the answer and its state are kept, nothing re-sent", [gateItem("02.1").answer?.state, wa.typed.length], ["delivered", 1]);
+
+  // A superseded request: Pathfinder recorded a new gate text; an answer to the old one is rejected.
+  stateFile(wa, "03.1", { State: "human-gate", Gate: "Approve the revised copy change?" });
+  setRows(wa, [row("02.1", "human-gate", { gate: "Which account should the live check use?" }), row("03.1", "human-gate", { gate: "Approve the revised copy change?" })]);
+  const oldRevision = g3.request!.revision;
+  await refresh(wa);
+  check("superseded: the changed gate is a new request", gateItem("03.1").request?.revision !== oldRevision);
+  eq("superseded: a new request isn't snoozed by the old one", requestShelf(gateItem("03.1")), "actionable");
+  await wa.run.answerGate("gate-03.1", "Yes", oldRevision);
+  eq("superseded: an answer to the old request is rejected, nothing sent", [gateItem("03.1").answer?.state, wa.typed.length], ["rejected", 1]);
+
+  // An answered gate: resolved only when Pathfinder shows it resolved.
+  stateFile(wa, "02.1", { State: "working" });
+  setRows(wa, [row("02.1", "working"), row("03.1", "human-gate", { gate: "Approve the revised copy change?" })]);
+  await refresh(wa);
+  eq("answered gate: Pathfinder recorded it, so it's resolved", [gateItem("02.1").status, gateItem("02.1").answer?.state], ["done", "recorded"]);
+  check("answered gate: it says what Pathfinder recorded", /02\.1 is now working/.test(gateItem("02.1").answer?.detail ?? ""), gateItem("02.1").answer);
+
+  // A finished worker that stopped at its gate still owns it; the coordinator's ended turn with live workers waits.
+  writeSub(wa, "ag1", { prompt: brief("02.1"), report: "GATE: Which account should the live check use?" });
+  stateFile(wa, "02.1", { State: "human-gate", Gate: "Which account should the live check use (2)?", "Gate stage": "implementation" });
+  subStop(wa, "ag1");
+  setRows(wa, [row("02.1", "human-gate", { gate: "Which account should the live check use (2)?" }), row("03.1", "integrated", { lifecycle: "Complete" })]);
+  await refresh(wa);
+  eq("a finished worker's own gate keeps its identity", gateItem("02.1").request?.owner, workers(wa).get("ag1")?.hqId);
+  // Answer it in the terminal instead: the gate closes; nothing remains in Needs you.
+  stateFile(wa, "02.1", { State: "working" });
+  setRows(wa, [row("02.1", "working"), row("03.1", "integrated", { lifecycle: "Complete" })]);
+  preAgent(wa, "tu_g2", brief("02.1", "resume"), "02.1 resume");
+  postAgent(wa, "tu_g2", brief("02.1", "resume"), "ag2");
+  subStart(wa, "ag2");
+  await refresh(wa);
+  eq("ended coordinator turn with a live worker: waiting, not Needs you", [coordinator(wa).state, coordinator(wa).relaying ?? null], ["waiting", null]);
+  eq("no false Needs you remains", counted(), { items: [], asking: [] });
+  eq("closed gates read as resolved in Pathfinder", (wa.hub.snap.actionItems ?? []).filter((i) => i.status !== "open").map((i) => i.note), ["Pathfinder: 02.1 is now working", "Pathfinder: 03.1 is now integrated"]);
 }
 
 console.log(`\n${passes} passed, ${failures} failed`);

@@ -160,6 +160,8 @@ export interface AgentStatus {
    * call in its transcript; "configured" = only what was requested for it (no call seen yet). Never another agent's values.
    */
   telemetry?: SessionTelemetry | null;
+  /** Ticket keys of open gates this "needs input" is relaying (each is its own action item, so it isn't counted twice). */
+  relaying?: string[] | null;
   /** A worker's own context crossed the project's alert threshold (advisory; once per crossing). */
   contextAlert?: { pct: number; threshold: number } | null;
   /** Whether Tin & Thyme can checkpoint this worker and start it fresh through Pathfinder, and why not. */
@@ -491,6 +493,41 @@ export interface ActionItem {
   note: string | null; // the user's note when closing it
   at: string;
   closedAt: string | null;
+  /** A workflow request (a Pathfinder human gate): whose it is, exactly, or why that can't be said. */
+  request?: ActionRequest | null;
+  /** The human's answer to `request`, and how far it got. */
+  answer?: ActionAnswer | null;
+  /** Snoozed until then: hidden from "Needs you", nothing sent, nothing resolved. */
+  snoozedUntil?: string | null;
+}
+
+export interface ActionRequest {
+  kind: "gate";
+  /** The ticket the gate is on (from the engine and the ticket's state file). */
+  key: string;
+  /** The stage it was raised in (Pathfinder's `Gate stage`, else the raising session's). */
+  stage: string | null;
+  /** HQ id of the session that raised it; null when that can't be established. */
+  owner: string | null;
+  /** That session's kind (implementation, review, …). */
+  session: string | null;
+  /** Why the session can't be identified (shown as "Unable to identify session"); null when it can. */
+  diagnostic: string | null;
+  /** Changes whenever the request changes: an answer to an older revision is rejected. */
+  revision: string;
+}
+
+export interface ActionAnswer {
+  /**
+   * sending → delivered (typed into the coordinator's session) → recorded (Pathfinder shows the gate resolved);
+   * failed: it never reached the coordinator; rejected: not sent (an empty or superseded answer).
+   */
+  state: "sending" | "delivered" | "recorded" | "failed" | "rejected";
+  text: string;
+  /** The request revision it answers. */
+  revision: string;
+  at: string;
+  detail: string | null;
 }
 
 // ---------------------------------------------------------------- Inputs

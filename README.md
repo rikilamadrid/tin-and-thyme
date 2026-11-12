@@ -94,7 +94,10 @@ brings you back. What starts, what is reused and what is kept where is in
 
 - **The Head Chef** is Pathfinder's orchestrator: one Claude Code session that
   Tin & Thyme starts in tmux, running `/orchestrate start`. It works in the glass
-  office. When it ends its turn on a question, it shows **Needs you**.
+  office. When it ends its turn on a real ask (an open gate, a permission
+  prompt, or a question with no workers running), it shows **Needs you**. When
+  it ends its turn while workers it dispatched are still running, it shows
+  **Waiting on workers**.
 - **The Orders rail** shows every ticket Pathfinder's engine reports, from New to
   Served. A ticket waiting on you is pink here and in the Head Chef's hand.
 - **Helpers** the coordinator delegates (searches, plans) work at the subagent
@@ -136,10 +139,19 @@ how it ended and its last readings.
 A card also tells you when something needs a person:
 
 - **Needs you**, in pink, for a human gate. Pathfinder's own question stays on the
-  card and in **Action items** after the worker has left. Answering there types
-  your reply into the coordinator's session, and Pathfinder records it.
-- **Interrupted** when a session stopped without recording a handoff. No success
-  sound plays.
+  card and in **Action items** after the worker has left, with its ticket, stage,
+  and the session that raised it (or **Unable to identify session**, and why).
+  **Send answer** types your reply into the coordinator's session once; the
+  request then shows **Sending**, **Delivered**, and **Recorded** only when
+  Pathfinder shows the gate resolved. **Snooze** sends nothing and leaves the gate
+  open.
+- **Ready to deliver** when the review passed (Pathfinder `done`), **In review**
+  only while a review is underway, **Awaiting merge** once a pull request is open,
+  and **Done / Served** when the ticket is integrated and complete. The board, the
+  ticket cards, the plan wall and the drawer all use the same words.
+- **Interrupted** when a session stopped without recording a handoff or a report.
+  A session that reported PASS, FINDINGS, DONE, GATE or FAILED is shown with its
+  own report. No success sound plays.
 - **Ready for next round** when the coordinator's latest plan lists the ticket as
   eligible and waiting for another approved dispatch.
 
@@ -148,7 +160,9 @@ A card also tells you when something needs a person:
 ### Terminals, telemetry and sound
 
 - Each crew member's drawer has a **terminal**: the Head Chef's is its live
-  Claude Code session; a worker's shows the tools it runs, as it runs them.
+  Claude Code session. A worker's is a read-only **Activity** view of the tools it
+  runs: a background session can't be typed to, so its requests are answered in
+  **Action items**, through the coordinator.
 - **Activity** lists what happened, newest first: starts, handoffs, gates, plans
   and deliveries.
 - **Context, model and effort** are read from each session's own transcript. A

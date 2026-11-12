@@ -99,7 +99,7 @@ export function createWsSource(token: string): OfficeDataSource {
     forwardPort: (agentId, port) => send("forwardPort", agentId, port),
     unforwardPort: (agentId, port) => send("unforwardPort", agentId, port),
     updateStack: (stack) => send("updateStack", stack),
-    resolveActionItem: (id, decision, note) => send("resolveActionItem", id, decision, note),
+    resolveActionItem: (id, decision, note, revision) => send("resolveActionItem", id, decision, note, revision),
     refreshMcp: () => send("refreshMcp"),
     addMcp: (input) => send("addMcp", input),
     authMcp: (name) => send("authMcp", name),

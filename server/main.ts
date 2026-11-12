@@ -115,8 +115,10 @@ async function main() {
     commands.ackContextAlert = (id) => typeof id === "string" && r.ackContextAlert(id);
     commands.checkpointFresh = (id) => typeof id === "string" && void r.handoffs.start(id);
     commands.retryHandoff = (key) => typeof key === "string" && void r.handoffs.retry(key);
-    commands.resolveActionItem = (id, decision, note) => {
-      if (typeof id === "string" && id.startsWith("gate-")) return r.answerGate(id, decision === "done" ? String(note ?? "") : "");
+    commands.resolveActionItem = (id, decision, note, revision) => {
+      // A gate is answered through the coordinator; "dismissed" only snoozes it (nothing is sent or resolved).
+      if (typeof id === "string" && id.startsWith("gate-"))
+        return decision === "done" ? r.answerGate(id, String(note ?? ""), typeof revision === "string" ? revision : undefined) : r.snoozeGate(id);
       return native.resolveActionItem(id, decision, note);
     };
     log.info(`Pathfinder project (${pf.mode} mode) — roster and board come from ${pf.engine}`);

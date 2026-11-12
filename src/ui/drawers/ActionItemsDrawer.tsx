@@ -1,5 +1,6 @@
 import { useState } from "react";
-import type { ActionItem } from "../../data/types";
+import type { ActionItem, OfficeSnapshot } from "../../data/types";
+import { requestsByShelf } from "../../data/requests";
 import { officeActions, selectAttention, useOffice } from "../../store/office";
 import { ui } from "../../store/ui";
 import { ago, Dot, SectionTitle, useNow } from "../kit";
@@ -19,6 +20,7 @@ export function ActionItemsDrawer() {
     .slice(0, 20);
   // Waiting items first, then oldest first (what's been waiting longest).
   const open = [...a.items].sort((x, y) => Number(y.waiting) - Number(x.waiting) || x.at.localeCompare(y.at));
+  const shelves = requestsByShelf(snap.actionItems, now);
   const others = a.asking.length + a.access.length + a.blocked.length + a.readyPrs.length;
 
   return (
@@ -34,9 +36,29 @@ export function ActionItemsDrawer() {
         ) : (
           <ul className="mb-4 flex flex-col gap-2">
             {open.map((item) => (
-              <Item key={item.id} item={item} from={agent(item.fromId)} now={now} />
+              <Item key={item.id} item={item} from={agent(item.fromId)} now={now} snap={snap} />
             ))}
           </ul>
+        )}
+        {shelves.awaiting.length > 0 && (
+          <>
+            <SectionTitle>Answered · waiting for Pathfinder</SectionTitle>
+            <ul className="mb-4 flex flex-col gap-2">
+              {shelves.awaiting.map((item) => (
+                <Item key={item.id} item={item} from={agent(item.fromId)} now={now} snap={snap} />
+              ))}
+            </ul>
+          </>
+        )}
+        {shelves.snoozed.length > 0 && (
+          <>
+            <SectionTitle>Snoozed</SectionTitle>
+            <ul className="mb-4 flex flex-col gap-2">
+              {shelves.snoozed.map((item) => (
+                <Item key={item.id} item={item} from={agent(item.fromId)} now={now} snap={snap} />
+              ))}
+            </ul>
+          </>
         )}
 
         {others > 0 && (
@@ -44,7 +66,16 @@ export function ActionItemsDrawer() {
             <SectionTitle>Also waiting on you</SectionTitle>
             <ul className="mb-4 flex flex-col gap-1.5 text-[14px]">
               {a.asking.map((s) => (
-                <Row key={`ask-${s.agentId}`} color={agent(s.agentId)?.color} text={`${agent(s.agentId)?.name ?? s.agentId} is asking you something in the terminal`} onOpen={() => ui.openAgent(s.agentId, "terminal")} />
+                <Row
+                  key={`ask-${s.agentId}`}
+                  color={agent(s.agentId)?.color}
+                  text={
+                    agent(s.agentId)?.crew?.session
+                      ? `${agent(s.agentId)?.name ?? s.agentId} needs you. It's a background session you can't type to: answer through the coordinator`
+                      : `${agent(s.agentId)?.name ?? s.agentId} is asking you something in its terminal`
+                  }
+                  onOpen={() => ui.openAgent(s.agentId, "terminal")}
+                />
               ))}
               {a.access.map((r) => (
                 <Row key={r.id} color={agent(r.agentId)?.color} text={`${agent(r.agentId)?.name ?? r.agentId} wants to reach ${r.domain}`} onOpen={() => ui.openAgent(r.agentId)} />
@@ -85,8 +116,9 @@ export function ActionItemsDrawer() {
                 {closed.map((i) => (
                   <li key={i.id} className="border-t-2 border-dashed border-cream-3 py-1">
                     <span className={i.status === "dismissed" ? "line-through" : ""}>{i.title}</span> · {agent(i.fromId)?.name ?? i.fromId} ·{" "}
-                    {i.status} {i.closedAt ? `${ago(i.closedAt, now)} ago` : ""}
-                    {i.note && <div className="pl-3">“{i.note}”</div>}
+                    {i.request ? (i.answer?.state === "recorded" ? "answered here, recorded by Pathfinder" : "resolved in Pathfinder") : i.status} {i.closedAt ? `${ago(i.closedAt, now)} ago` : ""}
+                    {i.answer?.state === "recorded" && <div className="pl-3">Your answer: “{i.answer.text}”</div>}
+                    {i.note && <div className="pl-3">{i.request ? i.note : `“${i.note}”`}</div>}
                   </li>
                 ))}
               </ul>
@@ -110,7 +142,12 @@ function Row({ text, color, onOpen }: { text: string; color?: string; onOpen: ()
   );
 }
 
-function Item({ item, from, now }: { item: ActionItem; from?: { id: string; name: string; color: string }; now: number }) {
+function Item({ item, from, now, snap }: { item: ActionItem; from?: { id: string; name: string; color: string }; now: number; snap: OfficeSnapshot }) {
+  // Keyed by kind as well, so a request never reuses an agent item's hooks.
+  return item.request ? <GateRequest key={`gate:${item.request.revision}`} item={item} now={now} snap={snap} /> : <AgentItem item={item} from={from} now={now} />;
+}
+
+function AgentItem({ item, from, now }: { item: ActionItem; from?: { id: string; name: string; color: string }; now: number }) {
   const [note, setNote] = useState("");
   const [expanded, setExpanded] = useState(false);
   const long = item.details.split("\n").length > 6 || item.details.length > 400;
@@ -151,6 +188,90 @@ function Item({ item, from, now }: { item: ActionItem; from?: { id: string; name
           Dismiss
         </button>
       </div>
+    </li>
+  );
+}
+
+const ANSWER_WORDS: Record<NonNullable<ActionItem["answer"]>["state"], string> = {
+  sending: "Sending…",
+  delivered: "Delivered to the coordinator · waiting for Pathfinder to record it",
+  recorded: "Recorded by Pathfinder",
+  failed: "Not delivered",
+  rejected: "Not sent",
+};
+
+/**
+ * A Pathfinder human gate: what is asked, whose it is (ticket, stage, session, owner), an answer box that
+ * sends exactly once through the coordinator, and how far the answer got. Snooze sends nothing.
+ */
+function GateRequest({ item, now, snap }: { item: ActionItem; now: number; snap: OfficeSnapshot }) {
+  const r = item.request!;
+  const [text, setText] = useState("");
+  const owner = r.owner ? snap.config.team.find((a) => a.id === r.owner) : null;
+  const a = item.answer && item.answer.revision === r.revision ? item.answer : null;
+  const stale = item.answer && item.answer.revision !== r.revision ? item.answer : null;
+  const inFlight = a?.state === "sending" || a?.state === "delivered" || a?.state === "recorded";
+  const snoozed = item.snoozedUntil && Date.parse(item.snoozedUntil) > now;
+  const send = () => {
+    if (!text.trim() || inFlight) return;
+    officeActions.resolveActionItem(item.id, "done", text, r.revision);
+  };
+  return (
+    <li className={`border-[3px] border-line bg-card px-3 py-2 shadow-[0_3px_0_rgba(36,26,46,0.35)] ${!inFlight && !snoozed ? "outline outline-[3px] outline-[#ff4f7b]" : ""}`}>
+      <div className="flex items-start gap-2">
+        <b className="flex-1 text-[15px]">{r.key} needs your decision</b>
+        {snoozed && <span className="chip shrink-0 text-[11px]">snoozed</span>}
+      </div>
+      <dl className="mb-1 grid grid-cols-[64px_1fr] gap-x-2 text-[12px] text-muted">
+        <dt>Ticket</dt>
+        <dd>{r.key}</dd>
+        <dt>Stage</dt>
+        <dd>{r.stage ?? "not recorded"}</dd>
+        <dt>Session</dt>
+        <dd>
+          {owner ? (
+            <button className="underline" onClick={() => ui.openAgent(owner.id)}>
+              {owner.name} · {r.session}
+            </button>
+          ) : (
+            <span className="text-[#c0392b]">Unable to identify session</span>
+          )}
+          {!owner && r.diagnostic && <div>{r.diagnostic}</div>}
+        </dd>
+        <dt>Raised</dt>
+        <dd>{ago(item.at, now)} ago</dd>
+      </dl>
+      <div className="whitespace-pre-wrap text-[13px]">{item.details}</div>
+      <p className="mt-1 text-[12px] text-muted">Your answer goes to the coordinator, which records it in Pathfinder for {r.key}. Background workers can't be typed to directly.</p>
+      {a && (
+        <div className={`mt-1 text-[12px] font-semibold ${a.state === "failed" || a.state === "rejected" ? "text-[#c0392b]" : "text-[#008751]"}`} role="status">
+          {ANSWER_WORDS[a.state]}
+          {a.detail && <span className="font-normal"> · {a.detail}</span>}
+          {a.text && <div className="font-normal text-muted">“{a.text}”</div>}
+        </div>
+      )}
+      {stale && <div className="mt-1 text-[12px] text-[#c0392b]">{stale.detail}</div>}
+      {!inFlight && (
+        <div className="mt-2 flex items-end gap-2">
+          <textarea
+            className="field min-h-[38px] min-w-0 flex-1 text-[13px]"
+            value={text}
+            rows={2}
+            placeholder={`Your answer for ${r.key} (no secrets)`}
+            aria-label={`Answer for ${r.key}`}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && (e.metaKey || e.ctrlKey) && send()}
+          />
+          <button className="btn px-2 text-[12px]" disabled={!text.trim()} onClick={send}>
+            Send answer
+          </button>
+          {!snoozed && (
+            <button className="btn px-2 text-[12px]" title="Put it aside for an hour. Nothing is sent and the gate stays open." onClick={() => officeActions.resolveActionItem(item.id, "dismissed")}>
+              Snooze 1 h
+            </button>
+          )}
+        </div>
+      )}
     </li>
   );
 }

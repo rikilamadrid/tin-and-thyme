@@ -49,7 +49,8 @@ function openOrCopy(href: string, say: (text: string) => void) {
 }
 
 /** A real xterm.js terminal fed by the agent's (mock) output stream. */
-export function TerminalView({ agentId, autoFocus = true }: { agentId: string; autoFocus?: boolean }) {
+/** `readOnly`: an activity transcript (a background subagent's), not a terminal anyone can type into. */
+export function TerminalView({ agentId, autoFocus = true, readOnly = false }: { agentId: string; autoFocus?: boolean; readOnly?: boolean }) {
   const host = useRef<HTMLDivElement>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -72,7 +73,8 @@ export function TerminalView({ agentId, autoFocus = true }: { agentId: string; a
       fontFamily: font.family,
       fontSize: font.size,
       lineHeight: font.lineHeight,
-      cursorBlink: true,
+      cursorBlink: !readOnly,
+      disableStdin: readOnly,
       scrollback: 3000,
       convertEol: false,
       allowProposedApi: false,
@@ -119,7 +121,7 @@ export function TerminalView({ agentId, autoFocus = true }: { agentId: string; a
       term.onResize(({ cols, rows }) => officeActions.resizeTerminal(agentId, cols, rows));
       term.write(readTerminal(agentId));
       unsub = subscribeTerminal(agentId, (data) => term.write(data));
-      term.onData((data) => officeActions.sendTerminalInput(agentId, data));
+      if (!readOnly) term.onData((data) => officeActions.sendTerminalInput(agentId, data));
       // Shift+Enter: xterm.js sends a plain Enter (\r), which submits. Send Alt+Enter (ESC \r)
       // instead, which Claude Code and Codex read as "new line".
       term.attachCustomKeyEventHandler((e) => {

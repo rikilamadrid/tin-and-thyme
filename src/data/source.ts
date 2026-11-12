@@ -113,7 +113,8 @@ export interface OfficeDataSource {
   /** Creates the agent's env file if needed and opens it in the default editor. */
   openEnvFile(agentId: string): void;
   /** Closes an action item; HQ tells the agent (done: with your note; dismissed: continue without it). */
-  resolveActionItem(id: string, decision: "done" | "dismissed", note?: string): void;
+  /** For a workflow request, `revision` is the request it answers (an answer to an older one is rejected). */
+  resolveActionItem(id: string, decision: "done" | "dismissed", note?: string, revision?: string): void;
   /** Workflow projects: the context alert threshold (percent). */
   setContextAlert?(pct: number): void;
   /** The human saw this agent's context alert. */

@@ -29,6 +29,9 @@ export function AgentDrawer({ id, initialTab }: { id: string; initialTab?: Agent
     );
   }
   const unread = snap.messages.filter((m) => m.toId === id).length;
+  // A workflow worker is a background subagent of the coordinator: its view is an activity transcript, and
+  // Claude Code offers no way to type into it. Only the coordinator's (and native agents') terminals are live.
+  const transcriptOnly = !!agent.crew?.session && !agent.isLead;
   const access = snap.accessRequests?.find((r) => r.agentId === id && r.status === "pending");
 
   return (
@@ -53,7 +56,14 @@ export function AgentDrawer({ id, initialTab }: { id: string; initialTab?: Agent
           // One line, always: a note that wraps or unwraps would change the terminal's height under you.
           <div className={`truncate border-b-[3px] border-line px-3 py-1.5 text-[14px] ${status.state === "needs-input" ? "bg-danger text-[#ff7a9c]" : "bg-cream-2"}`} title={status.note}>
             {status.note}
-            {status.state === "needs-input" && <span className="ml-2 text-muted">— answer in the terminal and press Enter</span>}
+            {status.state === "needs-input" &&
+              (transcriptOnly ? (
+                <button className="ml-2 underline" onClick={() => ui.openActions()}>
+                  — answer in Action items (sent through the coordinator)
+                </button>
+              ) : (
+                <span className="ml-2 text-muted">— answer in the terminal and press Enter</span>
+              ))}
           </div>
         )
       )}
@@ -64,7 +74,7 @@ export function AgentDrawer({ id, initialTab }: { id: string; initialTab?: Agent
           value={tab}
           onChange={setTab}
           tabs={[
-            { id: "terminal", label: "Terminal" },
+            { id: "terminal", label: transcriptOnly ? "Activity" : "Terminal" },
             { id: "shell", label: "Shell" },
             { id: "task", label: "Task" },
             { id: "sandbox", label: "Sandbox" },
@@ -75,7 +85,18 @@ export function AgentDrawer({ id, initialTab }: { id: string; initialTab?: Agent
       <div className="min-h-0 flex-1 overflow-hidden">
         {tab === "terminal" &&
           (status.session.state === "running" ? (
-            <TerminalView agentId={id} />
+            transcriptOnly ? (
+              <div className="flex h-full flex-col">
+                <div className="border-b-[3px] border-line bg-cream-2 px-3 py-1 text-[12px] text-muted">
+                  Activity transcript of a background session (read-only). It can't be typed to; answer its requests in Action items, through the coordinator.
+                </div>
+                <div className="min-h-0 flex-1">
+                  <TerminalView agentId={id} readOnly />
+                </div>
+              </div>
+            ) : (
+              <TerminalView agentId={id} />
+            )
           ) : (
             <NotRunning agent={agent} status={status} />
           ))}

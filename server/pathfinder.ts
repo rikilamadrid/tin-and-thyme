@@ -35,7 +35,8 @@ import { log } from "./lib/log";
 import { Attribution, readReport, type Evidence, type Identity } from "./attribution";
 import { coordinatorAttention, sessionEnding, ticketView } from "./workflowState";
 import { subagentMeta, subagentPrompt, subagentReport } from "./transcripts";
-import type { DeliveryStage } from "../src/data/types";
+import type { ActionAnswer, ActionRequest, DeliveryStage } from "../src/data/types";
+import { requestShelf } from "../src/data/requests";
 
 export const COORDINATOR_ID = "coordinator";
 const ENGINE = join("skills", "orchestrate", "engine", "bin", "orchestrate.mjs");
@@ -699,15 +700,19 @@ let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
   /** The coordinator's turn reopened without a prompt hook (seen in its transcript): drop an attention state this run set. */
   private reopenTurn() {
     const st = this.hub.status(COORDINATOR_ID);
-    if (st && (st.state === "waiting" || (st.state === "needs-input" && st.note === this.attentionNote))) this.hub.setStatus(COORDINATOR_ID, { state: "working", note: "Working" });
+    if (st && (st.state === "waiting" || (st.state === "needs-input" && st.note === this.attentionNote))) this.hub.setStatus(COORDINATOR_ID, { state: "working", note: "Working", relaying: null });
     this.attentionNote = null;
   }
 
-  /** Open human gates: `human-gate` rows and open `gate-*` action items. */
+  /**
+   * Open human gates still waiting on the human: `human-gate` rows and open `gate-*` action items, less those
+   * the human already answered (on their way to the coordinator, or waiting for Pathfinder to record them).
+   */
   private openGates(): string[] {
+    const items = (this.hub.snap.actionItems ?? []).filter((i) => i.status === "open" && i.id.startsWith("gate-"));
+    const answered = new Set(items.filter((i) => requestShelf(i) === "awaiting").map((i) => i.request?.key ?? i.taskId));
     const rows = this.rows.filter((r) => r.state === "human-gate").map((r) => r.key);
-    const items = (this.hub.snap.actionItems ?? []).filter((i) => i.status === "open" && i.id.startsWith("gate-")).map((i) => i.taskId ?? i.id.replace(/^gate-/, ""));
-    return [...new Set([...rows, ...items])];
+    return [...new Set([...rows, ...items.map((i) => i.taskId ?? i.id.replace(/^gate-/, ""))])].filter((k) => !answered.has(k));
   }
 
   /** The coordinator's attention once its turn ended: needs you for a real ask, else waiting on live workers. */
@@ -716,10 +721,14 @@ let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
     if (!st || !this.turnEnded || st.session.state !== "running") return;
     // A question or permission prompt raised elsewhere (a hook, the screen) is a real ask: keep it.
     const asking = st.state === "needs-input" && st.note !== this.attentionNote ? st.note : null;
-    const next = coordinatorAttention({ turnEnded: true, liveWorkers: [...this.workers.values()].filter((w) => w.live).length, openGates: this.openGates(), asking });
-    if (!next || (next.state === st.state && next.note === st.note)) return;
+    const gates = this.openGates();
+    const next = coordinatorAttention({ turnEnded: true, liveWorkers: [...this.workers.values()].filter((w) => w.live).length, openGates: gates, asking });
+    if (!next) return;
+    // Only open gates: each is its own action item, so the coordinator relaying them isn't a second ask.
+    const relaying = !asking && next.state === "needs-input" && gates.length ? gates.sort() : null;
+    if (next.state === st.state && next.note === st.note && JSON.stringify(relaying) === JSON.stringify(st.relaying ?? null)) return;
     this.attentionNote = next.note;
-    this.hub.setStatus(COORDINATOR_ID, next);
+    this.hub.setStatus(COORDINATOR_ID, { ...next, relaying });
   }
 
   private workerHook(agentId: string, event: string, body: Record<string, unknown>) {
@@ -765,7 +774,7 @@ let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
         if (body.tool_name === "Agent" || body.tool_name === "Task") this.attribution.launch(body.tool_use_id, input, w.hqId);
         const detail = String(input.command ?? input.file_path ?? input.pattern ?? input.skill ?? "");
         const note = `${body.tool_name}${detail ? ": " + clip(detail.replace(/\s+/g, " "), 70) : ""}`;
-        hub.setStatus(w.hqId, { state: "working", note });
+        hub.setStatus(w.hqId, { state: "working", note, relaying: null });
         hub.terminal(w.hqId, `\x1b[36m▸ ${body.tool_name}\x1b[0m ${clip(detail.replace(/\s+/g, " "), 160)}\r\n`);
         if (/orchestrate\.mjs|current-ticket\.md|git commit/.test(detail)) this.queueRefresh(1500);
         break;
@@ -980,7 +989,11 @@ let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
       if (st && st.currentTaskId !== w.key) hub.setStatus(w.hqId, { currentTaskId: w.key });
       // Only a live session can be asking; a finished one's gate is the coordinator's to relay (and an action item).
       if (w.live && row.state === "human-gate" && st && st.state !== "needs-input") {
-        hub.setStatus(w.hqId, { state: "needs-input", note: `Asking: ${clip(this.stateFile(w.key).Gate ?? row.gate)}` });
+        // Its gate is an action item, answered through the coordinator: not a second ask, and not in its terminal.
+        hub.setStatus(w.hqId, { state: "needs-input", note: `Asking: ${clip(this.stateFile(w.key).Gate ?? row.gate)}`, relaying: [w.key] });
+      } else if (row.state !== "human-gate" && st?.state === "needs-input" && st.relaying?.length) {
+        // Its gate is no longer open in Pathfinder: it isn't asking any more.
+        hub.setStatus(w.hqId, w.live ? { state: "working", note: "Continuing after the gate", relaying: null } : { state: "idle", relaying: null });
       }
     }
 
@@ -991,13 +1004,25 @@ let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
       const items = hub.snap.actionItems ?? [];
       const id = `gate-${row.key}`;
       open.add(id);
-      const text = this.stateFile(row.key).Gate ?? row.gate;
+      const sf = this.stateFile(row.key);
+      const text = sf.Gate ?? row.gate;
+      const request = this.gateRequest(row.key, text, sf["Gate stage"] ?? null);
       const existing = items.find((i) => i.id === id);
-      if (existing && existing.status === "open" && existing.details.startsWith(text)) continue;
+      if (existing && existing.status === "open" && existing.request?.revision === request.revision) {
+        // The same request: keep its answer and snooze, and keep whose it is current.
+        if (JSON.stringify(existing.request) !== JSON.stringify(request)) {
+          existing.request = request;
+          existing.fromId = request.owner ?? COORDINATOR_ID;
+          hub.emit({ type: "action.updated", item: existing });
+        }
+        continue;
+      }
+      // A new or changed request: never another session's, never an older request's answer.
       const item: ActionItem = {
-        id, fromId: this.ownerFor(row.key) ?? COORDINATOR_ID, taskId: row.key, title: `${row.key} needs your decision`,
-        details: `${text}\n\nPathfinder human gate. "Done" with a note types your answer into the coordinator's session; Pathfinder records and resumes it.`,
+        id, fromId: request.owner ?? COORDINATOR_ID, taskId: row.key, title: `${row.key} needs your decision`,
+        details: text,
         waiting: true, status: "open", note: null, at: new Date().toISOString(), closedAt: null,
+        request, answer: null, snoozedUntil: null,
       };
       hub.snap.actionItems = [item, ...items.filter((i) => i.id !== id)];
       hub.emit({ type: "action.updated", item });
@@ -1005,22 +1030,93 @@ let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
     }
     for (const item of hub.snap.actionItems ?? []) {
       if (item.id.startsWith("gate-") && item.status === "open" && !open.has(item.id)) {
+        // Resolved only when Pathfinder shows it: the engine no longer reports the gate.
+        const key = item.taskId ?? item.id.replace(/^gate-/, "");
+        const now = this.rows.find((r) => r.key === key)?.state ?? "no longer listed";
         item.status = "done";
         item.closedAt = new Date().toISOString();
+        item.note = `Pathfinder: ${key} is now ${now}`;
+        if (item.answer && item.request && item.answer.revision === item.request.revision && item.answer.state === "delivered") {
+          item.answer = { ...item.answer, state: "recorded", at: item.closedAt, detail: `Pathfinder recorded it: ${key} is now ${now}` };
+        }
         hub.emit({ type: "action.updated", item });
       }
     }
     this.applyAttention();
   }
 
-  /** The human answered a gate in the UI: hand the text to the coordinator, verbatim. */
-  async answerGate(itemId: string, note: string) {
+  /**
+   * Who raised a ticket's gate, exactly: the one live session on the ticket, else its latest session if that
+   * session ended at a gate. Anything else can't be established and says why (never a guess).
+   */
+  private gateRequest(key: string, text: string, gateStage: string | null): ActionRequest {
+    const ws = [...this.workers.values()].filter((w) => w.key === key);
+    const live = ws.filter((w) => w.live);
+    const last = ws.at(-1);
+    const revision = createRevision(key, text);
+    const base = { kind: "gate" as const, key, revision };
+    const known = (w: Worker): ActionRequest => ({ ...base, stage: gateStage ?? w.session, owner: w.hqId, session: w.session, diagnostic: null });
+    if (live.length === 1) return known(live[0]);
+    const unknown = (diagnostic: string): ActionRequest => ({ ...base, stage: gateStage, owner: null, session: null, diagnostic });
+    if (live.length > 1) return unknown(`${live.length} sessions are live on ${key}; Tin & Thyme can't tell which one recorded this gate.`);
+    if (last?.ended?.outcome === "gate") return known(last);
+    if (last) return unknown(`The latest session on ${key} (${this.hub.name(last.hqId)}, ${last.session}) ended ${last.ended?.outcome ?? "without a recorded outcome"}, not at this gate.`);
+    return unknown(`No session on ${key} was seen by this kitchen (the gate may predate its start).`);
+  }
+
+  /** The human answered a gate in the UI: hand the text to the coordinator, verbatim, exactly once per request. */
+  async answerGate(itemId: string, note: string, revision?: string) {
     const item = this.hub.snap.actionItems?.find((i) => i.id === itemId);
-    if (!item) return;
+    if (!item || item.status !== "open") {
+      this.hub.activity("agent.answered", COORDINATOR_ID, `That request is already resolved; nothing was sent`);
+      return;
+    }
     const key = item.taskId ?? itemId.replace(/^gate-/, "");
-    const text = note.trim() ? `Human answer for the ${key} gate (from Tin & Thyme): ${note.trim()}` : `Human dismissed the ${key} gate in Tin & Thyme without an answer; leave it open.`;
-    const ok = await this.sessions.typeInto(COORDINATOR_ID, text.replace(/\s+/g, " "));
+    const current = item.request?.revision ?? createRevision(key, item.details);
+    const text = note.trim();
+    const answer = (state: ActionAnswer["state"], detail: string | null, rev = current): ActionAnswer => ({ state, text, revision: rev, at: new Date().toISOString(), detail });
+    const publish = (a: ActionAnswer) => {
+      item.answer = a;
+      this.hub.emit({ type: "action.updated", item: { ...item } });
+    };
+    if (revision && revision !== current) {
+      publish(answer("rejected", "Not sent: this request changed since you read it. Read the current request and answer that.", revision));
+      return;
+    }
+    if (!text) {
+      publish(answer("rejected", "Not sent: write an answer first. Snooze puts a request aside without sending anything."));
+      return;
+    }
+    const prior = item.answer;
+    if (prior && prior.revision === current && (prior.state === "sending" || prior.state === "delivered" || prior.state === "recorded")) {
+      this.hub.activity("agent.answered", COORDINATOR_ID, `Your answer for ${key} was already sent; it wasn't sent again`);
+      return;
+    }
+    if (this.hub.status(COORDINATOR_ID)?.session.state !== "running") {
+      publish(answer("failed", "The coordinator isn't running, so nothing was sent. Start the orchestration, then send it again."));
+      return;
+    }
+    publish(answer("sending", null));
+    const who = item.request?.owner ? `${this.hub.name(item.request.owner)}'s ${item.request.session ?? ""} session`.replace(/\s+session$/, " session") : "an unidentified session";
+    const message = `Human answer for the ${key} gate (from Tin & Thyme, raised by ${who}): ${text}`;
+    const ok = await this.sessions.typeInto(COORDINATOR_ID, message.replace(/\s+/g, " "));
+    publish(ok ? answer("delivered", "Typed into the coordinator's session. Resolved once Pathfinder records it.") : answer("failed", "Couldn't reach the coordinator's terminal; nothing was delivered. Send it again."));
     this.hub.activity("agent.answered", COORDINATOR_ID, ok ? `Your answer for ${key} went to the coordinator` : `Couldn't reach the coordinator's terminal for ${key}`);
     if (!ok) log.warn(`answerGate: coordinator terminal unavailable`);
   }
+
+  /** Snooze a gate: it leaves "Needs you" for a while. Nothing is sent to any agent and nothing is resolved. */
+  snoozeGate(itemId: string, minutes = 60) {
+    const item = this.hub.snap.actionItems?.find((i) => i.id === itemId);
+    if (!item || item.status !== "open") return;
+    item.snoozedUntil = new Date(Date.now() + minutes * 60_000).toISOString();
+    this.hub.emit({ type: "action.updated", item: { ...item } });
+  }
+}
+
+/** A request's revision: its ticket and its exact text. A changed gate is a new request. */
+function createRevision(key: string, text: string): string {
+  let h = 2166136261;
+  for (const ch of `${key}\n${text}`) h = Math.imul(h ^ ch.codePointAt(0)!, 16777619) >>> 0;
+  return `${key}:${h.toString(36)}`;
 }
