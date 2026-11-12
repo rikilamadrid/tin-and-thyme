@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { COLUMN_LABEL } from "../../data/ticketStage";
 import type { BoardStatus, Task, TaskStatus } from "../../data/types";
 import { officeActions, useOffice } from "../../store/office";
 import { ui, useUi } from "../../store/ui";
@@ -6,12 +7,12 @@ import { Dot } from "../kit";
 import { DrawerHeader } from "./Drawer";
 
 const COLUMNS: { id: TaskStatus; label: string; color: string }[] = [
-  { id: "todo", label: "To do", color: "#83769c" },
-  { id: "in-progress", label: "Doing", color: "#29adff" },
-  { id: "in-review", label: "In review", color: "#ffa300" },
-  { id: "reviewed", label: "Ready to deliver", color: "#7fe0a8" },
-  { id: "done", label: "Done / Served", color: "#00e436" },
-  { id: "blocked", label: "Blocked", color: "#ff004d" },
+  { id: "todo", label: COLUMN_LABEL.todo, color: "#83769c" },
+  { id: "in-progress", label: COLUMN_LABEL["in-progress"], color: "#29adff" },
+  { id: "in-review", label: COLUMN_LABEL["in-review"], color: "#ffa300" },
+  { id: "reviewed", label: COLUMN_LABEL.reviewed, color: "#7fe0a8" },
+  { id: "done", label: COLUMN_LABEL.done, color: "#00e436" },
+  { id: "blocked", label: COLUMN_LABEL.blocked, color: "#ff004d" },
 ];
 
 const STATUS_LABEL: Record<BoardStatus, string> = { active: "Active", planned: "Planned", done: "Done" };

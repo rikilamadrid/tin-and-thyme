@@ -73,6 +73,53 @@ export function sessionEnding(
   return { outcome, next: outcome === "handed-off" ? rec.state : null, result: outcome === "gate" ? rec.gate ?? rec.last : rec.last, at };
 }
 
+// ---------------------------------------------------------------- who raised a gate
+
+/** One session on a gated ticket, as the gate-owner decision sees it. Times are epoch ms; null = not known. */
+export interface GateCandidate {
+  id: string;
+  name: string;
+  session: string;
+  live: boolean;
+  /** When the session started (its transcript's first record, else when the kitchen first saw it). */
+  start: number | null;
+  /** When it stopped; null while live (or not known). */
+  end: number | null;
+  /** Its own report, once it ended with one. */
+  report: { verdict: string; text: string } | null;
+  outcome: SessionEnd["outcome"] | null;
+}
+
+/** The same question, ignoring case, emphasis, spacing and closing punctuation (never a partial match). */
+export function sameQuestion(a: string, b: string): boolean {
+  const norm = (s: string) => s.replace(/[*`_]/g, "").replace(/\s+/g, " ").trim().replace(/[\s.?!:;]+$/, "").toLowerCase();
+  return !!norm(a) && norm(a) === norm(b);
+}
+
+/**
+ * Who raised a ticket's gate, credited only on positive evidence:
+ *   1. a session's own report says `GATE: <this question>` (the latest such session); or
+ *   2. Pathfinder recorded the gate (`gateAt`, its state file's `Updated` when the gate appeared) inside exactly
+ *      one session's live window.
+ * Anything else stays unidentified, with a diagnostic saying why: a session is never credited for being the
+ * latest, the only live one, or for having stopped at some earlier gate.
+ */
+export function gateOwner(key: string, gate: string, gateAt: number | null, sessions: GateCandidate[]): { owner: GateCandidate | null; diagnostic: string | null } {
+  const reported = sessions.filter((s) => s.report?.verdict === "GATE" && sameQuestion(s.report.text, gate));
+  if (reported.length) return { owner: reported.reduce((a, b) => ((b.end ?? Infinity) >= (a.end ?? Infinity) ? b : a)), diagnostic: null };
+  if (!sessions.length) return { owner: null, diagnostic: `No session on ${key} was seen by this kitchen (the gate may predate its start).` };
+  const who = (s: GateCandidate) => `${s.name} (${s.session})`;
+  if (gateAt === null) return { owner: null, diagnostic: `No session on ${key} reported this gate, and its state file records no time for it (no Updated line).` };
+  const when = new Date(gateAt).toISOString();
+  // An unknown bound could contain the gate: it counts as a candidate, so it can only make the answer less certain.
+  const inside = sessions.filter((s) => (s.start === null || s.start <= gateAt) && (s.live || s.end === null || gateAt <= s.end));
+  if (inside.length === 1) return { owner: inside[0], diagnostic: null };
+  if (inside.length > 1) return { owner: null, diagnostic: `${inside.length} sessions on ${key} were live when Pathfinder recorded this gate (${when}): ${inside.map(who).join(", ")}; none reported it, so Tin & Thyme can't tell which one raised it.` };
+  const last = sessions.at(-1)!;
+  const how = last.live ? `started after it (still running)` : `ended ${last.outcome ?? "without a recorded outcome"}${last.report?.verdict === "GATE" ? ` at a different gate ("${last.report.text}")` : ""}`;
+  return { owner: null, diagnostic: `No session on ${key} reported this gate or was live when Pathfinder recorded it (${when}). The latest, ${who(last)}, ${how}.` };
+}
+
 // ---------------------------------------------------------------- the board
 
 /** A ticket's board view: the one shared mapping every surface uses (src/data/ticketStage.ts). */

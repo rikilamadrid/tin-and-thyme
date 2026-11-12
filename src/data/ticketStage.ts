@@ -7,7 +7,7 @@
 //   - durable lifecycle: the ticket's own `## Status` (Proposed, Ready, In Progress, Complete, …).
 // Delivery (a PR open, merged) is an input Feature 10 supplies; nothing here builds it.
 
-import type { DeliveryStage, TaskStatus } from "./types";
+import type { DeliveryStage, SessionEnd, TaskStatus } from "./types";
 
 export type TicketStage =
   | "to-do"
@@ -21,6 +21,7 @@ export type TicketStage =
   | "completing"
   | "done"
   | "failed"
+  | "interrupted"
   | "stale";
 
 export interface TicketStageInput {
@@ -36,6 +37,8 @@ export interface TicketStageInput {
   liveSession?: string | null;
   /** Its delivery, from Feature 10's delivery record: a PR is open, or it was merged. */
   delivery?: DeliveryStage | null;
+  /** How the ticket's latest finished session ended, when none is live (an interrupted one is shown as such). */
+  lastEnded?: SessionEnd["outcome"] | null;
 }
 
 export interface TicketView {
@@ -58,6 +61,19 @@ export const STAGE_LABEL = {
   done: "Done / Served",
 } as const;
 
+/**
+ * Board column headings. The review column holds tickets waiting for a reviewer as well as those under review,
+ * so its heading never claims a review is underway; each card's own label says which it is.
+ */
+export const COLUMN_LABEL: Record<TaskStatus, string> = {
+  todo: "To do",
+  "in-progress": "Doing",
+  "in-review": "Waiting / in review",
+  reviewed: STAGE_LABEL.readyToDeliver,
+  done: STAGE_LABEL.done,
+  blocked: "Blocked",
+};
+
 const PENDING = new Set(["adversary", "review", "repair"]);
 const DOING: Record<string, string> = { implementation: "Developing", resume: "Developing (resume)", repair: "Repairing" };
 const complete = (lifecycle: string | null | undefined) => /^complete$/i.test((lifecycle ?? "").trim());
@@ -70,6 +86,10 @@ export function ticketView(i: TicketStageInput): TicketView {
   const live = i.liveSession ?? null;
   const gate = real(i.gate);
   const v = (stage: TicketStage, label: string, column: TaskStatus, next: string | null, blocker: string | null = null): TicketView => ({ stage, label, column, next, blocker });
+
+  // Claimed, no live session, and the last one stopped without recording a handoff.
+  if (!live && i.lastEnded === "interrupted" && (i.state === "working" || i.state === "stale"))
+    return v("interrupted", "Interrupted", i.state === "stale" ? "blocked" : "in-progress", "The coordinator resumes it, or a human decides", "Its last session stopped without recording a handoff");
 
   switch (state) {
     case "ready":

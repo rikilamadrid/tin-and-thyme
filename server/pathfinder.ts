@@ -33,8 +33,8 @@ import type { Sessions } from "./sessions";
 import { newAgent } from "./store";
 import { log } from "./lib/log";
 import { Attribution, readReport, type Evidence, type Identity } from "./attribution";
-import { coordinatorAttention, sessionEnding, ticketView } from "./workflowState";
-import { subagentMeta, subagentPrompt, subagentReport } from "./transcripts";
+import { coordinatorAttention, gateOwner, sessionEnding, ticketView, type GateCandidate } from "./workflowState";
+import { mtime, subagentMeta, subagentPrompt, subagentReport } from "./transcripts";
 import type { ActionAnswer, ActionRequest, DeliveryStage } from "../src/data/types";
 import { requestShelf } from "../src/data/requests";
 
@@ -82,6 +82,8 @@ interface Worker {
   ended: SessionEnd | null;
   /** When a finished session was resumed under the same subagent id (its earlier `finished` predates this). */
   resumedAt?: number;
+  /** When the kitchen first saw this session (epoch ms): its start when its transcript has no time yet. */
+  seenAt: number;
 }
 
 /** A saved session outcome, with the ticket and stage it belongs to (absent in files from before they were kept). */
@@ -473,7 +475,7 @@ let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
     if (!saved) this.crewBook({ ...this.crewBook(), [agentId]: c });
     const transcript = this.subagentTranscript(agentId);
     const ended = finished ? this.restoredEnding(agentId, b.key, b.session, transcript) : null;
-    const w: Worker = { agentId, hqId, key: b.key, session: b.session, role, worktree: b.worktree, live: !finished, tools: 0, character: c.id, transcript, ended };
+    const w: Worker = { agentId, hqId, key: b.key, session: b.session, role, worktree: b.worktree, live: !finished, tools: 0, character: c.id, transcript, ended, seenAt: Date.now() };
     this.workers.set(agentId, w);
     const cfg = newAgent(hqId, c.name, role, ROLE_COLOR[role] ?? "#c2c3c7", false);
     cfg.mode = "local";
@@ -936,7 +938,8 @@ let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
       // One shared mapping decides label, column, next step and blocker: `done` is never "in review".
       const recordedState = row.recordedState ?? (sf.State ? sf.State.split(/\s/)[0] : null);
       const liveSession = [...this.workers.values()].filter((w) => w.live && w.key === row.key).at(-1)?.session ?? null;
-      const view = ticketView({ state: row.state, lifecycle: row.lifecycle, recorded: recordedState, gate: gate ?? row.gate, liveSession, delivery: this.deliveryOf(row.key) });
+      const lastEnded = [...this.workers.values()].filter((w) => !w.live && w.key === row.key && w.ended).sort((x, y) => Date.parse(x.ended!.at) - Date.parse(y.ended!.at)).at(-1)?.ended?.outcome ?? null;
+      const view = ticketView({ state: row.state, lifecycle: row.lifecycle, recorded: recordedState, gate: gate ?? row.gate, liveSession, lastEnded, delivery: this.deliveryOf(row.key) });
       const status: TaskStatus = view.column;
       return {
         id: row.key,
@@ -1045,23 +1048,41 @@ let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
     this.applyAttention();
   }
 
+  /** When Pathfinder recorded each open gate (its state file's `Updated` when the request first appeared), by revision. */
+  private gateSeen = new Map<string, number>();
+
   /**
-   * Who raised a ticket's gate, exactly: the one live session on the ticket, else its latest session if that
-   * session ended at a gate. Anything else can't be established and says why (never a guess).
+   * Who raised a ticket's gate: only a session whose own report raised this exact question, or the one session
+   * live when Pathfinder recorded it (gateOwner). Anything else is unidentified and says why (never a guess).
    */
   private gateRequest(key: string, text: string, gateStage: string | null): ActionRequest {
-    const ws = [...this.workers.values()].filter((w) => w.key === key);
-    const live = ws.filter((w) => w.live);
-    const last = ws.at(-1);
     const revision = createRevision(key, text);
     const base = { kind: "gate" as const, key, revision };
-    const known = (w: Worker): ActionRequest => ({ ...base, stage: gateStage ?? w.session, owner: w.hqId, session: w.session, diagnostic: null });
-    if (live.length === 1) return known(live[0]);
-    const unknown = (diagnostic: string): ActionRequest => ({ ...base, stage: gateStage, owner: null, session: null, diagnostic });
-    if (live.length > 1) return unknown(`${live.length} sessions are live on ${key}; Tin & Thyme can't tell which one recorded this gate.`);
-    if (last?.ended?.outcome === "gate") return known(last);
-    if (last) return unknown(`The latest session on ${key} (${this.hub.name(last.hqId)}, ${last.session}) ended ${last.ended?.outcome ?? "without a recorded outcome"}, not at this gate.`);
-    return unknown(`No session on ${key} was seen by this kitchen (the gate may predate its start).`);
+    // The time the gate was recorded: kept from its first sighting, so a later session that rewrites `Updated`
+    // (a resume loading the ticket) never moves the gate into its own window.
+    const updated = Date.parse(this.stateFile(key).Updated ?? "");
+    if (!this.gateSeen.has(revision) && Number.isFinite(updated)) this.gateSeen.set(revision, updated);
+    const ws = [...this.workers.values()].filter((w) => w.key === key);
+    const candidates = ws.map((w): GateCandidate & { w: Worker } => ({ w, ...this.gateCandidate(w) }));
+    const { owner, diagnostic } = gateOwner(key, text, this.gateSeen.get(revision) ?? null, candidates);
+    if (!owner) return { ...base, stage: gateStage, owner: null, session: null, diagnostic };
+    const w = (owner as GateCandidate & { w: Worker }).w;
+    return { ...base, stage: gateStage ?? w.session, owner: w.hqId, session: w.session, diagnostic: null };
+  }
+
+  /** A session as the gate-owner decision sees it: its live window and its own report. */
+  private gateCandidate(w: Worker): GateCandidate {
+    const started = Date.parse(this.subagentStarts.get(w.agentId) ?? "");
+    const start = Number.isFinite(started) ? Math.min(started, w.seenAt) : w.seenAt;
+    let end: number | null = null;
+    if (!w.live && w.ended) {
+      const at = Date.parse(w.ended.at);
+      // Its transcript's last write bounds it too (an outcome restored after a restart is stamped late).
+      const wrote = w.transcript ? mtime(w.transcript) : 0;
+      end = Number.isFinite(at) ? (wrote ? Math.min(at, wrote) : at) : wrote || null;
+    }
+    const report = w.ended?.verdict ? { verdict: w.ended.verdict, text: w.ended.result ?? "" } : null;
+    return { id: w.hqId, name: this.hub.name(w.hqId), session: w.session, live: w.live, start, end, report, outcome: w.ended?.outcome ?? null };
   }
 
   /** The human answered a gate in the UI: hand the text to the coordinator, verbatim, exactly once per request. */

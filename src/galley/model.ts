@@ -15,6 +15,7 @@ import { assignCharacter, CHARACTERS, characterForRole, type CharacterId } from 
 import type { AgentConfig, AgentStatus, OfficeSnapshot, SessionEnd, SessionTelemetry, Task, TaskStatus, WorkflowHelper } from "../data/types";
 import type { IconKind } from "./robots";
 import { selectAttention } from "../store/office";
+import { ticketView } from "../data/ticketStage";
 
 /** `wait`: the coordinator's turn ended while workers it dispatched run (not asking you). */
 export type CrewState = "needs" | "work" | "review" | "wait" | "idle" | "off";
@@ -121,8 +122,6 @@ export interface GalleyModel {
 
 export const POD_COUNT = 5;
 
-/** Who a pending stage waits for, in the card's words. */
-const WAITS_FOR: Record<string, string> = { working: "developer", implementation: "developer", adversary: "adversary", review: "tester", repair: "developer (repair)" };
 /** What a live session is doing, by Pathfinder session kind. */
 const DOING: Record<string, string> = { implementation: "Developing", resume: "Developing (resume)", adversary: "Adversary", review: "Testing", repair: "Repairing" };
 export const stageWords = (session: string | null) => (session ? DOING[session] ?? session[0].toUpperCase() + session.slice(1) : "Working");
@@ -308,26 +307,19 @@ export function buildGalley(snap: OfficeSnapshot, podOf?: Map<string, number>): 
     } else if (s === "human-gate") {
       phase = "needs";
       label = "Needs you";
-    } else if (s === "failed") {
-      phase = "failed";
-      label = "Failed · a human decides";
-    } else if (last?.ended?.outcome === "interrupted" && (s === "stale" || s === "working")) {
-      phase = "interrupted";
-      label = "Interrupted";
-      stage = last.session;
-    } else if (s === "stale" || PENDING.has(s ?? "")) {
-      const pending = s === "stale" ? rec : s;
-      if (pending && PENDING.has(pending)) {
+    } else if (s === "failed" || s === "stale" || PENDING.has(s ?? "") || (s === "working" && last?.ended?.outcome === "interrupted")) {
+      // No live session: the shared mapping's words, the same as the Boards card and the worker drawer.
+      const shared = ticketView({ state: s ?? "", recorded: rec, liveSession: null, lastEnded: last?.ended?.outcome ?? null });
+      label = shared.label;
+      if (shared.stage === "failed") phase = "failed";
+      else if (shared.stage === "interrupted") {
+        phase = "interrupted";
+        stage = last?.session ?? null;
+      } else if (shared.stage === "stale") phase = "stale";
+      else {
+        // Waiting for the session its pending stage needs (review, adversary, repair).
         phase = "waiting";
-        stage = pending;
-        label = `Waiting for ${WAITS_FOR[pending]}`;
-      } else if (!pending) {
-        phase = "waiting";
-        stage = "implementation";
-        label = "Waiting for developer";
-      } else {
-        phase = "stale";
-        label = "Claimed · no live session";
+        stage = s === "stale" ? rec : s;
       }
     } else if (s === "done" || view?.stage === "completing") {
       // Ready to deliver, awaiting merge, or integrated with completion pending: the shared mapping's words.

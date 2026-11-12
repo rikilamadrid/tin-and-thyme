@@ -134,18 +134,21 @@ export class Attribution {
 export type Verdict = "DONE" | "PASS" | "FINDINGS" | "GATE" | "FAILED";
 
 /**
- * The verdict a Pathfinder session reported (`DONE: …`, `GATE: …`, `FAILED: …`, `VERDICT: PASS`,
- * `**Result: FINDINGS.**`), and its headline. Null when the report states none.
+ * The verdict a Pathfinder session reported, and its headline. Null when the report states none.
+ *
+ * An explicit `VERDICT: …` line wins (a review may quote the developer's `DONE:` or say "GATE: none raised"
+ * before it). Otherwise the LAST report line (`DONE: …`, `GATE: …`, `FAILED: …`) is the session's own
+ * ending; a `**Result: FINDINGS.**` headline counts only when there is neither.
  */
 export function readReport(report: string | null | undefined): { verdict: Verdict; text: string } | null {
   if (!report) return null;
   const strip = (s: string) => s.replace(/\*\*/g, "").replace(/\s+/g, " ").trim();
-  const lead = /^[\s>*_]*(DONE|PASS|FINDINGS|GATE|FAILED)\s*:\s*(.*)$/m.exec(report);
-  if (lead) return { verdict: lead[1] as Verdict, text: strip(lead[2]) || strip(lead[0]) };
+  const firstLine = () => report.split("\n").map(strip).find((l) => l && !/^#/.test(l)) ?? "";
   const verdict = /^[\s>#*_-]*VERDICT\s*:\s*\**\s*(DONE|PASS|FINDINGS|GATE|FAILED)\b/im.exec(report);
+  if (verdict) return { verdict: verdict[1].toUpperCase() as Verdict, text: firstLine() };
+  const lead = [...report.matchAll(/^[\s>*_]*(DONE|PASS|FINDINGS|GATE|FAILED)\s*:\s*(.*)$/gm)].at(-1);
+  if (lead) return { verdict: lead[1] as Verdict, text: strip(lead[2]) || strip(lead[0]) };
   const result = /\bResult\s*:\s*\**\s*(DONE|PASS|FINDINGS|GATE|FAILED)\b/.exec(report);
-  const hit = verdict ?? result;
-  if (!hit) return null;
-  const firstLine = report.split("\n").map(strip).find((l) => l && !/^#/.test(l)) ?? "";
-  return { verdict: hit[1].toUpperCase() as Verdict, text: firstLine };
+  if (!result) return null;
+  return { verdict: result[1].toUpperCase() as Verdict, text: firstLine() };
 }

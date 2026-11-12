@@ -13,8 +13,8 @@ const tmp = mkdtempSync(join(tmpdir(), "tt-attention-"));
 Object.assign(process.env, { HOME: tmp, USERPROFILE: tmp });
 
 const { Attribution, readReport } = await import("../server/attribution");
-const { coordinatorAttention, sessionEnding } = await import("../server/workflowState");
-const { ticketView, STAGE_LABEL } = await import("../src/data/ticketStage");
+const { coordinatorAttention, gateOwner, sameQuestion, sessionEnding } = await import("../server/workflowState");
+const { COLUMN_LABEL, ticketView, STAGE_LABEL } = await import("../src/data/ticketStage");
 // The galley model (the sidebar and the plan wall) lives in the UI bundle; its store reads the page URL.
 Object.assign(globalThis, { location: { href: "http://127.0.0.1/" } });
 const { buildGalley } = await import("../src/galley/model");
@@ -174,6 +174,10 @@ const helpers = (w: World) => w.hub.snap.workflow?.helpers ?? [];
   eq("unit: report VERDICT: PASS", readReport("## 01.1 review, round 2: PASS, with no findings\n\nbody\n\nVERDICT: PASS")?.verdict, "PASS");
   eq("unit: report **Result: FINDINGS.**", readReport("# 09.1 review\n\n**Result: FINDINGS.** I found one Medium gap.")?.verdict, "FINDINGS");
   eq("unit: no verdict, no report", readReport("I looked around and changed nothing."), null);
+  // An explicit VERDICT line wins over a quoted or negated report line; otherwise the last report line does.
+  eq("unit: VERDICT wins over a leading GATE line", readReport("GATE: none raised during this review.\n\nAll checks green.\n\nVERDICT: PASS")?.verdict, "PASS");
+  eq("unit: VERDICT wins over the developer's quoted DONE line", readReport("DONE: 61cd56e8 was the developer's line.\n\nOne Medium finding.\n\nVERDICT: FINDINGS")?.verdict, "FINDINGS");
+  eq("unit: without VERDICT, the last report line is the session's own", readReport("DONE: 61cd56e8 was the previous handoff.\n\nGATE: Which account should the live check use?"), { verdict: "GATE", text: "Which account should the live check use?" });
 }
 {
   const ended = sessionEnding("review", "**Result: PASS.** One Low finding deferred.\n\nVERDICT: PASS", { state: "review", last: "previous developer's DONE line", gate: null });
@@ -185,6 +189,15 @@ const helpers = (w: World) => w.hub.snap.workflow?.helpers ?? [];
   eq("unit: GATE report", sessionEnding("implementation", "GATE: sign in", { state: "working", last: null, gate: null }).outcome, "gate");
 }
 {
+  // Who raised a gate: positive evidence only.
+  const cand = (id: string, o: Partial<Parameters<typeof gateOwner>[3][number]> = {}) => ({ id, name: id, session: "implementation", live: false, start: 1000, end: 2000, report: null, outcome: null, ...o });
+  eq("unit: same question ignores case, emphasis and closing punctuation", sameQuestion("**Which account** should we use?", "which account should we use"), true);
+  eq("unit: a different question never matches, even as a prefix", sameQuestion("Which account should we use?", "Which account should we use (2)?"), false);
+  eq("unit: a session whose own report raised this gate owns it", gateOwner("02.1", "Q?", null, [cand("s1", { report: { verdict: "GATE", text: "Q" }, outcome: "gate" })]).owner?.id, "s1");
+  eq("unit: the one session live when the gate was recorded owns it", gateOwner("02.1", "Q?", 1500, [cand("s1"), cand("s2", { start: 2500, live: true, end: null })]).owner?.id, "s1");
+  eq("unit: two sessions live when the gate was recorded: unidentified", gateOwner("02.1", "Q?", 1500, [cand("s1"), cand("s2", { start: 1200, live: true, end: null })]).owner, null);
+  eq("unit: an earlier gate session never owns a later gate", gateOwner("02.1", "Q2?", 3000, [cand("s1", { report: { verdict: "GATE", text: "Q1" }, outcome: "gate" })]).owner, null);
+  eq("unit: no time and no report: unidentified", gateOwner("02.1", "Q?", null, [cand("s1", { live: true, end: null })]).owner, null);
   const base = { turnEnded: true, liveWorkers: 0, openGates: [] as string[], asking: null };
   eq("unit: turn ended with live workers → waiting", coordinatorAttention({ ...base, liveWorkers: 2 })?.state, "waiting");
   eq("unit: open gate → needs you even while workers run", coordinatorAttention({ ...base, liveWorkers: 2, openGates: ["02.1"] })?.state, "needs-input");
@@ -205,6 +218,15 @@ const helpers = (w: World) => w.hub.snap.workflow?.helpers ?? [];
   for (const st of ["ready", "blocked", "working", "adversary", "review", "repair", "human-gate", "done", "stale", "failed", "integrated"])
     for (const live of [null, "review"])
       check(`unit: only an underway review is In review (${st}, ${live ?? "no session"})`, (tv(st, { liveSession: live }).stage === "in-review") === ((st === "review" || st === "adversary") && !!live));
+  // No board heading claims a review is underway for a ticket that is only waiting for one.
+  for (const st of ["ready", "blocked", "working", "adversary", "review", "repair", "human-gate", "done", "stale", "failed", "integrated"])
+    for (const live of [null, "review"]) {
+      const view = tv(st, { liveSession: live });
+      check(`unit: a ticket sits under "In review" only while under review (${st}, ${live ?? "no session"})`, COLUMN_LABEL[view.column] !== STAGE_LABEL.inReview || view.stage === "in-review");
+    }
+  eq("unit: the review column's heading covers waiting and underway", COLUMN_LABEL["in-review"], "Waiting / in review");
+  eq("unit: an interrupted claim reads Interrupted", [ticketView({ state: "working", lastEnded: "interrupted" }).stage, ticketView({ state: "stale", recorded: "review", lastEnded: "interrupted" }).label], ["interrupted", "Interrupted"]);
+  eq("unit: a live session is never Interrupted", ticketView({ state: "working", liveSession: "resume", lastEnded: "interrupted" }).stage, "in-progress");
 }
 
 // ================================================================ the run: attribution through hooks
@@ -356,6 +378,28 @@ w.run.deliveryOf = () => null;
   eq("surfaces: the ready ticket's card names its next step", g.tickets.find((x) => x.key === "05.1")?.next, "A human delivers it (pull request or integration)");
 }
 
+// The sidebar's waiting, failed, interrupted and stale cards read the same words as the Boards card.
+{
+  const wl = boot(makeRepo("repo-labels"), "tt-labels");
+  setRows(wl, [row("11.1", "review"), row("11.2", "adversary"), row("11.3", "stale", { recordedState: "repair" }), row("11.4", "failed"), row("11.5", "working"), row("11.6", "stale"), row("11.7", "stale", { recordedState: "review" })]);
+  // 11.5's developer stopped without a report while its own stage was still recorded: interrupted.
+  stateFile(wl, "11.5", { State: "working" });
+  preAgent(wl, "tu_115", brief("11.5"), "11.5 developer");
+  postAgent(wl, "tu_115", brief("11.5"), "a115");
+  subStart(wl, "a115");
+  writeSub(wl, "a115", { prompt: brief("11.5"), toolUseId: "tu_115" });
+  subStop(wl, "a115");
+  await refresh(wl);
+  const g = buildGalley(wl.hub.snap);
+  const pair = (key: string) => [g.tickets.find((x) => x.key === key)?.label ?? null, wl.hub.snap.tasks.find((x) => x.id === key)?.pf?.view?.label ?? null];
+  for (const key of ["11.1", "11.2", "11.3", "11.4", "11.5", "11.6", "11.7"]) {
+    const [sidebar, board] = pair(key);
+    check(`labels: ${key}'s sidebar card and Boards card say the same (${board})`, sidebar !== null && sidebar === board, { sidebar, board });
+  }
+  eq("labels: the shared words", ["11.1", "11.2", "11.3", "11.4", "11.5", "11.6", "11.7"].map((k) => pair(k)[1]), ["Waiting for review", "Waiting for adversary review", "Waiting for repair", "Failed", "Interrupted", "Claimed · no live session", "Waiting for review"]);
+  eq("labels: the sidebar's phases", ["11.1", "11.4", "11.5", "11.6"].map((k) => g.tickets.find((x) => x.key === k)?.phase), ["waiting", "failed", "interrupted", "stale"]);
+}
+
 // 6. Restart and reconnect: a new run rebuilds every identity from the transcripts alone.
 {
   // A saved outcome from before tickets were kept with it, wrong for this session: its own report wins.
@@ -395,6 +439,7 @@ w.run.deliveryOf = () => null;
 {
   const wa = boot(makeRepo("repo-actions"), "tt-actions");
   const gateItem = (key: string) => (wa.hub.snap.actionItems ?? []).find((i) => i.id === `gate-${key}`)!;
+  const at = (ms = 0) => new Date(Date.now() + ms).toISOString();
   const counted = () => {
     const n = needsYou(wa.hub.snap);
     return { items: n.items.map((i) => i.id).sort(), asking: n.asking.map((a) => a.agentId) };
@@ -410,8 +455,9 @@ w.run.deliveryOf = () => null;
   subStart(wa, "ah1");
   writeSub(wa, "ah1", { prompt: brief("03.1", "review", "tester"), report: "VERDICT: PASS" });
   subStop(wa, "ah1");
-  stateFile(wa, "02.1", { State: "human-gate", Gate: "Which account should the live check use?", "Gate stage": "implementation" });
-  stateFile(wa, "03.1", { State: "human-gate", Gate: "Approve the copy change?" });
+  // 02.1's gate is recorded while ag1 is the one session live on it; 03.1's after its only session ended.
+  stateFile(wa, "02.1", { State: "human-gate", Gate: "Which account should the live check use?", "Gate stage": "implementation", Updated: at() });
+  stateFile(wa, "03.1", { State: "human-gate", Gate: "Approve the copy change?", Updated: at(5_000) });
   setRows(wa, [row("02.1", "human-gate", { gate: "Which account should the live check use?" }), row("03.1", "human-gate", { gate: "Approve the copy change?" })]);
   coordinatorTurn(wa, true);
   stopTurn(wa);
@@ -421,7 +467,7 @@ w.run.deliveryOf = () => null;
   eq("pending decision: the question is Pathfinder's gate, verbatim", g1.details, "Which account should the live check use?");
   const g3 = gateItem("03.1");
   eq("a historical session never inherits a later gate", [g3.request?.owner, g3.fromId], [null, COORDINATOR_ID]);
-  check("…and the request says it can't identify the session, and why", /ended handed-off, not at this gate/.test(g3.request?.diagnostic ?? ""), g3.request?.diagnostic);
+  check("…and the request says it can't identify the session, and why", /reported this gate or was live when Pathfinder recorded it.*ended handed-off/.test(g3.request?.diagnostic ?? ""), g3.request?.diagnostic);
   eq("both identifiable requests count toward Needs you, nothing else does", counted(), { items: ["gate-02.1", "gate-03.1"], asking: [] });
   eq("the coordinator relays the open gates (it needs you)", [coordinator(wa).state, coordinator(wa).relaying], ["needs-input", ["02.1", "03.1"]]);
 
@@ -482,13 +528,19 @@ w.run.deliveryOf = () => null;
   eq("answered gate: Pathfinder recorded it, so it's resolved", [gateItem("02.1").status, gateItem("02.1").answer?.state], ["done", "recorded"]);
   check("answered gate: it says what Pathfinder recorded", /02\.1 is now working/.test(gateItem("02.1").answer?.detail ?? ""), gateItem("02.1").answer);
 
-  // A finished worker that stopped at its gate still owns it; the coordinator's ended turn with live workers waits.
-  writeSub(wa, "ag1", { prompt: brief("02.1"), report: "GATE: Which account should the live check use?" });
-  stateFile(wa, "02.1", { State: "human-gate", Gate: "Which account should the live check use (2)?", "Gate stage": "implementation" });
+  // A finished worker whose own report raised the gate still owns it; the coordinator's ended turn with live workers waits.
+  writeSub(wa, "ag1", { prompt: brief("02.1"), report: "GATE: Which account should the live check use (2)?" });
+  stateFile(wa, "02.1", { State: "human-gate", Gate: "Which account should the live check use (2)?", "Gate stage": "implementation", Updated: at() });
   subStop(wa, "ag1");
   setRows(wa, [row("02.1", "human-gate", { gate: "Which account should the live check use (2)?" }), row("03.1", "integrated", { lifecycle: "Complete" })]);
   await refresh(wa);
-  eq("a finished worker's own gate keeps its identity", gateItem("02.1").request?.owner, workers(wa).get("ag1")?.hqId);
+  eq("matching report: a finished worker's own gate keeps its identity", gateItem("02.1").request?.owner, workers(wa).get("ag1")?.hqId);
+  // A new gate recorded later, with no new session: never credited to the session that stopped at the old one.
+  stateFile(wa, "02.1", { State: "human-gate", Gate: "Which branch should the fix go on?", "Gate stage": "implementation", Updated: at(5_000) });
+  setRows(wa, [row("02.1", "human-gate", { gate: "Which branch should the fix go on?" }), row("03.1", "integrated", { lifecycle: "Complete" })]);
+  await refresh(wa);
+  eq("a later gate with no new session is not credited to the old gate session", [gateItem("02.1").request?.owner, gateItem("02.1").fromId], [null, COORDINATOR_ID]);
+  check("…it is unidentified, and the diagnostic names the different gate", /ended gate at a different gate/.test(gateItem("02.1").request?.diagnostic ?? ""), gateItem("02.1").request?.diagnostic);
   // Answer it in the terminal instead: the gate closes; nothing remains in Needs you.
   stateFile(wa, "02.1", { State: "working" });
   setRows(wa, [row("02.1", "working"), row("03.1", "integrated", { lifecycle: "Complete" })]);
@@ -499,6 +551,32 @@ w.run.deliveryOf = () => null;
   eq("ended coordinator turn with a live worker: waiting, not Needs you", [coordinator(wa).state, coordinator(wa).relaying ?? null], ["waiting", null]);
   eq("no false Needs you remains", counted(), { items: [], asking: [] });
   eq("closed gates read as resolved in Pathfinder", (wa.hub.snap.actionItems ?? []).filter((i) => i.status !== "open").map((i) => i.note), ["Pathfinder: 02.1 is now working", "Pathfinder: 03.1 is now integrated"]);
+}
+
+// ================================================================ a resume dispatched while a gate is open
+
+{
+  const wr = boot(makeRepo("repo-resume"), "tt-resume");
+  const gateItem = (key: string) => (wr.hub.snap.actionItems ?? []).find((i) => i.id === `gate-${key}`)!;
+  const q = "Approve the second account for the live check?";
+  // The gate was recorded before this kitchen saw any session on the ticket.
+  stateFile(wr, "02.1", { State: "human-gate", Gate: q, Updated: new Date(Date.now() - 60_000).toISOString() });
+  setRows(wr, [row("02.1", "human-gate", { gate: q })]);
+  preAgent(wr, "tu_r1", brief("02.1", "resume"), "02.1 resume");
+  postAgent(wr, "tu_r1", brief("02.1", "resume"), "ar1");
+  subStart(wr, "ar1");
+  await refresh(wr);
+  eq("resume dispatched while a gate is open: not its owner", [gateItem("02.1").request?.owner, gateItem("02.1").request?.session], [null, null]);
+  check("…the diagnostic says it started after the gate", /started after it \(still running\)/.test(gateItem("02.1").request?.diagnostic ?? ""), gateItem("02.1").request?.diagnostic);
+  // The resume loads the ticket and rewrites Updated while the same gate stays open: still not its gate.
+  stateFile(wr, "02.1", { State: "human-gate", Gate: q, Updated: new Date().toISOString() });
+  await refresh(wr);
+  eq("a rewritten Updated doesn't move the gate into the resume's window", gateItem("02.1").request?.owner, null);
+  // Its own report raises that gate: now it is the owner.
+  writeSub(wr, "ar1", { prompt: brief("02.1", "resume"), toolUseId: "tu_r1", report: `GATE: ${q}` });
+  subStop(wr, "ar1");
+  await refresh(wr);
+  eq("…unless its own report raised that gate", [gateItem("02.1").request?.owner, gateItem("02.1").request?.session], [workers(wr).get("ar1")?.hqId, "resume"]);
 }
 
 console.log(`\n${passes} passed, ${failures} failed`);

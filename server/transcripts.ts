@@ -126,7 +126,7 @@ export function firstPrompt(file: string): string {
   return "";
 }
 
-function mtime(file: string): number {
+export function mtime(file: string): number {
   try {
     return statSync(file).mtimeMs;
   } catch {
