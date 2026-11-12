@@ -76,8 +76,25 @@ The isolation was checked against a throwaway repository and a disposable build 
 of the ticket commit in a scratch folder, built with `pnpm build:preview`), never against
 the live kitchen. A read-only snapshot of the live kitchen's record hash, lock, port
 listener, pid, tmux session list and the hashes of `~/.controlroom/<key>/` and
-`~/.jsmhq/<key>/` was taken before and after the preview ran; the comparison is in the
-ticket's review evidence. `npx tsx scripts/preview-test.ts` checks the refusals (no
+`~/.jsmhq/<key>/` was taken before and after the preview ran.
+
+First run, 2026-11-12, build `4961670d3ee95a63a2453f3479156b1cde26dd21` on port 7520:
+
+- the live kitchen's snapshot before and after the preview run was byte-identical
+  (record hash, no lock, the same pid listening on its port, the same tmux sessions with
+  the same creation times, and every file hash in both state folders);
+- the preview had no child processes, no open file under `~/.controlroom`, `~/.jsmhq` or a
+  tmux socket, and listened only on 127.0.0.1:7520;
+- run again with an empty `HOME`, it left that `HOME` empty;
+- `/api/health` and the WebSocket snapshot reported the commit, tree and build time, the
+  UI showed the banner, the roster was empty, and `startAgent`, `stopAgent`,
+  `sendMessage` and `resolveActionItem` were refused as unknown commands;
+- it refused a missing or wrong `--reviewed`, a missing port, ports 7420 and 7455, an
+  untracked file in the build checkout, running from `server/main.ts` instead of the
+  stamped bundle, and (`pnpm build:preview`) building in a repository a kitchen record
+  names.
+
+`npx tsx scripts/preview-test.ts` checks the refusals (no
 identity, dirty or untracked files, moved HEAD, changed tree, rebuilt files, missing or
 wrong reviewed SHA, and every port refusal) against a throwaway repository and a fake
 home.
