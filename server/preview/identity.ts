@@ -5,11 +5,16 @@
 // of the built files. `scripts/preview-build.ts` writes it after building a clean
 // checkout; the preview server checks it again before it serves anything, and refuses
 // a dirty checkout, a moved HEAD, rebuilt files or an unreviewed commit.
+//
+// The stamp detects drift (a build that is not the reviewed one: other files, another commit,
+// a dirty tree), not tampering: a process running as the same user can rewrite the build and
+// its identity file together.
 
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
+import { PREVIEW_GIT_ENV } from "../delivery/preview";
 
 export const IDENTITY_SCHEMA = "tin-and-thyme.preview-build/1";
 export const IDENTITY_FILE = join("dist-server", "preview-identity.json");
@@ -35,8 +40,9 @@ export interface GitFacts {
 
 const SHA = /^[0-9a-f]{40}$/;
 
+/** Read-only git: PREVIEW_GIT_ENV, so `git status` never refreshes the index and nothing prompts. */
 function git(root: string, args: string[]): string {
-  return execFileSync("git", args, { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  return execFileSync("git", args, { cwd: root, encoding: "utf8", env: { ...process.env, ...PREVIEW_GIT_ENV }, stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
 
 /** HEAD, its tree and the working tree's changes. Throws a readable error outside a Git checkout. */
