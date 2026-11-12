@@ -3,11 +3,12 @@
 //   npx tsx scripts/crew-contract-test.ts
 
 import { CHARACTERS, CREW_CHARACTERS, CREW_VARIANTS, type CharacterId } from "../src/data/crew";
+import { agentPalette } from "../src/theme/tokens";
 import {
-  allocateCharacter, canTransition, compareSessionAge, CREW_STATE_BADGE, CHARACTER_FAMILY, CREW_STATES, CREW_TRANSITIONS, crewContractProblems, crewNameProblem, crewTransitionKind, deriveCrewState,
+  allocateCharacter, beginRestore, canTransition, crewColor, crewColorProblem, crewFloorChanges, customizeCharacter, FAMILY_COLOR, retireCharacter, compareSessionAge, CREW_STATE_BADGE, CHARACTER_FAMILY, CREW_STATES, CREW_TRANSITIONS, crewContractProblems, crewNameProblem, crewTransitionKind, deriveCrewState,
   emptyCrewBook, endSession, FAMILY_POOLS, familyFor, FINISHED_LINGER_MS, MAX_CREW_NAME, migrateLegacy, PARALLEL_FAMILIES, reconcileAfterRestore,
   RESERVED_ACCENTS, restoreSession, ROLE_FAMILIES, spriteBase, startSession,
-  type CrewBook, type CrewCharacterId, type CrewSession, type LegacyCrewJson, type LegacySessionsJson, type RoleFamily,
+  type CrewBook, type CrewCharacterId, type CrewCharacterView, type CrewState, type CrewSession, type LegacyCrewJson, type LegacySessionsJson, type RoleFamily,
 } from "../src/data/crewContract";
 
 function same(label: string, actual: unknown, expected: unknown) {
@@ -248,7 +249,7 @@ const tests: [string, () => void][] = [
     same("live -> ended, outcome unknown", [live.phase, live.end, live.endedAt], ["ended", null, iso(NOW + 5)]);
     same("dash freed", b.characters.dash?.sessionId, null);
   }],
-  ["reconcile: unobserved crew-only sessions end; shared character tiebreak by seq, then startedAt (rule 7)", () => {
+  ["reconcile: unobserved crew-only sessions end; shared character tiebreak: no startedAt first, then startedAt, then seq (rule 7)", () => {
     const crew = { ...LIVE_CREW, b1x: { id: "pepper", job: "Sous Chef", name: "Pepper" }, b2x: { id: "pepper", job: "Sous Chef", name: "Pepper 2" } } as LegacyCrewJson;
     const b = migrateLegacy(crew, LIVE_SESSIONS, null, OPTS);
     same("both live, oldest holds", [b.sessions.b1x.phase, b.sessions.b2x.phase, b.characters.pepper?.sessionId], ["live", "live", "b1x"]);
@@ -327,7 +328,210 @@ const tests: [string, () => void][] = [
     const b2 = migrateLegacy(crew, { q1: end(NOW - 5000, "gate") }, b, { ...OPT, now: iso(NOW + 2000) });
     same("ending filled, endedAt kept", [b2.sessions.q1.end?.outcome, b2.sessions.q1.end?.at, b2.sessions.q1.endedAt], ["gate", iso(NOW - 5000), iso(NOW + 1000)]);
   }],
+  ["restart order: every permutation of ended/live/new restore order gives the same allocation (M1)", () => {
+    for (const [key, perms] of [["8 observations", permutations(RESTART_OBS.length)]] as const) {
+      let first: string | null = null;
+      for (const order of perms) {
+        const b = restart(order.map((i) => RESTART_OBS[i]));
+        const got = JSON.stringify(allocationOf(b));
+        if (first === null) first = got;
+        else if (got !== first) throw new Error(`${key}: order ${order.join(",")} gave ${got}, first gave ${first}`);
+        same("uniqueness", liveSharing(b), []);
+        same("no fresh session detached while its family has a free character", detachedFresh(b, ["n1", "n2", "n3", "t3"]), []);
+      }
+      same(`${key}: expected allocation`, JSON.parse(first!), RESTART_EXPECTED);
+    }
+  }],
+  ["restart order: the reviewer's case, new testers restored before the ended ones (M1)", () => {
+    const b = migrateLegacy({}, {}, prevRun(), RESTART_OPTS);
+    const n1 = restoreSession(b, "n1", { phase: "live", role: "tester", stage: "review", ticket: "x", startedAt: iso(NOW + 100) }, iso(NOW + 200));
+    const n2 = restoreSession(b, "n2", { phase: "live", role: "tester", stage: "review", ticket: "y", startedAt: iso(NOW + 101) }, iso(NOW + 200));
+    same("pending: no character yet, none taken", [n1.characterId, n2.characterId], [null, null]);
+    for (const id of ["t1", "t2", "t3", "t4"]) restoreSession(b, id, { phase: "ended" }, iso(NOW + 200));
+    reconcileAfterRestore(b, ["n1", "n2", "o1", "p1", "coordinator:c1"], iso(NOW + 300));
+    same("both get a robot", [b.sessions.n1.characterId, b.sessions.n2.characterId], ["dash", "dot"]);
+    same("pass closed", b.restorePass, null);
+  }],
+  ["incomplete observation: an unseen or unconfirmed session keeps its character (M1)", () => {
+    const b = migrateLegacy({}, {}, prevRun(), RESTART_OPTS);
+    const holders = () => ["t1", "t2", "t3", "t4"].map((id) => [b.sessions[id].phase, b.sessions[id].characterId]);
+    const before = holders();
+    restoreSession(b, "n1", { phase: "live", role: "tester", stage: "review", ticket: "B", startedAt: iso(NOW + 100) }, iso(NOW + 200));
+    same("a new session started by a hook mid-pass waits too", startSession(b, "h1", { role: "tester", stage: "review", ticket: "Q" }, iso(NOW + 201)).characterId, null);
+    restoreSession(b, "t3", { phase: "live" }, iso(NOW + 202));
+    same("unseen and seen-live sessions keep their characters mid-pass", holders(), before);
+    same("no live session shares a character mid-pass", liveSharing(b), []);
+    same("all four testers still held, so nothing is free", allocateCharacter(b, "tester", null), null);
+    restoreSession(b, "t1", { phase: "ended" }, iso(NOW + 203));
+    same("a confirmed ending frees dash, but nothing is allocated yet", [b.sessions.t1.phase, b.characters.dash?.sessionId, b.sessions.n1.characterId], ["ended", null, null]);
+    reconcileAfterRestore(b, ["t2", "t3", "t4", "o1", "p1", "n1", "h1", "coordinator:c1"], iso(NOW + 300));
+    same("t2, t3, t4 confirmed running keep theirs", ["t2", "t3", "t4"].map((id) => b.sessions[id].characterId), ["dot", "blip", "zest"]);
+    same("n1 takes the one freed character, h1 is genuine overflow", [b.sessions.n1.characterId, b.sessions.h1.characterId], ["dash", null]);
+    same("h1 kept its observed start", b.sessions.h1.startedAt, iso(NOW + 201));
+    same("after the pass startSession allocates at once", startSession(b, "h2", { role: "developer", stage: "implementation" }, iso(NOW + 400)).characterId, "roux");
+  }],
+  ["restart: newest coordinator wins whatever the restore order; overflow from the last run stays overflow", () => {
+    for (const order of [[0, 1], [1, 0]]) {
+      const b = migrateLegacy({}, {}, prevRun(), RESTART_OPTS);
+      const cs = [["coordinator:old", NOW - 50_000], ["coordinator:new", NOW + 50]] as const;
+      for (const i of order) restoreSession(b, cs[i][0], { kind: "coordinator", phase: "live", startedAt: iso(cs[i][1]) }, iso(NOW + 200));
+      same(`live on basil, order ${order}`, liveSharing(b), []);
+      reconcileAfterRestore(b, ["coordinator:old", "coordinator:new", "o1"], iso(NOW + 300));
+      same(`newest holds basil, order ${order}`, [b.characters.basil?.sessionId, b.sessions["coordinator:old"].phase], ["coordinator:new", "ended"]);
+      same("o1 was overflow before the restart and stays so (rule 6)", [b.sessions.o1.phase, b.sessions.o1.characterId], ["live", null]);
+    }
+  }],
+  ["character uniqueness and stable identity: fuzz with restarts in random order (M1)", () => {
+    let rnd = 20261112;
+    const r = () => ((rnd = (rnd * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+    const pick = <T,>(xs: readonly T[]) => xs[Math.floor(r() * xs.length)];
+    const fams = ["developer", "tester", "adversary", "helper", "planner", "integrator", "chef", "lead"];
+    for (let run = 0; run < 400; run++) {
+      let b = emptyCrewBook("k", iso(NOW));
+      let t = 1;
+      let n = 0;
+      const settled = new Map<string, CrewCharacterId | null>();
+      const settle = () => { for (const s of Object.values(b.sessions)) if (!settled.has(s.id) && (!b.restorePass || s.seq < b.restorePass.firstSeq)) settled.set(s.id, s.characterId); };
+      const check = (where: string) => {
+        same(`${where}: uniqueness`, liveSharing(b), []);
+        for (const [id, rec] of Object.entries(b.characters)) {
+          const live = Object.values(b.sessions).filter((s) => s.phase === "live" && s.characterId === id).sort(compareSessionAge);
+          same(`${where}: ${id} cache`, rec!.sessionId ?? null, live[0]?.id ?? null);
+        }
+        for (const [id, c] of settled) same(`${where}: ${id} keeps its character`, b.sessions[id].characterId, c);
+      };
+      for (let k = 0; k < 30; k++) {
+        const op = r();
+        const live = Object.values(b.sessions).filter((s) => s.phase === "live").map((s) => s.id);
+        if (op < 0.5) startSession(b, `s${n++}`, { role: pick(fams), stage: r() < 0.5 ? "review" : "implementation", ticket: `T${Math.floor(r() * 4)}`, kind: r() < 0.15 ? "helper" : "worker" }, iso(NOW + t++ * 1000));
+        else if (op < 0.85 && live.length) endSession(b, pick(live), null, iso(NOW + t++ * 1000));
+        else {
+          // A restart: some live sessions ended while down, some still run, some are new; restored in two random orders.
+          const obs: Obs[] = live.map((id) => ({ id, phase: r() < 0.5 ? "ended" : "live" }) as Obs).filter(() => r() < 0.8);
+          for (let j = 0; j < 1 + Math.floor(r() * 4); j++) obs.push({ id: `s${n++}`, phase: r() < 0.8 ? "live" : "ended", role: pick(fams), stage: "implementation", ticket: `T${Math.floor(r() * 4)}`, startedAt: iso(NOW + t * 1000 - Math.floor(r() * 3) * 1000) });
+          const running = obs.filter((o) => o.phase === "live").map((o) => o.id);
+          const at = NOW + t++ * 1000;
+          const runOnce = (order: Obs[]) => {
+            const x = migrateLegacy({}, {}, b, { ...RESTART_OPTS, now: iso(at) });
+            for (const o of order) {
+              const { id, ...facts } = o;
+              restoreSession(x, id, facts, iso(at));
+              same("mid-pass uniqueness", liveSharing(x), []);
+            }
+            reconcileAfterRestore(x, running, iso(at + 500));
+            return x;
+          };
+          const a = runOnce(shuffle(obs, r));
+          const c = runOnce(shuffle(obs, r));
+          same(`run ${run}: restore order changes nothing`, [allocationOf(a), seqOf(a)], [allocationOf(c), seqOf(c)]);
+          b = a;
+          same(`run ${run}: no fresh session detached`, detachedFresh(b, obs.filter((o) => o.role).map((o) => o.id)), []);
+        }
+        settle();
+        check(`run ${run} step ${k}`);
+      }
+    }
+  }],
+  ["colours: role colour source, custom colour rules, write path (L1)", () => {
+    same("role colours match the server's for the roles it knows", [FAMILY_COLOR.developer, FAMILY_COLOR.tester, FAMILY_COLOR.adversary, FAMILY_COLOR.orchestrator, FAMILY_COLOR.integrator, FAMILY_COLOR.planner], ["#29adff", "#00e436", "#ffa300", "#ff77a8", "#ffec27", "#83769c"]);
+    same("resolved colours", [crewColor("pepper"), crewColor("dot"), crewColor("unit"), crewColor("basil")], ["#29adff", "#29adff", "#c2c3c7", "#ff77a8"]);
+    same("agentPalette pink refused", crewColorProblem("pepper", agentPalette[0]) !== null, true);
+    same("alert pink refused, any case", crewColorProblem("dash", "#FF4F7B") !== null, true);
+    same("unknown grey refused except for unit", [crewColorProblem("dot", "#c2c3c7") !== null, crewColorProblem("unit", "#c2c3c7")], [true, null]);
+    same("malformed refused", ["red", "#fff", "#12345g"].map((c) => crewColorProblem("dot", c) !== null), [true, true, true]);
+    same("other palette entries fine", agentPalette.slice(1).filter((c) => c !== "#c2c3c7").map((c) => crewColorProblem("pepper", c)).filter(Boolean), []);
+    const b = emptyCrewBook("k", iso(NOW));
+    same("refused change writes nothing", [customizeCharacter(b, "roux", { name: "Chili", color: "#ff77a8" }, iso(NOW)) !== null, b.characters.roux], [true, undefined]);
+    same("accepted", customizeCharacter(b, "roux", { name: " Chili ", color: "#00E436" }, iso(NOW)), null);
+    same("stored", [b.characters.roux?.name, b.characters.roux?.color, b.characters.roux?.family, crewColor("roux", b.characters.roux)], ["Chili", "#00e436", "developer", "#00e436"]);
+    same("reset", [customizeCharacter(b, "roux", { color: null }, iso(NOW)), b.characters.roux?.color, b.characters.roux?.name], [null, null, "Chili"]);
+    same("basil can't be retired", retireCharacter(b, "basil", true, iso(NOW)) !== null, true);
+    start(b, "s1", "tester", null);
+    same("retire a held character", retireCharacter(b, "dash", true, iso(NOW)), null);
+    same("its session keeps it", [b.sessions.s1.characterId, allocateCharacter(b, "tester", null)], ["dash", "dot"]);
+  }],
+  ["transporter: arrivals and departures are deltas within one connection, never replayed (L4)", () => {
+    const v = (id: CrewCharacterId, state: CrewState, retired = false) => ({ id, state, retired }) as CrewCharacterView;
+    const s1 = { characters: [v("basil", "working"), v("pepper", "available")] };
+    const s2 = { characters: [v("basil", "working"), v("pepper", "working"), v("roux", "assigned")] };
+    same("first snapshot after (re)connect or restart: nothing", crewFloorChanges(null, s2), { arrivals: [], departures: [] });
+    same("first session of roux arrives", crewFloorChanges(s1, s2), { arrivals: ["roux"], departures: [] });
+    same("same snapshot again: nothing", crewFloorChanges(s2, s2), { arrivals: [], departures: [] });
+    const s3 = { characters: [v("basil", "working"), v("pepper", "finished", true), v("roux", "available")] };
+    same("retired with a finishing session stays", crewFloorChanges(s2, s3), { arrivals: [], departures: [] });
+    const s4 = { characters: [v("basil", "working"), v("pepper", "available", true), v("roux", "available")] };
+    same("then departs; a session ending alone never does", crewFloorChanges(s3, s4), { arrivals: [], departures: ["pepper"] });
+    same("un-retire arrives", crewFloorChanges(s4, { characters: [v("basil", "working"), v("pepper", "available"), v("roux", "available")] }), { arrivals: ["pepper"], departures: [] });
+  }],
+  ["restore never changes kind; migrated sessions are workers (L3)", () => {
+    const b = migrateLegacy({ h: { id: "unit", name: "Helper bot", job: "Helper" } }, {}, null, OPTS);
+    restoreSession(b, "h", { phase: "live", kind: "helper", stage: "helper" }, iso(NOW));
+    same("kind kept, family from the restore", [b.sessions.h.kind, b.sessions.h.family], ["worker", "helper"]);
+  }],
 ];
+
+type Obs = { id: string; phase: "live" | "ended"; role?: string; stage?: string; ticket?: string; startedAt?: string; kind?: "worker" | "helper" | "coordinator" };
+const RESTART_OPTS = { kitchen: "k", now: iso(NOW + 100), backup: "/x/backups/crew-2" };
+
+/** The last run: four testers hold every tester character, a fifth is overflow, a developer on pepper, the coordinator. */
+function prevRun(): CrewBook {
+  const b = migrateLegacy({}, {}, null, OPTS);
+  reconcileAfterRestore(b, [], iso(NOW));
+  ["A", "B", "C", "D"].forEach((tk, i) => startSession(b, `t${i + 1}`, { role: "tester", stage: "review", ticket: tk }, iso(NOW - 100_000 + i * 1000)));
+  startSession(b, "o1", { role: "tester", stage: "review", ticket: "E" }, iso(NOW - 95_000));
+  startSession(b, "p1", { role: "developer", stage: "implementation", ticket: "A" }, iso(NOW - 94_000));
+  startSession(b, "coordinator:c1", { kind: "coordinator", stage: "coordinate" }, iso(NOW - 200_000));
+  return b;
+}
+/** What the restart observes. t4 is not seen at all (transcript gone). */
+const RESTART_OBS: Obs[] = [
+  { id: "t1", phase: "ended" },
+  { id: "t2", phase: "ended" },
+  { id: "t3", phase: "live" },
+  { id: "o1", phase: "live" },
+  { id: "p1", phase: "ended" },
+  { id: "n1", phase: "live", role: "tester", stage: "review", ticket: "B", startedAt: iso(NOW + 50) },
+  { id: "n2", phase: "live", role: "tester", stage: "review", ticket: "X" }, // no start time: takes the reconcile time
+  { id: "n3", phase: "live", role: "developer", stage: "resume", ticket: "A", startedAt: iso(NOW + 45) },
+];
+const RESTART_EXPECTED = { "coordinator:c1": "basil", n1: "dot", n2: "dash", n3: "pepper", o1: null, t3: "blip" };
+function restart(obs: Obs[]): CrewBook {
+  const b = migrateLegacy({}, {}, prevRun(), RESTART_OPTS);
+  for (const { id, ...facts } of obs) restoreSession(b, id, facts, iso(NOW + 200));
+  reconcileAfterRestore(b, ["t3", "o1", "n1", "n2", "n3", "coordinator:c1"], iso(NOW + 300));
+  return b;
+}
+const allocationOf = (b: CrewBook) => Object.fromEntries(Object.values(b.sessions).filter((s) => s.phase === "live").map((s) => [s.id, s.characterId] as const).sort(([a], [c]) => (a < c ? -1 : 1)));
+const seqOf = (b: CrewBook) => Object.fromEntries(Object.values(b.sessions).map((s) => [s.id, s.seq] as const).sort(([a], [c]) => (a < c ? -1 : 1)));
+/** Characters worn by more than one live session. */
+function liveSharing(b: CrewBook): string[] {
+  const by = new Map<string, string[]>();
+  for (const s of Object.values(b.sessions)) if (s.phase === "live" && s.characterId) by.set(s.characterId, [...(by.get(s.characterId) ?? []), s.id]);
+  return [...by].filter(([, ids]) => ids.length > 1).map(([c, ids]) => `${c}: ${ids.join(",")}`);
+}
+/** Of `ids` (the sessions a restore pass recorded), the live ones with no character while their family has a free one. */
+function detachedFresh(b: CrewBook, ids: string[]): string[] {
+  if (b.restorePass) throw new Error("pass still open");
+  return ids
+    .map((id) => b.sessions[id])
+    .filter((s) => s.phase === "live" && s.characterId === null)
+    .filter((s) => s.family !== "orchestrator" && allocateCharacter(b, s.family, null) !== null)
+    .map((s) => `${s.id} (${s.family})`);
+}
+function permutations(n: number): number[][] {
+  const out: number[][] = [];
+  const go = (rest: number[], acc: number[]) => (rest.length ? rest.forEach((x, i) => go([...rest.slice(0, i), ...rest.slice(i + 1)], [...acc, x])) : out.push(acc));
+  go([...Array(n).keys()], []);
+  return out;
+}
+function shuffle<T>(xs: T[], r: () => number): T[] {
+  const a = [...xs];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(r() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
 
 let failed = 0;
 for (const [name, fn] of tests) {

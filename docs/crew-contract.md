@@ -50,6 +50,36 @@ Accents (checked by `crewContractProblems`):
 - No variant uses a needs-you pink (`RESERVED_ACCENTS`: `#ff77a8`, `#ff4f7b`), and no `unit`-based
   variant uses the unknown grey.
 
+### Colours (decision for 09.3, 09.4, 09.5)
+
+A character is drawn in `crewColor(id, record)`: its custom colour, else its variant accent, else
+its family's role colour, `FAMILY_COLOR`. So `CrewCharacterView.accent` is always a colour, never
+null.
+
+- `FAMILY_COLOR` is the public role-colour map. It has the same values as the server's private
+  `ROLE_COLOR` for the roles that map knows. Helper and unknown take its `#c2c3c7` fallback.
+  **09.3** replaces `ROLE_COLOR` with `FAMILY_COLOR`.
+- Orchestrator stays `#ff77a8`, so Basil's body is the one built-in pink. This keeps the coordinator
+  distinctive (Feature 09) and keeps the look 0.1.0 shipped. Needs-you is never shown by body colour:
+  09.5 draws it as the compact badge and the `#ff4f7b` outline, for Basil too.
+- A custom colour (`crewColorProblem`) must be `#rrggbb`. It is stored lower-case. It is never a
+  needs-you pink, and never the unknown grey except on `unit`, where grey is the default. **09.4** offers
+  `agentPalette` minus what `crewColorProblem` refuses, which drops its first entry, `#ff77a8`.
+
+### Customization and retirement: the write path (decision for 09.3, 09.4)
+
+`customizeCharacter(book, id, { name?, color? }, now)` and `retireCharacter(book, id, retired, now)`
+are the only writers of `name`, `color` and `retired`. Settings → Crew (09.4) calls them through a
+09.3 endpoint, and 09.3 then writes the book atomically.
+
+- `customizeCharacter` checks both values (`crewNameProblem`, `crewColorProblem`). When either is
+  refused, it changes nothing and returns the reason.
+- `null` resets a value to the catalogue one. Saving the catalogue name also stores `null`.
+- Neither function touches the family, the role or any session.
+- A retired character is never allocated again. A session that holds it keeps it until the session
+  ends, and then the robot departs (see Transporter). Un-retiring brings it back as an arrival.
+- Basil can't be retired.
+
 ### Widening `CharacterId` (decision for 09.2, 09.3, 09.5)
 
 `CharacterId` (the ten base ids) is not widened in this ticket. `CrewInfo.character`,
@@ -65,9 +95,15 @@ until their owners change them:
 - **09.5** reads `CrewCharacterId` from the snapshot. A variant without a sprite yet is drawn as its
   base, never as `unit`.
 
-Parallel families need at least 3 characters each: developer, tester, adversary, helper and
-unknown. Orchestrator, planner and integrator never run in parallel and have one character
-each.
+**Variants per family (decision).** The ticket asks for "at least 3 distinct variants for every
+supported role family". This contract reads that as every family that can run sessions in parallel:
+developer, tester, adversary, helper and unknown (`PARALLEL_FAMILIES`). Feature 09 asks for variants
+for "parallel roles" only. Orchestrator, planner and integrator keep one character each:
+
+- Basil, because Feature 09 says the orchestrator stays distinctive, so a second orchestrator robot
+  would contradict it.
+- Sage (planner) and Clove (integrator), because neither runs as a parallel session in this kit
+  (`FAMILY_PRESENCE`). A second concurrent session in one of them is overflow (rule 6).
 
 ### Family of a session (`familyFor(role, stage)`)
 
@@ -159,7 +195,7 @@ finished  → available | assigned        (a fresh session can take it at once)
 straight to the new state's pose with no animation. 09.5 never rejects or delays such a jump.
 
 Only `available` has no session. Retiring a character (transporter departure) is a flag on the
-record, not a state. A session that ends never beams the robot out.
+record, not a state (`retireCharacter`). A session that ends never beams the robot out.
 
 ## Allocation invariants (`allocateCharacter(book, family, ticket)`)
 
@@ -182,18 +218,34 @@ record, not a state. A session that ends never beams the robot out.
    real sessions. The pool size is the family's floor bound. 09.5 gives every pool member a work
    spot, or shows the extra ones in the overflow layout. **An overflow session keeps no robot for
    its whole lifetime.** It is not given a character that frees up later, because a session wears
-   one look for its whole life. The user sees it only in the crew list until it ends.
+   one look for its whole life. The user sees it only in the crew list until it ends. A session is
+   overflow only when the allocation that ran for it found no free character. The startup restore
+   never decides that early (rule 7). Overflow is a session with no robot, never a robot off the
+   floor, so 09.5 has no off-floor overflow and no overflow transporter case.
 7. Concurrent sessions always get distinct characters, from 1 and 4 together.
 8. Custom names (`crewNameProblem`) must be 1–24 characters after trimming. They must be unique
    (case-insensitive) against every catalogue name and every other custom name. They must not end
    in a digit, so "Dash 2", "Dash2", "Dash-2" and "R2D2" are all refused. Renaming changes only the
    label, never the family or role.
 9. The registry changes sessions only through `startSession` (allocates once, and returns an id
-   that already exists unchanged), `endSession`, `restoreSession` and `reconcileAfterRestore`. A new
+   that already exists unchanged), `endSession`, `restoreSession` and `reconcileAfterRestore`. It
+   changes characters only through `customizeCharacter` and `retireCharacter`. A new
    coordinator session ends any other live coordinator session, and moves any live
    non-coordinator session still on Basil (a legacy worker) to overflow with `reassignedFrom:
    "basil"`, recorded in the latest migration's `conflicts`. So at most one session, the
    coordinator, is ever live on Basil.
+10. **Nothing is allocated while the restore pass is open** (`book.restorePass`, from `migrateLegacy`
+    or `beginRestore` until `reconcileAfterRestore`). A new non-coordinator session recorded then,
+    by `restoreSession` or by `startSession` from a hook, gets `characterId: null` for now, and
+    `reconcileAfterRestore` allocates it. This has three consequences:
+    - Restore order can't decide who gets a character.
+    - A session the restore has not seen yet, or not yet confirmed ended, keeps its character.
+    - Only a confirmed ending frees a character during the pass: `restoreSession` with `phase:
+      "ended"`, `endSession`, or a sessions.json ending.
+
+    A new coordinator session still takes Basil at once, because Basil is reserved and nobody
+    competes for him. If it is older than a live coordinator session (`compareSessionAge`), it is
+    recorded ended, so the newest coordinator wins whatever the order.
 
 ## Crew book (persisted)
 
@@ -205,8 +257,12 @@ The file is `~/.controlroom/<key>/crew-book.json`, the `CrewBook` type, with sch
   characters: { <CrewCharacterId>: { id, family, name|null, color|null, sessionId|null,
                                      lastSessionId|null, availableSince|null, firstSeen, retired } },
   sessions:   { <session id>: CrewSession },
-  migrations: [ { from, fromVersion, at, backup, imported[], filled[], conflicts[] } ] }
+  migrations: [ { from, fromVersion, at, backup, imported[], filled[], conflicts[] } ],
+  restorePass: { firstSeq } | null }
 ```
+
+`restorePass` is open only between startup steps 1 and 4 below. It is `null` on disk, because the
+book is written after reconcile. A file without the field reads as `null`.
 
 - `characters` holds only characters that have held a session or been customized. Basil is
   always present, including in `emptyCrewBook`.
@@ -250,6 +306,17 @@ the disk writes belong to the caller.
    backup.
 2. **Never modify or delete the legacy files.** Deleting `crew-book.json` restarts the migration
    from them.
+
+   **Decision for 09.3:** 09.3 **stops writing `crew.json` and `sessions.json`** when it adopts the
+   book. The book holds characters (`startSession`) and endings (`endSession` with the `SessionEnd`
+   that `settle` builds today), and it replaces `crewBook()` and `endBook()` in
+   `server/pathfinder.ts`.
+   - From then on the legacy files are frozen read-only migration inputs. That satisfies this rule
+     and rule 6 together.
+   - The first start migrates everything they hold. Every later start imports and fills nothing, so
+     it appends no migration entry and writes no backup.
+   - Deleting the book still recovers the pre-Feature-09 history from them. Later history is
+     recovered from `backups/`.
 3. **Key by subagent id only. Never deduplicate by display name.** Each crew.json entry becomes
    one `CrewSession` with:
    - `id` set to the subagent id, and `seq` set to its position in crew.json;
@@ -269,39 +336,67 @@ the disk writes belong to the caller.
 5. **Fill links on restore (`restoreSession`).** The transcript restore (today's
    `addWorker(…, finished)`) reports each session it sees as `live` or `ended`, with its links. For a
    session already in the book it:
-   - fills only **null** fields: kind, hqId, role, stage, ticket, title, worktree, parent,
+   - fills only **null** fields: hqId, role, stage, ticket, title, worktree, parent,
      transcript, startedAt, endedAt and end;
+   - never changes `kind`. Every session in the book has a known kind. crew.json and sessions.json
+     are written only for brief workers (`addWorker` needs `parseBrief`, and `settle` runs only for
+     workers), so a migrated session is always `worker`. Helpers and the coordinator were never in
+     them (rules 8 and 9). A brief whose `Role:` is `helper` is still a worker. Its *family* is
+     `helper`, which the restore fills through role and stage;
    - recomputes `family` when it filled role or stage;
    - may move the session **live → ended** (`end` stays null when no outcome was recorded), but
      **never ended → live**;
    - never changes the character.
 
-   An id not in the book is recorded. A live one goes through `startSession`. An ended one gets
-   no character. Sessions whose transcript is gone keep their record with null links.
+   An id not in the book is recorded:
+   - A live one, while the pass is open, gets no character yet (rule 10). It also gets no
+     `startedAt` unless the facts give one: pass the transcript's start time.
+   - A live one after the pass goes through `startSession`.
+   - An ended one gets no character.
+
+   Sessions whose transcript is gone keep their record with null links.
 6. **Idempotent (`migrateLegacy(crew, sessions, existing, …)`).** A subagent id already in
    `sessions` is never imported again. Only its null fields (`end`, `endedAt`, `legacy`) may be
    filled. A sessions.json ending may also move it live → ended, never back. Those ids are listed
    in `filled`. A run that imports and fills nothing appends no migration entry and leaves the
-   book unchanged apart from `updatedAt`. Until 09.3 stops writing crew.json, every start merges
-   any new subagent ids in the same way. `migrateLegacy` resolves no conflicts.
-7. **After the first full restore pass (`reconcileAfterRestore(book, runningIds, now)`).** Run it
-   once, after the restore has looked at every transcript. Never run it before then.
-   - Every live session the restore did not find running is ended with `end: null`
-     ("outcome unknown") and `endedAt` = now.
-   - A live non-coordinator session on Basil (old `characterForRole` gave orchestrator-role workers
-     Basil) moves to overflow with `reassignedFrom: "basil"` and is listed in `conflicts`. Basil
-     stays with the coordinator.
-   - A character still worn by two or more live sessions (legacy "Pepper" and "Pepper 2") stays with
-     the **oldest** (`compareSessionAge`, a total order):
-     1. a session with no `startedAt` is older than one with it, because only legacy entries lack
-        it and they predate every session the book started;
-     2. if both are known, the earlier `startedAt` is older;
-     3. otherwise the lower `seq` (crew.json start order) is older.
+   book unchanged apart from `updatedAt` and the open restore pass. Until 09.3 stops writing crew.json, every start merges
+   any new subagent ids in the same way. Under the rule 2 decision that is only the first start after
+   09.3 ships. `migrateLegacy` resolves no conflicts. It opens the restore pass after its imports.
+7. **Once the restore pass is complete (`reconcileAfterRestore(book, runningIds, now)`).** The pass
+   is complete when every transcript has been read and every session's liveness is decided. A
+   session still inside the reattach window is not decided: today that is an unfinished subagent
+   while the coordinator is not yet running, during the server's first 15 s. Never run it before
+   then. `runningIds` is every session confirmed running, including sessions the pass recorded and
+   hook-started ones. Reconcile closes the pass and runs these steps in order:
+   1. Canonical order. A live session the pass recorded with no `startedAt` takes `now`. The pass's
+      sessions are renumbered (their `seq`) by `startedAt` and then id, so the order the restore saw
+      them in leaves no trace in the book.
+   2. Every live session not in `runningIds` is ended with `end: null` ("outcome unknown") and
+      `endedAt` = now. That covers a crew-only legacy entry that died unobserved, a session from the
+      last run that ended while the kitchen was down, and one whose transcript is gone. This is the
+      first point at which an unseen session frees its character, because only now are all
+      observations in.
+   3. Of several live coordinator sessions, the newest keeps Basil and the others end.
+   4. A live non-coordinator session on Basil (old `characterForRole` gave orchestrator-role workers
+      Basil) moves to overflow with `reassignedFrom: "basil"` and is listed in `conflicts`.
+   5. A character still worn by two or more live sessions (legacy "Pepper" and "Pepper 2") stays with
+      the **oldest** (`compareSessionAge`, a total order):
+      1. a session with no `startedAt` is older than one with it. After reconcile, only sessions
+         the book did not see start lack one: legacy entries and sessions restored already ended.
+         They predate every session the book started itself;
+      2. if both are known, the earlier `startedAt` is older;
+      3. otherwise the lower `seq` is older (crew.json start order, or the canonical order above).
 
-     A pairwise rule like "seq unless both have `startedAt`" is not transitive.
-   - Each later session is allocated again in its own family. It gets `reassignedFrom`, or becomes
-     overflow when its pool is full, and is listed in the latest migration's `conflicts`.
-   - A second run finds nothing to do.
+      A pairwise rule like "seq unless both have `startedAt`" is not transitive. Each later session
+      loses the character (`reassignedFrom`, listed in the latest migration's `conflicts`) and joins
+      the queue.
+   6. The queue is those sessions plus every live session the pass recorded with no character. It
+      is allocated oldest first against the reconciled book. A session gets a free character of its
+      family when there is one, and otherwise it is overflow.
+
+   The result is the same allocation for every restore order. No live session is left without a
+   character while its family has a free one. The exception is a session that was already overflow
+   before the restart: it stays overflow (allocation rule 6). A second run finds nothing to do.
 8. The coordinator row (`coordinator`, Basil) becomes `characters.basil`. A coordinator session
    is recorded only once `coordinator.json` names its transcript, through `startSession` with
    `kind: "coordinator"`. Until then Basil shows unknown.
@@ -309,12 +404,18 @@ the disk writes belong to the caller.
 
 The startup order for 09.3:
 
-1. read the book, and `migrateLegacy` into it (or into a new one when there is none);
+1. read the book, and `migrateLegacy` into it (or into a new one when there is none). This opens
+   the restore pass. A caller that skips it must call `beginRestore`, or restore order decides
+   allocation again;
 2. back up, only if step 1 appended a migration entry (rule 1);
-3. `restoreSession` each transcript;
-4. `reconcileAfterRestore`;
-5. write the book atomically;
-6. then `startSession` for new sessions as they appear.
+3. `restoreSession` each transcript, with its start time, on as many refreshes as the reattach
+   window needs. A session a hook starts meanwhile goes through `startSession` and waits for its
+   character too (rule 10);
+4. `reconcileAfterRestore`, once the pass is complete (rule 7);
+5. write the book atomically. Publish no `CrewSnapshot` before this, so no client sees a session
+   without the character it is about to get;
+6. then `startSession` for new sessions as they appear. A transcript found later goes through
+   `startSession` if it is live and `restoreSession` if it has ended.
 
 ## Snapshot the UI reads (`CrewSnapshot`)
 
@@ -323,7 +424,8 @@ The startup order for 09.3:
 - `characters: CrewCharacterView[]`: Basil plus every recorded character, in pool order. Each view
   has:
   - `id`, `family`, `name` (the custom name, else the catalogue name), `job`, `look`;
-  - `accent` (the custom colour, else the variant accent, else null), `customized`, `retired`;
+  - `accent` (`crewColor`: the custom colour, else the variant accent, else `FAMILY_COLOR`; never
+    null), `customized`, `retired`;
   - `state` and `stateSince`. `stateSince` is server time: the poll on which `deriveCrewState`
     first returned this state for this character. 09.3 keeps it in memory and does not persist it.
     After a restart it is the record's `availableSince` (else `firstSeen`) for `available`, the
@@ -341,6 +443,23 @@ The startup order for 09.3:
 - `overflow: string[]`: ids of live sessions that have no character.
 
 A `CrewSessionView` is a `CrewSession` plus `characterName` and `state`.
+
+### Transporter (decision for 09.5)
+
+`crewFloorChanges(prev, next)` is the arrival and departure trigger. It is the same rule for both art
+styles and for sound.
+
+- A character is on the floor (`crewOnFloor`) when it is listed and not retired. A retired one stays
+  on the floor while it still holds, or has just finished, a session.
+- An **arrival** is a character that comes on the floor between two snapshots of one connection.
+  That happens when its first session creates its record, or when it is un-retired.
+- A **departure** is one that leaves the floor, which means it is retired and its session has
+  finished. "Removal" in Feature 09 is retirement: records are never deleted.
+- `prev` is the snapshot the client last drew. It is `null` for the first snapshot after a connect,
+  reconnect or server restart, and that gives nothing. So no arrival or cue is ever replayed, and
+  characters recorded by migration or the restore pass simply appear in place.
+- A session ending never beams a robot out. Basil never uses the transporter.
+- Overflow sessions have no robot (rule 6), so they never arrive or depart.
 
 ## Not decided here
 
