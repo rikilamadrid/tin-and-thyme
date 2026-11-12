@@ -83,6 +83,8 @@ const SUBS = { x: 40, y: SUBS_Y, w: 272, h: 72 };
 const SUB_X = [72, 138, 204, 270];
 /** The review scanner: a compact hood over the belt. */
 const SCAN = { cx: 395, w: 30 };
+/** How far each reviewer stands from the scanner's centre: far enough that their name tags clear its hood. */
+const PASS_DX = 46;
 /**
  * The crew transporter: a glass tube on the upper aisle beside the prep line. Sessions beam in here when
  * they start and beam out when they end; work itself only travels by belt, scanner and the MAIN hatch.
@@ -100,8 +102,8 @@ export const SPOTS = {
   pod: (i: number) => ({ x: PODS_X[i] + POD_W / 2, y: LY + 22 }),
   /** Either side of the scanner hood, just above the belt. */
   pass: [
-    { x: 358, y: BELT_Y - 16 },
-    { x: 432, y: BELT_Y - 16 },
+    { x: SCAN.cx - PASS_DX, y: BELT_Y - 16 },
+    { x: SCAN.cx + PASS_DX, y: BELT_Y - 16 },
   ],
   /** Where a reviewer with no free spot beside the scanner waits, on the lane. */
   passQueue: { x: LANE_X, y: BELT_Y - 44 },

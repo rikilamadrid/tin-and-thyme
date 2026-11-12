@@ -12,6 +12,8 @@ const SPEED = 70; // logical units per second
 const FRAME_MS = 50;
 /** Zoom steps relative to the Fit view. */
 const ZOOMS = [1, 1.5, 2, 3];
+/** The smallest Fit, in device pixels per logical unit: below it the room clips instead of shrinking further. */
+const MIN_FIT = 0.4;
 /** Decorative only: how often an off-shift robot wanders to another free hangout. */
 const ROAM_MIN_MS = 7000;
 const ROAM_SPREAD_MS = 8000;
@@ -66,7 +68,7 @@ export function GalleyCanvas({ left, right }: { left: number; right: number }) {
     const spotOf = new Map<string, number>();
     const deliveries: Delivery[] = [];
     let hits: Hit[] = [];
-    let scale = 1; // device pixels per logical unit in the Fit view
+    let scale = 1; // canvas pixels per logical unit in the Fit view
     let zi = 0;
     /** Fit's logical rectangle: VIEW, extended to the canvas's shape (centred across, a little high). */
     let bounds = { x: VIEW.x, y: VIEW.y, w: VIEW.w, h: VIEW.h };
@@ -177,18 +179,23 @@ export function GalleyCanvas({ left, right }: { left: number; right: number }) {
       const cw = Math.max(1, Math.round(r.width * dpr));
       const ch = Math.max(1, Math.round(r.height * dpr));
       const fitScale = Math.min(cw / VIEW.w, ch / VIEW.h);
-      // Pixel art prefers a whole-number scale (every pixel equal); when that would leave more than
-      // a tenth of the space empty, it takes the exact fit and snaps each edge to a device pixel.
+      const pixel = style() === "pixel";
+      // Pixel art never draws below one device pixel per logical unit: whole rows of art would drop out and
+      // sprites would round up past their neighbours. When the window is smaller than that, it draws at 1 on
+      // a larger canvas, and the browser scales the whole picture down smoothly to fit.
+      const shrink = pixel && fitScale < 1 ? Math.max(MIN_FIT, fitScale) : 1;
+      // Otherwise pixel art prefers a whole-number scale (every pixel equal); when that would leave more
+      // than a tenth of the space empty, it takes the exact fit and snaps each edge to a device pixel.
       const whole = Math.floor(fitScale);
-      scale = style() === "pixel" ? (whole >= 1 && fitScale / whole <= 1.1 ? whole : Math.max(1, fitScale)) : Math.max(0.5, fitScale);
-      canvas.width = cw;
-      canvas.height = ch;
+      scale = pixel ? (shrink < 1 ? 1 : whole >= 1 && fitScale / whole <= 1.1 ? whole : fitScale) : Math.max(MIN_FIT, fitScale);
+      canvas.width = Math.round(cw / shrink);
+      canvas.height = Math.round(ch / shrink);
       canvas.style.width = `${r.width}px`;
       canvas.style.height = `${r.height}px`;
-      canvas.style.imageRendering = style() === "pixel" ? "pixelated" : "auto";
+      canvas.style.imageRendering = pixel && shrink === 1 ? "pixelated" : "auto";
       // Spare room goes evenly left and right, and mostly below, so the kitchen sits close to the toolbar.
-      const bw = cw / scale;
-      const bh = ch / scale;
+      const bw = canvas.width / scale;
+      const bh = canvas.height / scale;
       bounds = { x: VIEW.x - (bw - VIEW.w) / 2, y: VIEW.y - (bh - VIEW.h) * 0.25, w: bw, h: bh };
       clampPan();
       dirty = true;
