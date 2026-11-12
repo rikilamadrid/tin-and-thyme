@@ -19,7 +19,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { run, type RunResult } from "../server/lib/exec";
-import { defaultRunner, isClearMergeRefusal, MERGE_TIMEOUT_MS, nonInteractiveEnv, summarizeChecks, type Check, type Program, type Runner } from "../server/delivery/forge";
+import { defaultRunner, ghFailure, isClearMergeRefusal, MERGE_TIMEOUT_MS, nonInteractiveEnv, summarizeChecks, type Check, type Program, type Runner } from "../server/delivery/forge";
 import {
   assertSafePushArgs,
   Delivery,
@@ -144,6 +144,8 @@ class World {
   fetchFails = 0;
   /** Squash merges actually performed on the simulated GitHub. */
   merges = 0;
+  /** A `gh` PR subcommand answered by a real process instead (a fake CLI run through `run`, e.g. one killed by its timeout). */
+  ghVia: Partial<Record<string, (args: string[]) => Promise<RunResult>>> = {};
 
   constructor(readonly repo: string) {}
 
@@ -153,6 +155,8 @@ class World {
   readonly runner: Runner = async (cmd, args, opts = {}) => {
     this.calls.push({ cmd, args: [...args] });
     if (cmd === "node") return this.engine(args);
+    const via = cmd === "gh" && args[0] === "pr" ? this.ghVia[args[1]] : undefined;
+    if (via) return via(args);
     if (cmd === "gh") return this.gh(args);
     const [sub] = args;
     if (sub === "push") return this.push(args);
@@ -1419,6 +1423,131 @@ async function main() {
     ok("f2 approved: verify binds the human's original approval", await d.verify("10.1"));
     check("f2 approved: bound with its time", sameApproval(d.read("10.1").merged?.approval, original) && d.read("10.1").merged?.approval?.at === approved.at && d.read("10.1").verified);
     eq("f2 approved: exactly one merge", [s.world.merges, appMerges(s)], [1, 0]);
+  }
+
+  // ---- F4 (review 4): a timeout or kill is never a sign-in failure, and the command's own arguments are never classified.
+  // Each failure below is a real process run through `run` (execFile): tiny fake CLIs in a temp folder, nothing reaches GitHub.
+  {
+    const cli = join(tmp, "fake-cli");
+    mkdirSync(cli, { recursive: true });
+    const fake = (name: string, body: string) => {
+      const file = join(cli, name);
+      writeFileSync(file, `#!/bin/sh\n${body}\n`);
+      chmodSync(file, 0o755);
+      return file;
+    };
+    const slow = fake("slow", "exec sleep 30");
+    const bad401 = fake("bad401", "echo 'HTTP 401: Bad credentials (https://api.github.com/graphql)' >&2\nexit 1");
+    const exit4 = fake("exit4", "exit 4");
+    const silent = fake("silent", "exit 1");
+    const echoing = fake("echoing", 'echo "cannot complete: $*" >&2\nexit 1');
+    const selfKill = fake("selfkill", "kill -9 $$");
+    const KILL_MS = 300;
+    const AUTH_FIX = "gh auth login --web";
+    const titles = ["Handle HTTP 401 from gh", "Show bad credentials fix", "Map HTTP 403 to sign-in", "Not logged in banner"];
+    const mergeArgv = (title: string) => ["pr", "merge", "100", "-R", "owner/project", "--squash", "--match-head-commit", "a".repeat(40), "--subject", `${title} (#100)`];
+    const viaTimeout = (args: string[]) => run(slow, args, { timeoutMs: KILL_MS });
+
+    // The classifier, on real process results.
+    for (const title of titles) {
+      const echoed = [`${title} (#100)`, title];
+      const r = await run(slow, mergeArgv(title), { timeoutMs: KILL_MS });
+      check(`f4 "${title}": a real execFile child is killed by its timeout`, !r.ok && r.killed === true && r.signal === "SIGTERM" && r.processStderr === "", r);
+      check(`f4 "${title}": Node's error text echoes the title in stderr (the trap; callers outside delivery keep it)`, r.stderr.startsWith("Command failed: ") && r.stderr.includes(title), r.stderr);
+      for (const [label, e] of [
+        ["with its arguments named", ghFailure(r, "merging the pull request", echoed)],
+        ["without them", ghFailure(r, "merging the pull request")],
+      ] as const) {
+        check(`f4 "${title}" ${label}: a timeout, never sign-in`, e.kind === "failed" && /timed out and was stopped \(SIGTERM\)/.test(e.message) && e.fix !== AUTH_FIX, { kind: e.kind, message: e.message });
+        check(`f4 "${title}" ${label}: never a clear refusal`, !isClearMergeRefusal(e));
+        check(`f4 "${title}" ${label}: the title is not in the message`, !e.message.includes(title), e.message);
+      }
+      // Not killed, but nothing on stderr: Node's "Command failed: <argv>" is still not the program's output.
+      const quiet = ghFailure(await run(silent, mergeArgv(title)), "merging the pull request");
+      check(`f4 "${title}": a silent exit 1 is unclear, not sign-in`, quiet.kind === "failed" && !isClearMergeRefusal(quiet) && !quiet.message.includes(title), quiet.message);
+      // A program that echoes its arguments in its own stderr: the subject is removed before matching.
+      const echo = ghFailure(await run(echoing, mergeArgv(title)), "merging the pull request", echoed);
+      check(`f4 "${title}": a subject echoed in stderr is never matched`, echo.kind === "failed" && !isClearMergeRefusal(echo) && !echo.message.includes(title), { kind: echo.kind, message: echo.message });
+    }
+    const killedBy = ghFailure(await run(selfKill, mergeArgv("Not logged in banner")), "merging the pull request");
+    check("f4: a program ended by SIGKILL is a termination, unclear, not sign-in", killedBy.kind === "failed" && /terminated by signal SIGKILL/.test(killedBy.message) && !isClearMergeRefusal(killedBy), killedBy.message);
+    const missing = ghFailure(await run(join(cli, "missing"), mergeArgv("Show bad credentials fix")), "merging the pull request");
+    check("f4: a program that cannot start is unclear, not sign-in", missing.kind === "failed" && /could not run \(ENOENT\)/.test(missing.message) && !isClearMergeRefusal(missing), missing.message);
+    // Real sign-in failures stay sign-in failures (and clear refusals), whatever the title says.
+    for (const title of ["Delivery core", "Handle HTTP 401 from gh"]) {
+      const echoed = [`${title} (#100)`, title];
+      const real401 = ghFailure(await run(bad401, mergeArgv(title)), "merging the pull request", echoed);
+      check(`f4: the program's own 401 stderr is sign-in (title "${title}")`, real401.kind === "auth" && real401.fix === AUTH_FIX && isClearMergeRefusal(real401), real401.message);
+      const real4 = ghFailure(await run(exit4, mergeArgv(title)), "merging the pull request", echoed);
+      check(`f4: gh exit 4 with no stderr is sign-in (title "${title}")`, real4.kind === "auth" && real4.fix === AUTH_FIX && isClearMergeRefusal(real4), real4.message);
+    }
+
+    // Through the merge: the killed command stays unknown, and no second merge command is sent before read-only reconciliation.
+    for (const [n, title] of titles.entries()) {
+      const s = await ready(`f4-merge-${n}`, pass);
+      let t = Date.now();
+      const d = s.make({ ...fast, now: () => new Date(t) });
+      const original = approvalOf(s.i);
+      const approved = ok(`f4 "${title}": approve`, await d.approve("10.1", original));
+      s.world.prs[0].title = title;
+      s.world.ghVia.merge = viaTimeout;
+      const o = await d.merge("10.1", original);
+      refused(`f4 "${title}": the killed merge is a timeout with an unknown outcome`, o, "failed", /timed out and was stopped.*whether PR #\d+ merged is unknown/);
+      check(`f4 "${title}": not a sign-in error`, !o.ok && o.fix !== AUTH_FIX && !/sign-in/i.test(o.message), o);
+      const sent = s.world.calls.find((c) => c.cmd === "gh" && c.args[1] === "merge");
+      check(`f4 "${title}": the killed command carried the title`, !!sent?.args.includes(`${title} (#${s.world.prs[0].number})`), sent);
+      const st = d.read("10.1");
+      check(
+        `f4 "${title}": outcome unknown, never not-merged; approval and its time kept`,
+        mergeOutcome(st) === "unknown" && st.pendingMerge?.status === "unknown" && sameApproval(st.pendingMerge.approval, original) && st.pendingMerge.approval.at === approved.at && st.lastAttempt == null,
+        st,
+      );
+      check(`f4 "${title}": the merge step is not a sign-in failure`, st.steps.merge?.ok === false && st.steps.merge.kind === "failed", st.steps.merge);
+      s.world.ghVia = {};
+      t += 5_000;
+      const mark = s.world.calls.length;
+      refused(`f4 "${title}": a retry 5 s later is held`, await d.merge("10.1", original), "blocked", /still unknown/);
+      const retry = s.world.calls.slice(mark);
+      check(`f4 "${title}": the retry sent no merge command`, !retry.some((c) => c.cmd === "gh" && c.args[1] === "merge") && appMerges(s) === 1 && s.world.merges === 0, retry);
+      check(`f4 "${title}": the retry read GitHub and origin instead`, retry.some((c) => c.cmd === "gh" && c.args[1] === "view") && retry.some((c) => c.cmd === "git" && c.args[0] === "ls-remote"), retry);
+      check(`f4 "${title}": still unknown after the retry`, mergeOutcome(d.read("10.1")) === "unknown");
+      // Only once reads settle it (nothing landed, longer than the merge timeout) may a second command follow.
+      t += SETTLE + 1000;
+      const mark2 = s.world.calls.length;
+      ok(`f4 "${title}": after reconciliation, the retry merges`, await d.merge("10.1", original));
+      const later = s.world.calls.slice(mark2);
+      const second = later.findIndex((c) => c.cmd === "gh" && c.args[1] === "merge");
+      check(`f4 "${title}": read-only reconciliation precedes the second merge command`, second > 0 && later.slice(0, second).some((c) => c.cmd === "gh" && c.args[1] === "view"), later.map((c) => `${c.cmd} ${c.args.slice(0, 2).join(" ")}`));
+      eq(`f4 "${title}": one merge, two commands`, [s.world.merges, appMerges(s)], [1, 2]);
+      check(`f4 "${title}": merged under the original approval`, sameApproval(d.read("10.1").merged?.approval, original) && d.read("10.1").merged?.approval?.at === approved.at && d.read("10.1").verified);
+    }
+
+    // A real sign-in failure of the merge command is still a clear refusal, settled as not merged.
+    for (const [label, program] of [["401 stderr", bad401], ["exit 4", exit4]] as const) {
+      const s = await ready(`f4-auth-${label.replace(/\W/g, "")}`, pass);
+      const d = s.make(fast);
+      const original = approvalOf(s.i);
+      ok(`f4 real auth (${label}): approve`, await d.approve("10.1", original));
+      s.world.prs[0].title = "Handle HTTP 401 from gh";
+      s.world.ghVia.merge = (args) => run(program, args);
+      const o = await d.merge("10.1", original);
+      refused(`f4 real auth (${label}): a sign-in failure`, o, "auth", /sign-in/);
+      check(`f4 real auth (${label}): offers the sign-in fix`, !o.ok && o.fix === AUTH_FIX);
+      check(`f4 real auth (${label}): settled as not merged`, mergeOutcome(d.read("10.1")) === "not-merged" && s.world.merges === 0 && appMerges(s) === 1, d.read("10.1"));
+    }
+
+    // createPr: a timeout is a timeout, never a sign-in problem, whatever the title and body say.
+    {
+      const s = scenario("f4-create");
+      ok("f4 create: push", await s.delivery.push("10.1", s.head));
+      s.world.ghVia.create = viaTimeout;
+      for (const title of titles) {
+        const o = await s.delivery.ensurePr("10.1", { title, body: `Fixes the bad credentials and HTTP 401 banner.\nNot logged in users see HTTP 403. (${title})` });
+        refused(`f4 create "${title}": a timeout`, o, "failed", /creating the pull request: gh timed out and was stopped/);
+        check(`f4 create "${title}": not a sign-in problem, and the title is not echoed`, !o.ok && o.fix !== AUTH_FIX && !/sign-in/i.test(o.message) && !o.message.includes(title), o);
+      }
+      eq("f4 create: the fake GitHub has no PR", s.world.prs.length, 0);
+    }
   }
 
   // ---- state file: permissions, unique temp files, corrupt state (L5)
