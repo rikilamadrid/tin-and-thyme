@@ -18,11 +18,42 @@ import { INK, type Backend } from "./backend";
 import { COLUMN_NAMES, type CrewMember, type GalleyModel } from "./model";
 import { C, drawRobot, icon, robotSize, type IconKind } from "./robots";
 
-/** What Fit frames: the room plus a narrow margin of space around its hull. */
-export const VIEW = { x: 12, y: 12, w: 536, h: 444 };
+// ---------------------------------------------------------------- layout
+//
+// The room is a stack of horizontal bands, top to bottom. Each band's top is derived from the one above
+// plus its gap, so a band can grow (or a new one be inserted) without hand-moving everything below it.
+// Every position further down is written against these anchors, never as a bare room coordinate.
+//
+//   top band     windows, ORDERS, HEAD CHEF office, fridge, lounge     y 32 … TOP_BAND_END
+//   GAP.top      open floor under the office
+//   prep band    upper aisle, transporter, cooktop pods, café          AISLE_Y …
+//   GAP.line     open floor between the prep line and the lower band
+//   lower band   subagent stations (left), reviewers at the pass        SUBS_Y …
+//   GAP.lower    open floor above the belt
+//   belt band    belt, scanner, MAIN hatch                              BELT_Y …
+//   GAP.foot     floor below the belt
+
+/** Extra open floor between the bands, in logical units (the room grows by their sum). */
+export const GAP = { top: 24, line: 32, lower: 24, foot: 8 };
+const GROW = GAP.top + GAP.line + GAP.lower + GAP.foot;
+
 /** Outer walls, and the floor inside them. */
-const ROOM = { x: 24, y: 24, w: 512, h: 420 };
-const FLOOR = { x: 32, y: 32, w: 496, h: 404 };
+const ROOM = { x: 24, y: 24, w: 512, h: 420 + GROW };
+const FLOOR = { x: 32, y: 32, w: 496, h: 404 + GROW };
+const FLOOR_BOTTOM = FLOOR.y + FLOOR.h;
+/** What Fit frames: the room plus a narrow margin of space around its hull. */
+export const VIEW = { x: 12, y: 12, w: ROOM.w + 24, h: ROOM.h + 24 };
+
+/** Where the top band (office, board, lounge) ends. */
+export const TOP_BAND_END = 200;
+/** The upper aisle: the walking route along the top of the prep band. */
+export const AISLE_Y = TOP_BAND_END + 14 + GAP.top;
+/** The prep line (cooktop pods). */
+export const LY = AISLE_Y + 10;
+/** The lower band: the subagent stations. Anything at or below it is reached down the lane. */
+export const SUBS_Y = LY + 76 + GAP.line;
+/** The belt into MAIN. */
+export const BELT_Y = SUBS_Y + 104 + GAP.lower;
 
 /** Human alerts use one pink-red accent everywhere (galley, roster, Action items, toolbar). */
 export const ALERT = "#ff4f7b";
@@ -36,16 +67,19 @@ const T = {
 const BOT_K = 1.2;
 /** Delegated helpers are smaller: assistants, not crew. */
 const HELPER_K = 0.95;
-export const LY = 224; // the prep line (cooktop pods)
 const POD_W = 48;
-const PODS_X = [40, 96, 152, 208, 264];
-const BELT = { y: 404, x0: 34, x1: 488 };
-const HATCH = { x: 486, y: 366, w: 42, h: 70 };
+/** Distance between pod left edges (POD_W plus the gap between neighbouring pods). */
+const POD_PITCH = 58;
+const PODS_X = [0, 1, 2, 3, 4].map((i) => 40 + i * POD_PITCH);
+const BELT = { y: BELT_Y, x0: 34, x1: 488 };
+/** MAIN sits at the end of the belt and reaches down to the floor's bottom edge. */
+const HATCH = { x: 486, y: BELT_Y - 38, w: 42, h: FLOOR_BOTTOM - (BELT_Y - 38) };
 const BOARD = { x: 40, y: 64, w: 136, h: 124 };
 const OFFICE = { x: 186, y: 34, w: 144, h: 162, cx: 258 };
-const LOUNGE = { x: 384, y: 66, w: 140, h: 134 };
-const CAFE = { x: 352, y: 214, w: 176, h: 116 };
-const SUBS = { x: 40, y: 300, w: 272, h: 72 };
+const LOUNGE = { x: 384, y: 66, w: 140, h: TOP_BAND_END - 66 };
+/** The café opens onto the upper aisle and runs down beside the prep line. */
+const CAFE = { x: 352, y: AISLE_Y, w: 176, h: 116 + GAP.line };
+const SUBS = { x: 40, y: SUBS_Y, w: 272, h: 72 };
 const SUB_X = [72, 138, 204, 270];
 /** The review scanner: a compact hood over the belt. */
 const SCAN = { cx: 395, w: 30 };
@@ -53,9 +87,8 @@ const SCAN = { cx: 395, w: 30 };
  * The crew transporter: a glass tube on the upper aisle beside the prep line. Sessions beam in here when
  * they start and beam out when they end; work itself only travels by belt, scanner and the MAIN hatch.
  */
-export const TUBE = { cx: 358, y: 212, w: 30, h: 46 };
-/** Walking routes: the upper aisle, and the lane down past the prep line to the scanner. */
-export const AISLE_Y = 214;
+export const TUBE = { cx: 358, y: AISLE_Y - 2, w: 30, h: 46 };
+/** Walking routes: the upper aisle (AISLE_Y), and the lane down past the prep line to the scanner. */
 export const LANE_X = 336;
 /** How long one beam lasts, and when several queue up. */
 export const BEAM_MS = 520;
@@ -67,11 +100,13 @@ export const SPOTS = {
   pod: (i: number) => ({ x: PODS_X[i] + POD_W / 2, y: LY + 22 }),
   /** Either side of the scanner hood, just above the belt. */
   pass: [
-    { x: 358, y: 388 },
-    { x: 432, y: 388 },
+    { x: 358, y: BELT_Y - 16 },
+    { x: 432, y: BELT_Y - 16 },
   ],
+  /** Where a reviewer with no free spot beside the scanner waits, on the lane. */
+  passQueue: { x: LANE_X, y: BELT_Y - 44 },
   /** The door in the left wall, on the upper aisle. */
-  door: { x: 38, y: 206 },
+  door: { x: 38, y: AISLE_Y - 8 },
   /** Inside the transporter tube (feet). */
   tube: { x: TUBE.cx, y: TUBE.y - 2 },
   /** Beside the tube, for a session waiting its turn to beam out. */
@@ -87,11 +122,11 @@ export type HangoutKind = "couch" | "stool" | "floor";
 export const HANGOUTS: { x: number; y: number; kind: HangoutKind }[] = [
   { x: 432, y: 178, kind: "couch" },
   { x: 476, y: 178, kind: "couch" },
-  { x: 400, y: 290, kind: "stool" },
-  { x: 448, y: 290, kind: "stool" },
-  { x: 496, y: 290, kind: "stool" },
-  { x: 357, y: 204, kind: "floor" },
-  { x: 466, y: 366, kind: "floor" },
+  { x: 400, y: CAFE.y + 90, kind: "stool" },
+  { x: 448, y: CAFE.y + 90, kind: "stool" },
+  { x: 496, y: CAFE.y + 90, kind: "stool" },
+  { x: 357, y: AISLE_Y - 10, kind: "floor" },
+  { x: 466, y: BELT_Y - 38, kind: "floor" },
 ];
 
 export interface Beam {
@@ -323,8 +358,8 @@ function hull(B: Backend, P: boolean) {
     for (let gx = FLOOR.x; gx < FLOOR.x + FLOOR.w; gx += 32) B.rect(gx, 62, 1, FLOOR.h - 30, "#1f2945");
     for (let gy = 94; gy < FLOOR.y + FLOOR.h; gy += 32) B.rect(FLOOR.x, gy, FLOOR.w, 1, "#1f2945");
   } else {
-    B.path(`M${FLOOR.x} 210 H190 L120 436 H${FLOOR.x} Z`, "#1c2542");
-    B.path(`M528 62 V436 H430 L528 150 Z`, "#1c2542");
+    B.path(`M${FLOOR.x} ${AISLE_Y - 4} H190 L120 ${FLOOR_BOTTOM} H${FLOOR.x} Z`, "#1c2542");
+    B.path(`M528 62 V${FLOOR_BOTTOM} H430 L528 150 Z`, "#1c2542");
   }
   // back wall with windows
   B.rect(FLOOR.x, FLOOR.y, FLOOR.w, 30, "#2c3a5e");
@@ -337,10 +372,10 @@ function hull(B: Backend, P: boolean) {
   // portholes along the right wall by the lounge, and one on the left aisle
   porthole(B, 524, 112, 6, P);
   porthole(B, 524, 150, 6, P);
-  porthole(B, 36, 262, 5, P);
+  porthole(B, 36, LY + 38, 5, P);
   // the door in the left wall, on the upper aisle
-  B.rect(x, 194, 8, 26, "#1a2340");
-  B.rect(x + 2, 196, 4, 22, C.teal, 0.35);
+  B.rect(x, AISLE_Y - 20, 8, 26, "#1a2340");
+  B.rect(x + 2, AISLE_Y - 18, 4, 22, C.teal, 0.35);
 }
 
 /** ORDERS: a shipboard ticket rail. Slips hang from four rails: New, Cooking, Review, Served. */
@@ -931,10 +966,12 @@ function line(B: Backend, m: GalleyModel, f: FrameState, P: boolean, hits: Hit[]
     }
   });
   if (m.podOverflow) {
+    // Under the last pod's plate, right-aligned to it: the lane and the café leave no room beside the line.
     const t = `+${m.podOverflow} cooking`;
     const tw = B.tw(t, 5.2, 900) + 6;
-    B.box(PODS_X[4] + POD_W + 4, LY + 12, tw, 9, T.plate, { r: 2, ink: !P });
-    B.text(PODS_X[4] + POD_W + 7, LY + 13.4, t, T.plateFg, 5.2, 900);
+    const tx = PODS_X[4] + POD_W - tw;
+    B.box(tx, LY + 58, tw, 9, T.plate, { r: 2, ink: !P });
+    B.text(tx + 3, LY + 59.4, t, T.plateFg, 5.2, 900);
   }
 }
 
@@ -997,7 +1034,7 @@ export function sceneAnimating(m: GalleyModel): boolean {
 
 /** The waypoints from `a` to `t`: along the upper aisle, and down the lane for the scanner. */
 export function route(a: { x: number; y: number }, t: { x: number; y: number }): { x: number; y: number }[] {
-  const low = (p: { y: number }) => p.y > 300;
+  const low = (p: { y: number }) => p.y > SUBS_Y;
   const pts: { x: number; y: number }[] = [];
   if (low(a) && !low(t)) pts.push({ x: LANE_X, y: a.y }, { x: LANE_X, y: AISLE_Y }, { x: t.x, y: AISLE_Y });
   else if (!low(a) && low(t)) pts.push({ x: a.x, y: AISLE_Y }, { x: LANE_X, y: AISLE_Y }, { x: LANE_X, y: t.y });
@@ -1023,7 +1060,7 @@ export function targetFor(m: GalleyModel, c: CrewMember, spotOf: Map<string, num
   }
   if (c.place === "pass") {
     const i = m.reviewers.findIndex((r) => r.id === c.id);
-    return i >= 0 && i < SPOTS.pass.length ? { ...SPOTS.pass[i], seated: false } : { x: LANE_X, y: 360, seated: false };
+    return i >= 0 && i < SPOTS.pass.length ? { ...SPOTS.pass[i], seated: false } : { ...SPOTS.passQueue, seated: false };
   }
   const i = spotOf.get(c.id);
   if (i === undefined) return { x: -1, y: -1, seated: false };
