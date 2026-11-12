@@ -21,7 +21,10 @@
 import { execFile } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
+import { ACTIVE_POLICY_FILE, BLOCKED_COMMANDS, describePolicy, LOCAL_ONLY, originRepo, POLICY_LIMITS, policyArgs, PROTECTED_FILES, readPolicy, writePolicy } from "./runPolicy";
 import type { ActionItem, AgentConfig, AgentStatus, Board, PlanSeen, SessionEnd, Task, TaskStatus, WorkflowHelper } from "../src/data/types";
 import { assignCharacter, type CharacterId } from "../src/data/crew";
 import { awaitingHuman, findSession, sessionUse, subagentPickedModel, subagents } from "./transcripts";
@@ -127,8 +130,140 @@ export function parseBrief(prompt: string): { key: string; title: string; sessio
 const ROLE_COLOR: Record<string, string> = { developer: "#29adff", tester: "#00e436", adversary: "#ffa300", orchestrator: "#ff77a8", integrator: "#ffec27", planner: "#83769c" };
 const clip = (s: string, n = 90) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
 
-/** Bash commands this run refuses for the coordinator and every worker. */
-export const BLOCKED_COMMANDS = String.raw`\bgit(\s+(-C|-c)\s+\S+|\s+--?[\w-]+(=\S+)?)*\s+push\b|\bgh\s+(pr|issue|release|repo|api)\b|\bvercel\b|\bnetlify\b|\bnpm\s+publish\b|\bpnpm\s+publish\b`;
+/** Bash commands a local-only run refuses for the coordinator and every worker (see runPolicy.ts). */
+export { BLOCKED_COMMANDS };
+
+// ---------------------------------------------------------------- the coordinator's hooks and run-policy guard
+
+/** The policy guard this server ships, next to this module in dist-server/ (absent on a tsx `--dev` server). */
+const BUNDLED_GUARD = join(dirname(fileURLToPath(import.meta.url)), "run-policy-guard.mjs");
+const GATE = "Treat this step as a human decision: record it as a human gate (State: human-gate, Gate: <what you need>) and stop.";
+/**
+ * The non-Bash tools whose writes the guard checks (they must not change the policy or guard files).
+ * Whether Claude Code anchors this matcher is not verified here. Either reading is safe: unanchored,
+ * it only sends more tools to the guard, which blocks any tool it doesn't know.
+ */
+export const FILE_TOOL_MATCHER = "Write|Edit|MultiEdit|NotebookEdit";
+
+/**
+ * The hook command. It reads the guard file once, checks its SHA-256 against `sha256` (fixed at
+ * coordinator start), and runs exactly those bytes from memory, so a kitchen copy that Bash rewrote,
+ * emptied or swapped mid-run blocks instead of deciding. The hash only pins what was there at start:
+ * installRunPolicyGuard trusts whatever dist-server holds when the coordinator starts. It fails closed: Claude Code blocks a tool call only
+ * on exit 2 and treats any other failure as a non-blocking error, so anything but exit 0 becomes exit 2.
+ */
+export function guardHookCommand(guard: string, sha256: string, args: string[]): string {
+  const say = (what: string) => `process.stderr.write("Tin & Thyme run policy: " + ${what} + " ${GATE}"); process.exit(2)`;
+  // Shell single quotes around JS: the loader has no single quotes, and GATE none either.
+  const loader = [
+    `const fs = require("fs"), crypto = require("crypto"), [f, h, ...a] = process.argv.slice(1); let b;`,
+    `try { b = fs.readFileSync(f) } catch (e) { ${say(`"the guard " + f + " can not be read, so this is blocked."`)} }`,
+    `if (crypto.createHash("sha256").update(b).digest("hex") !== h) { ${say(`"the guard " + f + " changed after the coordinator started, so every guarded tool call is blocked until you restart the coordinator."`)} }`,
+    `process.argv = [process.argv[0], f, ...a];`,
+    `import("data:text/javascript;base64," + b.toString("base64")).catch((e) => { ${say(`"the guard could not run (" + e.message + "), so this is blocked."`)} });`,
+  ].join(" ");
+  if (loader.includes("'")) throw new Error("the guard loader may not contain a single quote");
+  const run = ["node", "-e", `'${loader}'`, ...[guard, sha256, ...args].map((a) => JSON.stringify(a))].join(" ");
+  return `${run}; s=$?; [ "$s" -eq 0 ] && exit 0; [ "$s" -eq 2 ] || echo "Tin & Thyme run policy: the guard did not run (exit $s), so this is blocked. ${GATE}" >&2; exit 2`;
+}
+
+/**
+ * The legacy local-only guard, for a server with no bundled guard. Its Bash rule is 7b3eda3's, byte
+ * for byte; it also refuses Write/Edit of the policy and guard files in its own folder.
+ */
+function legacyGuardScript(): string {
+  return `#!/usr/bin/env node
+// Tin & Thyme run policy for this orchestration: commit locally only.
+import { realpathSync } from "node:fs";
+import { basename, dirname, resolve } from "node:path";
+const FILE_TOOLS = ${JSON.stringify(FILE_TOOL_MATCHER.split("|"))};
+const PROTECTED = ${JSON.stringify(PROTECTED_FILES.map((f) => f.toLowerCase()))};
+const real = (p) => { try { return realpathSync(p); } catch { return resolve(p); } };
+let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
+  let j = {}; try { j = JSON.parse(s); } catch {}
+  if (FILE_TOOLS.includes(j.tool_name)) {
+    const p = real(resolve(j.cwd || process.cwd(), String(j.tool_input?.file_path ?? j.tool_input?.notebook_path ?? "")));
+    if (real(dirname(p)).toLowerCase() === real(dirname(resolve(process.argv[1]))).toLowerCase() && PROTECTED.includes(basename(p).toLowerCase())) {
+      process.stderr.write("Tin & Thyme run policy: " + basename(p) + " defines this run's guard; only you can change it. ${GATE}");
+      process.exit(2);
+    }
+    process.exit(0);
+  }
+  let cmd = ""; try { cmd = JSON.parse(s).tool_input?.command ?? ""; } catch {}
+  if (new RegExp(${JSON.stringify(BLOCKED_COMMANDS)}).test(cmd)) {
+    process.stderr.write("Tin & Thyme run policy: this run is local only. Do not push, open or edit pull requests or GitHub issues, call the GitHub API, or deploy. ${GATE}");
+    process.exit(2);
+  }
+  process.exit(0);
+});
+`;
+}
+
+/**
+ * Writes the guard for this run into `dir` (the kitchen state folder) and returns the hook command
+ * that runs it. The policy comes from `dir`/run-policy.json (`tin-and-thyme policy`) and is fixed
+ * into the command, so a change applies only when the coordinator next starts; active-policy.json
+ * records it. run-policy.json is an ordinary file Bash can rewrite, so github-dev is honoured only
+ * when its repo is the project's origin. Without the bundled guard only local-only can be enforced.
+ * The bundled guard is trusted as found: a dist-server guard that Bash rewrote is hashed and used
+ * from this start on. The Tin & Thyme install is a trusted component, not something this checks.
+ */
+export function installRunPolicyGuard(dir: string, bundledGuard: string, log: (text: string) => void, root: string): string {
+  const { policy: wanted, problem } = readPolicy(dir);
+  if (problem) log(`Run policy: ${problem}`);
+  const bundled = existsSync(bundledGuard);
+  let policy = wanted;
+  if (wanted.mode === "github-dev") {
+    const origin = originRepo(root);
+    if (!bundled) {
+      policy = LOCAL_ONLY;
+      log("Run policy: this server has no bundled policy guard (dev build), so the run stays local only. Build with `pnpm build`.");
+    } else if (!origin || origin.toLowerCase() !== wanted.repo.toLowerCase()) {
+      policy = LOCAL_ONLY;
+      log(`Run policy: run-policy.json names ${wanted.repo}, but this project's origin is ${origin ?? "not a GitHub repository"}, so the run stays local only. Set it again with tin-and-thyme policy --set=github-dev.`);
+    }
+  }
+  writePolicy(dir, policy, ACTIVE_POLICY_FILE);
+  log(`Run policy: ${describePolicy(policy)}. Limits: ${POLICY_LIMITS.join(" ")}`);
+  const guard = join(dir, bundled ? "run-policy-guard.mjs" : "no-push-guard.mjs");
+  const bytes = bundled ? readFileSync(bundledGuard) : Buffer.from(legacyGuardScript());
+  writeFileSync(guard, bytes);
+  chmodSync(guard, 0o755);
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  return guardHookCommand(guard, sha256, bundled ? policyArgs(policy) : []);
+}
+
+export interface CoordinatorSettingsOptions {
+  /** The kitchen state folder, ~/.controlroom/<key>. */
+  dir: string;
+  /** The kitchen's hook endpoint for the coordinator, without the event. */
+  hookUrl: string;
+  agentToken: string;
+  bundledGuard: string;
+  /** The project root: github-dev must name its origin. */
+  root: string;
+  log(text: string): void;
+}
+
+/** The coordinator's `--settings` file: the run-policy guard first on Bash and the file tools, then the kitchen's observers. */
+export function writeCoordinatorSettings(o: CoordinatorSettingsOptions): string {
+  mkdirSync(o.dir, { recursive: true });
+  const guard = installRunPolicyGuard(o.dir, o.bundledGuard, o.log, o.root);
+  const post = (event: string) => ({
+    type: "command",
+    command: `curl -s -m 3 -X POST -H 'Authorization: Bearer ${o.agentToken}' -H 'Content-Type: application/json' --data-binary @- ${o.hookUrl}/${event} 2>/dev/null; exit 0`,
+  });
+  const events = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "SubagentStart", "SubagentStop", "Notification", "Stop", "SessionEnd"];
+  const hooks: Record<string, unknown[]> = {};
+  for (const e of events) hooks[e] = [{ ...(e.endsWith("ToolUse") ? { matcher: "*" } : {}), hooks: [post(e)] }];
+  hooks.PreToolUse.unshift(
+    { matcher: "Bash", hooks: [{ type: "command", command: guard, timeout: 60 }] },
+    { matcher: FILE_TOOL_MATCHER, hooks: [{ type: "command", command: guard, timeout: 60 }] },
+  );
+  const file = join(o.dir, "coordinator-settings.json");
+  writeFileSync(file, JSON.stringify({ hooks }, null, 2));
+  return file;
+}
 
 export class PathfinderRun {
   private workers = new Map<string, Worker>();
@@ -341,36 +476,14 @@ export class PathfinderRun {
   // ---------------------------------------------------------------- launch
 
   private hookSettingsFile(): string {
-    const dir = join(homedir(), ".controlroom", this.hub.slug);
-    mkdirSync(dir, { recursive: true });
-    const guard = join(dir, "no-push-guard.mjs");
-    writeFileSync(
-      guard,
-      `#!/usr/bin/env node
-// Tin & Thyme run policy for this orchestration: commit locally only.
-let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
-  let cmd = ""; try { cmd = JSON.parse(s).tool_input?.command ?? ""; } catch {}
-  if (new RegExp(${JSON.stringify(BLOCKED_COMMANDS)}).test(cmd)) {
-    process.stderr.write("Tin & Thyme run policy: this run is local only. Do not push, open or edit pull requests or GitHub issues, call the GitHub API, or deploy. Treat this step as a human decision: record it as a human gate (State: human-gate, Gate: <what you need>) and stop.");
-    process.exit(2);
-  }
-  process.exit(0);
-});
-`,
-    );
-    chmodSync(guard, 0o755);
-    const url = `http://127.0.0.1:${this.port}/hook/${COORDINATOR_ID}`;
-    const post = (event: string) => ({
-      type: "command",
-      command: `curl -s -m 3 -X POST -H 'Authorization: Bearer ${this.agentToken}' -H 'Content-Type: application/json' --data-binary @- ${url}/${event} 2>/dev/null; exit 0`,
+    return writeCoordinatorSettings({
+      dir: join(homedir(), ".controlroom", this.hub.slug),
+      hookUrl: `http://127.0.0.1:${this.port}/hook/${COORDINATOR_ID}`,
+      agentToken: this.agentToken,
+      bundledGuard: BUNDLED_GUARD,
+      root: this.root,
+      log: (text) => this.hub.activity("config", COORDINATOR_ID, text),
     });
-    const events = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "SubagentStart", "SubagentStop", "Notification", "Stop", "SessionEnd"];
-    const hooks: Record<string, unknown[]> = {};
-    for (const e of events) hooks[e] = [{ ...(e.endsWith("ToolUse") ? { matcher: "*" } : {}), hooks: [post(e)] }];
-    hooks.PreToolUse.unshift({ matcher: "Bash", hooks: [{ type: "command", command: `node ${JSON.stringify(guard)}` }] });
-    const file = join(dir, "coordinator-settings.json");
-    writeFileSync(file, JSON.stringify({ hooks }, null, 2));
-    return file;
   }
 
   async startCoordinator() {

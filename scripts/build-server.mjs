@@ -3,7 +3,7 @@
 import { build } from "esbuild";
 
 await build({
-  entryPoints: { main: "server/main.ts", kitchen: "server/kitchen.ts" },
+  entryPoints: { main: "server/main.ts", kitchen: "server/kitchen.ts", "run-policy-guard": "server/runPolicyGuard.ts" },
   outdir: "dist-server",
   outExtension: { ".js": ".mjs" },
   bundle: true,
@@ -14,4 +14,4 @@ await build({
   sourcemap: false,
   logLevel: "warning",
 });
-console.log("built dist-server/main.mjs and dist-server/kitchen.mjs");
+console.log("built dist-server/main.mjs, kitchen.mjs and run-policy-guard.mjs");

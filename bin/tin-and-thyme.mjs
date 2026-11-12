@@ -4,6 +4,7 @@
 //   tin-and-thyme open [path] [--no-browser]   open (or reuse) the kitchen for a repo
 //   tin-and-thyme url [path]                   print a running kitchen's URL
 //   tin-and-thyme list                         recorded kitchens and whether they answer
+//   tin-and-thyme policy [path] [--set=…]      show or set a kitchen's run policy
 //
 // One kitchen per repository, keyed by its canonical path. A healthy kitchen that
 // proves it serves that exact repo is reused; otherwise one starts on a free
@@ -39,11 +40,33 @@ Usage:
   tin-and-thyme open [path]   Open the kitchen for a repository (default: the one you are in)
   tin-and-thyme url [path]    Print the URL of the kitchen already running for a repository
   tin-and-thyme list          List known kitchens and whether they still answer
+  tin-and-thyme policy [path] Show the run policy for a repository's orchestration
   tin-and-thyme --help        Show this message
   tin-and-thyme --version     Print the version
 
 Flags:
   --no-browser   Start or reuse the kitchen and print its URL instead of opening the browser
+  --set=local-only                     (policy) the default: a Bash command whose text names
+                                       git push, gh pr/issue/release/repo/api, vercel, netlify or
+                                       npm/pnpm publish is refused (a text match)
+  --set=github-dev --repo=owner/name   (policy) Bash commands written plainly may run gh reads,
+                                       issue/label writes, PRs from ticket/* into main, comment and
+                                       request-changes reviews, and pushes of ticket/* branches to
+                                       that repo; merges, approvals, other branches, releases,
+                                       publish and deploys written plainly are refused
+
+Both policies are command guardrails: they catch mistakes and plainly written commands. They are
+not isolation and not a security boundary. They trust the Tin & Thyme install and its dist-server,
+the files in the kitchen folder, the hook's working directory and the shell. A policy change
+applies the next time the kitchen starts the coordinator (stop and start the Head Chef). It is
+stored per repository in ~/.controlroom/<kitchen>/run-policy.json, an ordinary file that any Bash
+command can also change. The guard reads the text of Bash commands only: scripts, programs (the
+orchestration engine's own gh calls included), git hooks, git config and shell forms it does not
+parse can do whatever the credentials on this machine allow, and MCP and web tools are not checked.
+Protect main, merges, tags and releases on GitHub itself, with a separate agent identity: see
+docs/run-policy-enforcement.md in the Tin & Thyme repository,
+https://github.com/rikilamadrid/tin-and-thyme/blob/main/docs/run-policy-enforcement.md.
+"tin-and-thyme policy" lists every limit.
 
 Each repository gets one kitchen: a local server on a free port from ${PORTS.first}, bound to
 127.0.0.1. Running open again reuses it once it proves it serves that exact repository.
@@ -64,9 +87,10 @@ if (!cmd || argv.includes("-h") || argv.includes("--help")) {
   process.exit(cmd || argv.length ? 0 : 1);
 }
 const positional = argv.filter((a) => !a.startsWith("-")).slice(1);
-const unknown = argv.filter((a) => a.startsWith("-") && !["--no-browser"].includes(a));
+const unknown = argv.filter((a) => a.startsWith("-") && !["--no-browser"].includes(a) && !(cmd === "policy" && /^--(set|repo)=/.test(a)));
+const opt = (name) => argv.find((a) => a.startsWith(`--${name}=`))?.slice(name.length + 3);
 if (unknown.length) fail(`unknown option ${unknown[0]}. Run "tin-and-thyme --help".`);
-if (!["open", "url", "list"].includes(cmd)) fail(`unknown command "${cmd}". Run "tin-and-thyme --help".`);
+if (!["open", "url", "list", "policy"].includes(cmd)) fail(`unknown command "${cmd}". Run "tin-and-thyme --help".`);
 if (Number(process.versions.node.split(".")[0]) < 20) fail(`needs Node.js 20 or newer (you have ${process.versions.node}).`);
 if (!existsSync(SERVER) || !existsSync(KITCHEN) || !existsSync(join(HOME, "dist", "index.html"))) {
   fail(`Tin & Thyme isn't built yet. Build it once:\n  cd ${HOME}\n  pnpm install && pnpm build`);
@@ -192,6 +216,41 @@ if (cmd === "list") {
 
 const root = target();
 const key = K.kitchenKey(root);
+
+if (cmd === "policy") {
+  const set = opt("set");
+  const repo = opt("repo");
+  if (set === undefined) {
+    if (repo !== undefined) fail('--repo goes with --set=github-dev.');
+    const { policy, problem } = K.readRunPolicy(key);
+    out(`Run policy for ${root}`);
+    out(`  ${policy.mode}${policy.mode === "github-dev" ? ` · ${policy.repo}` : ""}: ${K.describePolicy(policy)}`);
+    if (problem) out(`  ! ${problem}`);
+    out("Not enforced:");
+    for (const limit of K.POLICY_LIMITS) out(`  - ${limit}`);
+    process.exit(0);
+  }
+  let policy;
+  if (set === "local-only") {
+    if (repo !== undefined) fail("local-only takes no --repo.");
+    policy = { mode: "local-only" };
+  } else if (set === "github-dev") {
+    if (!repo || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) fail("github-dev needs --repo=owner/name.");
+    const origin = K.originRepo(root);
+    if (!origin) fail(`${root} has no GitHub origin remote, so github-dev can't be checked against it.`);
+    if (origin.toLowerCase() !== repo.toLowerCase()) fail(`--repo=${repo} isn't this repository's origin (${origin}). The policy only allows the repo you push to.`);
+    policy = { mode: "github-dev", repo: origin };
+  } else {
+    fail(`unknown policy "${set}". Use --set=local-only or --set=github-dev --repo=owner/name.`);
+  }
+  K.writeRunPolicy(key, policy);
+  out(`Run policy for ${root} is now ${policy.mode}${policy.mode === "github-dev" ? ` · ${policy.repo}` : ""}:`);
+  out(`  ${K.describePolicy(policy)}`);
+  out("  It applies the next time the coordinator starts (stop and start the Head Chef in the kitchen).");
+  out("Not enforced:");
+  for (const limit of K.POLICY_LIMITS) out(`  - ${limit}`);
+  process.exit(0);
+}
 
 if (cmd === "url") {
   const rec = K.readRecord(key);
