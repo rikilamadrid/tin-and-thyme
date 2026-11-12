@@ -4,7 +4,7 @@
 
 import { CHARACTERS, CREW_CHARACTERS, CREW_VARIANTS, type CharacterId } from "../src/data/crew";
 import {
-  allocateCharacter, canTransition, CHARACTER_FAMILY, CREW_STATES, CREW_TRANSITIONS, crewContractProblems, crewNameProblem, crewTransitionKind, deriveCrewState,
+  allocateCharacter, canTransition, compareSessionAge, CREW_STATE_BADGE, CHARACTER_FAMILY, CREW_STATES, CREW_TRANSITIONS, crewContractProblems, crewNameProblem, crewTransitionKind, deriveCrewState,
   emptyCrewBook, endSession, FAMILY_POOLS, familyFor, FINISHED_LINGER_MS, MAX_CREW_NAME, migrateLegacy, PARALLEL_FAMILIES, reconcileAfterRestore,
   RESERVED_ACCENTS, restoreSession, ROLE_FAMILIES, spriteBase, startSession,
   type CrewBook, type CrewCharacterId, type CrewSession, type LegacyCrewJson, type LegacySessionsJson, type RoleFamily,
@@ -92,7 +92,8 @@ const tests: [string, () => void][] = [
     const book = emptyCrewBook("test", iso(NOW));
     same("testers", ["a", "b", "c", "d", "e"].map((id, i) => start(book, id, "tester", `0${i}.1`)), ["dash", "dot", "blip", "zest", null]);
     same("adversaries", ["p", "q"].map((id) => start(book, id, "adversary", null)), ["pinch", "tang"]);
-    same("coordinator", allocateCharacter(book, "orchestrator", null), "basil");
+    same("coordinator", allocateCharacter(book, "orchestrator", null, "coordinator"), "basil");
+    same("orchestrator-family worker", allocateCharacter(book, "orchestrator", null), null);
   }],
   ["allocation: reuse a finished character; prefer the same ticket", () => {
     const book = emptyCrewBook("test", iso(NOW));
@@ -270,6 +271,61 @@ const tests: [string, () => void][] = [
     same("c1", startSession(b, "coordinator:t1", { kind: "coordinator", stage: "coordinate" }, iso(NOW)).characterId, "basil");
     same("c2", startSession(b, "coordinator:t2", { kind: "coordinator", stage: "coordinate" }, iso(NOW + 1)).characterId, "basil");
     same("c1 ended", [b.sessions["coordinator:t1"].phase, b.characters.basil?.sessionId], ["ended", "coordinator:t2"]);
+  }],
+  ["basil: only the coordinator wears him (N1)", () => {
+    const liveOnBasil = (b: CrewBook) => Object.values(b.sessions).filter((s) => s.phase === "live" && s.characterId === "basil").map((s) => s.id);
+    // A coordinator, then a worker whose brief says Role: lead.
+    const b1 = emptyCrewBook("k", iso(NOW));
+    startSession(b1, "coordinator:t1", { kind: "coordinator" }, iso(NOW));
+    const lead = startSession(b1, "wk1", { kind: "worker", role: "lead", stage: "implementation", ticket: "x" }, iso(NOW + 1));
+    same("Role lead worker is overflow", [lead.family, lead.characterId], ["orchestrator", null]);
+    same("basil held once", liveOnBasil(b1), ["coordinator:t1"]);
+    const integ = startSession(b1, "wk2", { kind: "worker", stage: "integrate", ticket: "x" }, iso(NOW + 2));
+    same("Session integrate, no Role, is overflow", integ.characterId, null);
+    // The same worker first, with no coordinator yet: still never basil.
+    const b2 = emptyCrewBook("k", iso(NOW));
+    same("lead worker alone", startSession(b2, "wk1", { role: "lead" }, iso(NOW)).characterId, null);
+    // A legacy live basil worker, the restore records the coordinator, then reconcile.
+    const OPT = { kitchen: "k", now: iso(NOW), backup: "/b" };
+    const legacy: LegacyCrewJson = { z1: { id: "basil", name: "Basil", job: "Head Chef" } };
+    const b3 = migrateLegacy(legacy, {}, null, OPT);
+    restoreSession(b3, "coordinator:t", { kind: "coordinator", phase: "live", startedAt: iso(NOW - 3_600_000) }, iso(NOW + 1));
+    same("coordinator start moves the legacy worker off", [b3.sessions.z1.characterId, b3.sessions.z1.reassignedFrom], [null, "basil"]);
+    same("conflict recorded", b3.migrations.at(-1)?.conflicts.map((c) => [c.sessionId, c.characterId]), [["z1", "basil"]]);
+    same("reconcile finds nothing more", reconcileAfterRestore(b3, ["z1", "coordinator:t"], iso(NOW + 2)), []);
+    same("basil held by the coordinator only", liveOnBasil(b3), ["coordinator:t"]);
+    // Legacy live basil worker kept running through reconcile, then a coordinator starts.
+    const b4 = migrateLegacy(legacy, {}, null, OPT);
+    const c4 = reconcileAfterRestore(b4, ["z1"], iso(NOW + 1));
+    same("reconcile moves a non-coordinator off basil", [c4.map((c) => c.sessionId), b4.sessions.z1.characterId], [["z1"], null]);
+    startSession(b4, "coordinator:t2", { kind: "coordinator" }, iso(NOW + 2));
+    same("coordinator gets basil alone", liveOnBasil(b4), ["coordinator:t2"]);
+    same("basil record holder", b4.characters.basil?.sessionId, "coordinator:t2");
+  }],
+  ["compareSessionAge is a total order (N3)", () => {
+    const mk = (id: string, seq: number, t: number | null) => ({ ...session(id, "developer", null, "pepper", "live"), seq, startedAt: t === null ? null : iso(t) });
+    const A = mk("A", 0, NOW + 10), B = mk("B", 1, null), C = mk("C", 2, NOW + 5);
+    const lt = (x: CrewSession, y: CrewSession) => compareSessionAge(x, y) < 0;
+    same("no cycle", [lt(A, B), lt(B, C), lt(C, A)].filter(Boolean).length < 3 && [lt(B, A), lt(C, B), lt(A, C)].filter(Boolean).length < 3, true);
+    same("order", [B, C, A].map((s) => s.id), [A, B, C].sort(compareSessionAge).map((s) => s.id));
+    same("same order from any input", [C, A, B].sort(compareSessionAge).map((s) => s.id), ["B", "C", "A"]);
+    for (const x of [A, B, C]) for (const y of [A, B, C]) if (x !== y && Math.sign(compareSessionAge(x, y)) !== -Math.sign(compareSessionAge(y, x))) throw new Error(`antisymmetry ${x.id} ${y.id}`);
+    same("equal startedAt falls back to seq", compareSessionAge(mk("D", 3, NOW), mk("E", 4, NOW)) < 0, true);
+  }],
+  ["state order, badges, endedAt (N2, N4)", () => {
+    const live = session("s", "developer", "09.1", "pepper", "live");
+    const obs = { session: "stopped", agent: "needs-input", tools: 3, attention: { kind: "needs-you", reason: "09.1 gate" }, at: iso(NOW) } as const;
+    same("stopped at a real gate is needs-you", deriveCrewState(live, obs, NOW), "needs-you");
+    same("stopped and waiting is waiting", deriveCrewState(live, { ...obs, attention: { kind: "waiting", reason: "workers" } }, NOW), "waiting");
+    same("stopped, no attention, is unknown", deriveCrewState(live, { ...obs, attention: null }, NOW), "unknown");
+    same("badges", CREW_STATES.map((s) => CREW_STATE_BADGE[s]), [null, "starting", null, "waiting", "needs-you", "unknown", null]);
+    // Reconcile ends a crew-only session; a later sessions.json ending fills end but keeps endedAt.
+    const OPT = { kitchen: "k", now: iso(NOW), backup: "/b" };
+    const crew: LegacyCrewJson = { q1: { id: "pepper", name: "Pepper", job: "Sous Chef" } };
+    const b = migrateLegacy(crew, {}, null, OPT);
+    reconcileAfterRestore(b, [], iso(NOW + 1000));
+    const b2 = migrateLegacy(crew, { q1: end(NOW - 5000, "gate") }, b, { ...OPT, now: iso(NOW + 2000) });
+    same("ending filled, endedAt kept", [b2.sessions.q1.end?.outcome, b2.sessions.q1.end?.at, b2.sessions.q1.endedAt], ["gate", iso(NOW - 5000), iso(NOW + 1000)]);
   }],
 ];
 

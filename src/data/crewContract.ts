@@ -89,7 +89,12 @@ export const CHARACTER_FAMILY = Object.fromEntries(
   (Object.entries(FAMILY_POOLS) as [RoleFamily, readonly CrewCharacterId[]][]).flatMap(([f, ids]) => ids.map((id) => [id, f])),
 ) as Record<CrewCharacterId, RoleFamily>;
 
-/** The coordinator's character. Reserved: never allocated to any other session. */
+/**
+ * The coordinator's character. Reserved for `kind: "coordinator"` sessions: no other session ever
+ * wears it, whatever its family. A worker or helper whose family is orchestrator (Role lead,
+ * orchestrator or coordinator; Session coordinate or integrate) is overflow, and a legacy live
+ * worker on basil is moved to overflow by startSession (coordinator) or reconcileAfterRestore.
+ */
 export const COORDINATOR_CHARACTER: CrewCharacterId = "basil";
 
 // ---------------------------------------------------------------- Stages
@@ -243,7 +248,10 @@ export const CREW_BOOK_SCHEMA = "tin-and-thyme.crew-book";
 export const CREW_BOOK_VERSION = 1;
 /** In ~/.controlroom/<key>/. Legacy crew.json and sessions.json stay next to it, untouched. */
 export const CREW_BOOK_FILE = "crew-book.json";
-/** Backups go to ~/.controlroom/<key>/backups/crew-<stamp>/ before any migration write. */
+/**
+ * Backups go to ~/.controlroom/<key>/backups/crew-<stamp>/, only on a start that writes a migration
+ * (migrateLegacy appended a migration entry), before that write. Other starts write no backup.
+ */
 export const CREW_BACKUP_DIR = "backups";
 
 export interface CrewMigration {
@@ -361,7 +369,8 @@ export function deriveCrewState(session: CrewSession | null, obs: CrewObservatio
 /**
  * Picks the character for a NEW session. Call it once per session id and store the result in
  * CrewSession.characterId; later polls, reconnects and restarts read that, never re-allocate.
- *  1. orchestrator -> basil, always.
+ *  1. kind coordinator -> basil, always. Any other session of the orchestrator family -> null
+ *     (overflow): basil is the family's whole pool and is reserved, and families never borrow.
  *  2. Candidates: the family's pool, minus retired characters and any worn by a live session
  *     (read from the sessions, not the record cache). A just-finished character is a candidate at
  *     once: the linger window is animation only.
@@ -370,8 +379,14 @@ export function deriveCrewState(session: CrewSession | null, obs: CrewObservatio
  *     numbered copy, never another family's character, never a cap on real sessions. The session
  *     stays overflow for its whole life, even when a character frees up later.
  */
-export function allocateCharacter(book: Pick<CrewBook, "characters" | "sessions">, family: RoleFamily, ticket: string | null): CrewCharacterId | null {
-  if (family === "orchestrator") return COORDINATOR_CHARACTER;
+export function allocateCharacter(
+  book: Pick<CrewBook, "characters" | "sessions">,
+  family: RoleFamily,
+  ticket: string | null,
+  kind: CrewSessionKind = "worker",
+): CrewCharacterId | null {
+  if (kind === "coordinator") return COORDINATOR_CHARACTER;
+  if (family === "orchestrator") return null;
   const worn = new Set(Object.values(book.sessions).flatMap((s) => (s.phase === "live" && s.characterId ? [s.characterId] : [])));
   const free = FAMILY_POOLS[family].filter((id) => !book.characters[id]?.retired && !worn.has(id));
   if (ticket) {
@@ -390,11 +405,26 @@ export function allocateCharacter(book: Pick<CrewBook, "characters" | "sessions"
 // (migrateLegacy alone returns a new one) and never touch the disk: backup, atomic write and the
 // corrupt-file rule stay with the caller (docs/crew-contract.md, Crew book).
 
-/** Older first: both startedAt known -> earlier start; otherwise (legacy entries have none) lower seq. */
+const startMs = (s: CrewSession): number | null => {
+  const t = s.startedAt ? Date.parse(s.startedAt) : NaN;
+  return Number.isFinite(t) ? t : null;
+};
+
+/**
+ * Older first, as a total order (transitive, so sorting is stable whatever the input order):
+ *  1. a session without a parseable startedAt is older than one with it (only legacy entries lack
+ *     it, and they predate every session the book started itself);
+ *  2. both known: the earlier startedAt;
+ *  3. otherwise (both unknown, or equal): the lower seq.
+ * "seq unless both have startedAt" alone is not transitive: A(seq 0, t+10), B(seq 1, none),
+ * C(seq 2, t+5) gives A<B, B<C and C<A.
+ */
 export function compareSessionAge(a: CrewSession, b: CrewSession): number {
-  const x = a.startedAt ? Date.parse(a.startedAt) : NaN;
-  const y = b.startedAt ? Date.parse(b.startedAt) : NaN;
-  if (Number.isFinite(x) && Number.isFinite(y) && x !== y) return x - y;
+  const x = startMs(a);
+  const y = startMs(b);
+  if (x === null && y !== null) return -1;
+  if (x !== null && y === null) return 1;
+  if (x !== null && y !== null && x !== y) return x - y;
   return a.seq - b.seq;
 }
 
@@ -444,10 +474,19 @@ function blankSession(id: string, seq: number): CrewSession {
 
 const FACT_FIELDS = ["kind", "hqId", "role", "stage", "ticket", "title", "worktree", "parent", "transcript", "startedAt"] as const;
 
+/** Moves a live non-coordinator session off basil to overflow (characterId null, reassignedFrom basil). */
+function moveOffBasil(s: CrewSession): CrewMigration["conflicts"][number] {
+  s.characterId = null;
+  s.reassignedFrom = COORDINATOR_CHARACTER;
+  return { sessionId: s.id, characterId: COORDINATOR_CHARACTER, reason: `basil is worn only by the coordinator; ${s.kind} session moved to overflow` };
+}
+
 /**
  * A NEW live session: allocates its character once and records it. An id already in the book is
  * returned as it is (never re-allocated, never revived). A new coordinator session ends any other
- * live coordinator session (one coordinator per kitchen), so Basil is never shared.
+ * live coordinator session (one coordinator per kitchen) and moves any live non-coordinator session
+ * still on basil (a legacy worker) to overflow, recorded in the latest migration's `conflicts`, so
+ * Basil is never shared.
  */
 export function startSession(book: CrewBook, id: string, facts: CrewSessionFacts, now: string): CrewSession {
   const had = book.sessions[id];
@@ -456,15 +495,24 @@ export function startSession(book: CrewBook, id: string, facts: CrewSessionFacts
   for (const f of FACT_FIELDS) if (facts[f] !== undefined) (s as unknown as Record<string, unknown>)[f] = facts[f];
   s.startedAt ??= now;
   s.family = s.kind === "coordinator" ? "orchestrator" : familyFor(s.role, s.stage ?? (s.kind === "helper" ? "helper" : null));
-  if (s.kind === "coordinator") for (const o of Object.values(book.sessions)) if (o.kind === "coordinator" && o.phase === "live") endSession(book, o.id, null, now);
-  s.characterId = allocateCharacter(book, s.family, s.ticket);
+  if (s.kind === "coordinator") {
+    for (const o of Object.values(book.sessions)) if (o.kind === "coordinator" && o.phase === "live") endSession(book, o.id, null, now);
+    const moved = Object.values(book.sessions).filter((o) => o.phase === "live" && o.characterId === COORDINATOR_CHARACTER && o.kind !== "coordinator").map(moveOffBasil);
+    book.migrations.at(-1)?.conflicts.push(...moved);
+  }
+  s.characterId = allocateCharacter(book, s.family, s.ticket, s.kind);
   book.sessions[id] = s;
   book.updatedAt = now;
   refreshCharacters(book, now);
   return s;
 }
 
-/** live -> ended, with Pathfinder's recorded ending (null = outcome unknown). An ended session is left alone. */
+/**
+ * live -> ended, with Pathfinder's recorded ending (null = outcome unknown). An ended session is left
+ * alone. `endedAt` is set once, here (or by restoreSession / migrateLegacy when it was null), and is
+ * never moved afterwards: a sessions.json ending that arrives after reconcile ended the session
+ * fills `end` (its own time is `end.at`) but keeps the endedAt the kitchen recorded.
+ */
 export function endSession(book: CrewBook, id: string, end: SessionEnd | null, now: string): CrewSession | null {
   const s = book.sessions[id];
   if (!s) return null;
@@ -522,7 +570,10 @@ export function restoreSession(book: CrewBook, id: string, facts: CrewSessionFac
  * Rule 7, run once after the first full restore pass (and never before it):
  *  1. every live session the restore did not see running is ended with `end: null` (outcome
  *     unknown), endedAt = now: a crew-only legacy entry whose session died while the server was down;
- *  2. a character still worn by two or more live sessions stays with the oldest (compareSessionAge:
+ *  2. a live non-coordinator session on basil (a legacy worker; old characterForRole gave
+ *     orchestrator-role workers basil) is moved to overflow with reassignedFrom basil: basil is
+ *     worn only by the coordinator;
+ *  3. a character still worn by two or more live sessions stays with the oldest (compareSessionAge:
  *     startedAt, else seq, i.e. crew.json order, which is start order). Each later one is allocated
  *     again in its own family, gets `reassignedFrom`, and is listed in the latest migration's
  *     `conflicts` (or overflow, characterId null, when its pool is full).
@@ -536,13 +587,17 @@ export function reconcileAfterRestore(book: CrewBook, runningIds: Iterable<strin
   const keeper = new Map<CrewCharacterId, string>();
   for (const s of live) {
     const c = s.characterId!;
+    if (c === COORDINATOR_CHARACTER && s.kind !== "coordinator") {
+      conflicts.push(moveOffBasil(s));
+      continue;
+    }
     if (!keeper.has(c)) {
       keeper.set(c, s.id);
       continue;
     }
     s.characterId = null;
     s.reassignedFrom = c;
-    s.characterId = allocateCharacter(book, s.family, s.ticket);
+    s.characterId = allocateCharacter(book, s.family, s.ticket, s.kind);
     if (s.characterId) keeper.set(s.characterId, s.id);
     conflicts.push({ sessionId: s.id, characterId: c, reason: `${c} stays with older live session ${keeper.get(c)}; moved to ${s.characterId ?? "overflow"}` });
   }
@@ -559,7 +614,10 @@ export function reconcileAfterRestore(book: CrewBook, runningIds: Iterable<strin
 export interface MigrateOptions {
   kitchen: string;
   now: string;
-  /** The backup directory the caller wrote before calling (rule 1); recorded in the migration. */
+  /**
+   * The backup directory for this run (rule 1), recorded in a new migration entry. The caller
+   * fills it before writing the book, and only when this call appended a migration entry.
+   */
   backup: string;
 }
 
@@ -684,6 +742,17 @@ export interface CrewBadge {
   ticket: string | null;
 }
 
+/** Which badge each state shows; null = no badge. */
+export const CREW_STATE_BADGE: Record<CrewState, CrewBadge["kind"] | null> = {
+  available: null,
+  assigned: "starting",
+  working: null,
+  waiting: "waiting",
+  "needs-you": "needs-you",
+  unknown: "unknown",
+  finished: null,
+};
+
 export interface CrewCharacterView {
   id: CrewCharacterId;
   family: RoleFamily;
@@ -695,7 +764,14 @@ export interface CrewCharacterView {
   customized: boolean;
   retired: boolean;
   state: CrewState;
+  /**
+   * When `state` took its current value (ISO, server time). The registry (09.3) keeps it in memory:
+   * the time of the poll on which deriveCrewState first returned this state for this character.
+   * Not persisted; after a restart it is the record's availableSince for `available` (else
+   * firstSeen), the session's endedAt for `finished`, and the first poll for every other state.
+   */
   stateSince: string;
+  /** CREW_STATE_BADGE[state]; the reason is the attention reason when there is one, else null. */
   badge: CrewBadge | null;
   /** The session it holds (or, while finished, the one it just ended). */
   sessionId: string | null;

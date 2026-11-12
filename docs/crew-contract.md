@@ -79,6 +79,11 @@ each.
 The coordinator's sessions are `coordinate`, or `integrate` while it integrates. Both are
 orchestrator.
 
+Only the coordinator session (`kind: "coordinator"`) wears Basil. A worker or helper that lands in
+the orchestrator family is **overflow** (`characterId: null`, family kept as orchestrator): a
+brief with `Role: lead`, `orchestrator` or `coordinator`, or `Session: integrate` with no Role.
+The orchestrator pool is Basil alone, and families never borrow, so it gets no robot.
+
 ## Sessions
 
 The `CrewSession` id rules are below. A session record is never re-keyed or deleted.
@@ -97,6 +102,11 @@ The `CrewSession` id rules are below. A session record is never re-keyed or dele
 - `seq` is the book-wide creation order: 0, 1, 2 and so on. Migrated sessions take crew.json key
   order, which is start order, because `addWorker` appends at session start. It breaks ties of age.
 - `phase` only goes `live` → `ended`. Nothing moves a session back to `live`.
+- `endedAt` is set once, when the session goes `live` → `ended` (or filled when it was null), and
+  is never moved afterwards. If reconcile ended a session with `end: null` and a sessions.json
+  ending arrives later, that ending fills `end`, and its own time stays in `end.at`. `endedAt`
+  keeps the time the kitchen recorded, so the finished linger and `availableSince` never jump
+  backwards.
 - `end` reuses `SessionEnd`. Its `outcome` is `handed-off` (success), `gate`, `failed` or
   `interrupted`, and the four stay distinct. A session that ended with no recorded outcome has
   `phase: "ended"` and `end: null`, and shows as "outcome unknown".
@@ -117,8 +127,7 @@ rules in order:
    coordinator session recorded, he is **unknown** (pass `character` to `deriveCrewState`).
 2. **finished**: the session ended less than 6 s ago (the handoff pose).
 3. **unknown**: no observation, a reading older than `OBSERVATION_STALE_MS` (2 min) or with an
-   unparseable `at`, or a live session whose process is stopped or failed. It is never shown as
-   idle or working. `CrewObservation.at` is **when the server took the reading**, stamped on every
+   unparseable `at`. It is never shown as idle or working. `CrewObservation.at` is **when the server took the reading**, stamped on every
    poll. It is not the time of the agent's last action. A gate left unanswered for an hour, a
    coordinator waiting on workers, or a long tool call all stay fresh, because each poll reads them
    again. Staleness means the server has lost sight of the session, and then even a needs-you
@@ -127,8 +136,10 @@ rules in order:
    The badge names the reason and the ticket.
 5. **waiting**: Feature 06 says waiting (workers, tools or dependencies).
 6. **assigned**: the process is starting, or running with no tool call yet. The starting badge stays.
-7. **working**: running, with the agent working.
-8. Anything else while live is **waiting**. That includes `needs-input` that Feature 06 has not
+7. **unknown**: a live session whose process is stopped or failed. This comes after needs-you and
+   waiting on purpose: a worker that stopped at a real gate is still a gate, and shows needs-you.
+8. **working**: running, with the agent working.
+9. Anything else while live is **waiting**. That includes `needs-input` that Feature 06 has not
    confirmed, so it never turns pink.
 
 Allowed transitions (`CREW_TRANSITIONS`; staying in the same state is always allowed):
@@ -158,7 +169,9 @@ record, not a state. A session that ends never beams the robot out.
 2. Allocation runs **once per new session id**. The result is stored in `CrewSession.characterId`.
    Polls, reconnects and restarts read the stored value and never allocate again, so identity
    stays stable.
-3. The orchestrator always gets `basil`. Basil is reserved and is never given to another session.
+3. The coordinator session (`kind: "coordinator"`) always gets `basil`. Basil is reserved: no
+   other session wears him, whatever its family. Any other orchestrator-family session is
+   overflow (`allocateCharacter(book, family, ticket, kind)`; `kind` defaults to `worker`).
 4. The candidates are the family's own pool, minus characters that are retired or that hold a live
    session. Families never borrow characters from each other. A character whose session just ended
    is a candidate at once. The 6 s linger is only an animation (`finished → assigned`).
@@ -177,7 +190,10 @@ record, not a state. A session that ends never beams the robot out.
    label, never the family or role.
 9. The registry changes sessions only through `startSession` (allocates once, and returns an id
    that already exists unchanged), `endSession`, `restoreSession` and `reconcileAfterRestore`. A new
-   coordinator session ends any other live coordinator session, so only one coordinator holds Basil.
+   coordinator session ends any other live coordinator session, and moves any live
+   non-coordinator session still on Basil (a legacy worker) to overflow with `reassignedFrom:
+   "basil"`, recorded in the latest migration's `conflicts`. So at most one session, the
+   coordinator, is ever live on Basil.
 
 ## Crew book (persisted)
 
@@ -226,9 +242,12 @@ in `crewContract.ts`, tested against data shaped like the live files. The functi
 `migrateLegacy` returns a new book. The other two mutate the book they are given. Rules 1 and 2 and
 the disk writes belong to the caller.
 
-1. **Back up first.** Before the first write of a migration, copy `crew.json`, `sessions.json`,
-   `coordinator.json` and any existing `crew-book.json` to `backups/crew-<ISO stamp>/`. Pass the
-   path as `backup`. It is recorded in `migrations[].backup`.
+1. **Back up before a migration write, and only then.** The caller picks the path
+   `backups/crew-<ISO stamp>/` and passes it to `migrateLegacy` as `backup` (recorded in
+   `migrations[].backup`). `migrateLegacy` writes nothing. If it appended a migration entry, the
+   caller copies `crew.json`, `sessions.json`, `coordinator.json` and any existing `crew-book.json`
+   to that path before it writes the book. A start that appends no migration entry writes no
+   backup.
 2. **Never modify or delete the legacy files.** Deleting `crew-book.json` restarts the migration
    from them.
 3. **Key by subagent id only. Never deduplicate by display name.** Each crew.json entry becomes
@@ -269,10 +288,17 @@ the disk writes belong to the caller.
    once, after the restore has looked at every transcript. Never run it before then.
    - Every live session the restore did not find running is ended with `end: null`
      ("outcome unknown") and `endedAt` = now.
+   - A live non-coordinator session on Basil (old `characterForRole` gave orchestrator-role workers
+     Basil) moves to overflow with `reassignedFrom: "basil"` and is listed in `conflicts`. Basil
+     stays with the coordinator.
    - A character still worn by two or more live sessions (legacy "Pepper" and "Pepper 2") stays with
-     the **oldest**. Age compares `startedAt` when both are known. Otherwise, as with legacy entries
-     that have no timestamps, the lower `seq` (crew.json start order) is older
-     (`compareSessionAge`).
+     the **oldest** (`compareSessionAge`, a total order):
+     1. a session with no `startedAt` is older than one with it, because only legacy entries lack
+        it and they predate every session the book started;
+     2. if both are known, the earlier `startedAt` is older;
+     3. otherwise the lower `seq` (crew.json start order) is older.
+
+     A pairwise rule like "seq unless both have `startedAt`" is not transitive.
    - Each later session is allocated again in its own family. It gets `reassignedFrom`, or becomes
      overflow when its pool is full, and is listed in the latest migration's `conflicts`.
    - A second run finds nothing to do.
@@ -283,8 +309,8 @@ the disk writes belong to the caller.
 
 The startup order for 09.3:
 
-1. back up;
-2. read the book, or `migrateLegacy` into a new one;
+1. read the book, and `migrateLegacy` into it (or into a new one when there is none);
+2. back up, only if step 1 appended a migration entry (rule 1);
 3. `restoreSession` each transcript;
 4. `reconcileAfterRestore`;
 5. write the book atomically;
@@ -298,8 +324,14 @@ The startup order for 09.3:
   has:
   - `id`, `family`, `name` (the custom name, else the catalogue name), `job`, `look`;
   - `accent` (the custom colour, else the variant accent, else null), `customized`, `retired`;
-  - `state` and `stateSince`;
-  - `badge` (`starting`, `waiting`, `needs-you` or `unknown`, with a short reason and the ticket);
+  - `state` and `stateSince`. `stateSince` is server time: the poll on which `deriveCrewState`
+    first returned this state for this character. 09.3 keeps it in memory and does not persist it.
+    After a restart it is the record's `availableSince` (else `firstSeen`) for `available`, the
+    session's `endedAt` for `finished`, and the first poll for every other state;
+  - `badge`, from `CREW_STATE_BADGE`: `assigned` → `starting`, `waiting` → `waiting`, `needs-you` →
+    `needs-you`, `unknown` → `unknown`, and no badge for `available`, `working` or `finished`. The
+    reason is the Feature 06 attention reason when there is one, else null. The badge also carries
+    the ticket;
   - `sessionId`, `ticket`, `stage`, `role`;
   - `telemetry` (the session's own readings, or null);
   - `lastOutcome`.
