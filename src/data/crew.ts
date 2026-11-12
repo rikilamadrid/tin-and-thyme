@@ -45,13 +45,17 @@ export interface VariantCharacter extends Character<VariantCharacterId> {
   base: CharacterId;
   /** The distinguishing accessory, for the art and the settings preview. */
   accessory: string;
-  /** Palette accent (PICO-8 colours, like the role colours). */
+  /**
+   * Palette accent (PICO-8 colours, like the role colours). Unique among the variants that share a
+   * `base`, never the needs-you pinks, and never the plain unknown grey #c2c3c7 (checked by
+   * crewContractProblems).
+   */
   accent: string;
 }
 
 export const CREW_VARIANTS: Record<VariantCharacterId, VariantCharacter> = {
   // tester family (base Dash)
-  dot: { id: "dot", name: "Dot", job: "Checker", look: "hover drone · twin scanner eyes · antenna", base: "dash", accessory: "twin scanner eyes + antenna", accent: "#ff77a8" },
+  dot: { id: "dot", name: "Dot", job: "Checker", look: "hover drone · twin scanner eyes · antenna", base: "dash", accessory: "twin scanner eyes + antenna", accent: "#29adff" },
   blip: { id: "blip", name: "Blip", job: "Plate Inspector", look: "hover drone · magnifier lens · clipboard", base: "dash", accessory: "magnifier lens + clipboard", accent: "#ffec27" },
   zest: { id: "zest", name: "Zest", job: "Expo Runner", look: "hover drone · visor band · order spike", base: "dash", accessory: "visor band + order spike", accent: "#ffa300" },
   // adversary family (base Pinch)
@@ -62,13 +66,13 @@ export const CREW_VARIANTS: Record<VariantCharacterId, VariantCharacter> = {
   whisk: { id: "whisk", name: "Whisk", job: "Runner", look: "neutral box bot · whisk antenna · wheels", base: "unit", accessory: "whisk antenna + wheels", accent: "#29adff" },
   ladle: { id: "ladle", name: "Ladle", job: "Prep Hand", look: "neutral box bot · ladle arm · apron", base: "unit", accessory: "ladle arm + apron", accent: "#00e436" },
   scoop: { id: "scoop", name: "Scoop", job: "Kitchen Porter", look: "neutral box bot · scoop hands · crate", base: "unit", accessory: "scoop hands + crate", accent: "#ffec27" },
-  tongs: { id: "tongs", name: "Tongs", job: "Fetcher", look: "neutral box bot · tong arms · satchel", base: "unit", accessory: "tong arms + satchel", accent: "#ff77a8" },
+  tongs: { id: "tongs", name: "Tongs", job: "Fetcher", look: "neutral box bot · tong arms · satchel", base: "unit", accessory: "tong arms + satchel", accent: "#ffa300" },
   // planner and integrator (one each: neither runs in parallel)
   sage: { id: "sage", name: "Sage", job: "Menu Planner", look: "neutral box bot · menu board · pencil", base: "unit", accessory: "menu board + pencil", accent: "#83769c" },
-  clove: { id: "clove", name: "Clove", job: "Plating Lead", look: "neutral box bot · cloche · tweezers", base: "unit", accessory: "cloche + tweezers", accent: "#ffec27" },
+  clove: { id: "clove", name: "Clove", job: "Plating Lead", look: "neutral box bot · cloche · tweezers", base: "unit", accessory: "cloche + tweezers", accent: "#ab5236" },
   // unknown roles
-  bolt: { id: "bolt", name: "Bolt", job: "Crew", look: "neutral box bot · question-mark panel", base: "unit", accessory: "question-mark panel", accent: "#c2c3c7" },
-  cog: { id: "cog", name: "Cog", job: "Crew", look: "neutral box bot · gear badge", base: "unit", accessory: "gear badge", accent: "#c2c3c7" },
+  bolt: { id: "bolt", name: "Bolt", job: "Crew", look: "neutral box bot · question-mark panel", base: "unit", accessory: "question-mark panel", accent: "#ffccaa" },
+  cog: { id: "cog", name: "Cog", job: "Crew", look: "neutral box bot · gear badge", base: "unit", accessory: "gear badge", accent: "#fff1e8" },
 };
 
 /** Every crew character: the base ones and their variants. */
