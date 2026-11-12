@@ -107,7 +107,7 @@ export function attentionSnapshot(waiting: boolean): OfficeSnapshot {
     gateItem("31.1", `${GATE_OWNED} (fixture — nothing is sent)`, "w-31-1-implementation-c3", "implementation", null),
     gateItem(
       "31.5", `${GATE_UNOWNED} (fixture — nothing is sent)`, null, null,
-      `No session on 31.5 reported this gate or was live when Pathfinder recorded it (fixture time). The latest, ${name("w-31-5-review-d4")} (review), ended handed-off.`,
+      `No session on 31.5 reported this gate in its own GATE line, so Tin & Thyme can't tell who raised it (the coordinator may have recorded it). The latest, ${name("w-31-5-review-d4")} (review), ended handed-off.`,
     ),
   ];
   const lines: [ActivityEvent["type"], string | null, string, number][] = [

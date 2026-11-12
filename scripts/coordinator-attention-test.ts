@@ -189,15 +189,19 @@ const helpers = (w: World) => w.hub.snap.workflow?.helpers ?? [];
   eq("unit: GATE report", sessionEnding("implementation", "GATE: sign in", { state: "working", last: null, gate: null }).outcome, "gate");
 }
 {
-  // Who raised a gate: positive evidence only.
-  const cand = (id: string, o: Partial<Parameters<typeof gateOwner>[3][number]> = {}) => ({ id, name: id, session: "implementation", live: false, start: 1000, end: 2000, report: null, outcome: null, ...o });
+  // Who raised a gate: only a session's own matching GATE report. Never timing, never being the one live session.
+  const cand = (id: string, o: Partial<Parameters<typeof gateOwner>[2][number]> = {}) => ({ id, name: id, session: "implementation", live: false, end: 2000, report: null, outcome: null, ...o });
   eq("unit: same question ignores case, emphasis and closing punctuation", sameQuestion("**Which account** should we use?", "which account should we use"), true);
   eq("unit: a different question never matches, even as a prefix", sameQuestion("Which account should we use?", "Which account should we use (2)?"), false);
-  eq("unit: a session whose own report raised this gate owns it", gateOwner("02.1", "Q?", null, [cand("s1", { report: { verdict: "GATE", text: "Q" }, outcome: "gate" })]).owner?.id, "s1");
-  eq("unit: the one session live when the gate was recorded owns it", gateOwner("02.1", "Q?", 1500, [cand("s1"), cand("s2", { start: 2500, live: true, end: null })]).owner?.id, "s1");
-  eq("unit: two sessions live when the gate was recorded: unidentified", gateOwner("02.1", "Q?", 1500, [cand("s1"), cand("s2", { start: 1200, live: true, end: null })]).owner, null);
-  eq("unit: an earlier gate session never owns a later gate", gateOwner("02.1", "Q2?", 3000, [cand("s1", { report: { verdict: "GATE", text: "Q1" }, outcome: "gate" })]).owner, null);
-  eq("unit: no time and no report: unidentified", gateOwner("02.1", "Q?", null, [cand("s1", { live: true, end: null })]).owner, null);
+  eq("unit: a session whose own report raised this gate owns it", gateOwner("02.1", "Q?", [cand("s1", { report: { verdict: "GATE", text: "Q" }, outcome: "gate" })]).owner?.id, "s1");
+  eq("unit: of two sessions that reported the same gate, the later one owns it", gateOwner("02.1", "Q?", [cand("s1", { report: { verdict: "GATE", text: "Q" }, outcome: "gate", end: 3000 }), cand("s2", { report: { verdict: "GATE", text: "q." }, outcome: "gate", end: 2000 })]).owner?.id, "s1");
+  const lone = gateOwner("02.1", "Q?", [cand("s1", { live: true, end: null })]);
+  eq("unit: the one live session doesn't own a gate it never reported", lone.owner, null);
+  check("…the diagnostic says no session reported it and the latest is still running", /reported this gate in its own GATE line.*still running and hasn't reported/.test(lone.diagnostic ?? ""), lone.diagnostic);
+  eq("unit: a finished session that reported something else never owns it", gateOwner("02.1", "Q?", [cand("s1", { report: { verdict: "DONE", text: "abc" }, outcome: "handed-off" })]).owner, null);
+  eq("unit: an earlier gate session never owns a later gate", gateOwner("02.1", "Q2?", [cand("s1", { report: { verdict: "GATE", text: "Q1" }, outcome: "gate" })]).owner, null);
+  eq("unit: a prefix of the question is not the question", gateOwner("02.1", "Q (2)?", [cand("s1", { report: { verdict: "GATE", text: "Q" }, outcome: "gate" })]).owner, null);
+  check("unit: no session at all: unidentified, and it says so", /No session on 02\.1 was seen/.test(gateOwner("02.1", "Q?", []).diagnostic ?? ""));
   const base = { turnEnded: true, liveWorkers: 0, openGates: [] as string[], asking: null };
   eq("unit: turn ended with live workers → waiting", coordinatorAttention({ ...base, liveWorkers: 2 })?.state, "waiting");
   eq("unit: open gate → needs you even while workers run", coordinatorAttention({ ...base, liveWorkers: 2, openGates: ["02.1"] })?.state, "needs-input");
@@ -455,7 +459,7 @@ w.run.deliveryOf = () => null;
   subStart(wa, "ah1");
   writeSub(wa, "ah1", { prompt: brief("03.1", "review", "tester"), report: "VERDICT: PASS" });
   subStop(wa, "ah1");
-  // 02.1's gate is recorded while ag1 is the one session live on it; 03.1's after its only session ended.
+  // 02.1's gate is recorded while ag1 is the one session live on it (no report yet); 03.1's after its only session ended.
   stateFile(wa, "02.1", { State: "human-gate", Gate: "Which account should the live check use?", "Gate stage": "implementation", Updated: at() });
   stateFile(wa, "03.1", { State: "human-gate", Gate: "Approve the copy change?", Updated: at(5_000) });
   setRows(wa, [row("02.1", "human-gate", { gate: "Which account should the live check use?" }), row("03.1", "human-gate", { gate: "Approve the copy change?" })]);
@@ -463,11 +467,13 @@ w.run.deliveryOf = () => null;
   stopTurn(wa);
   await refresh(wa);
   const g1 = gateItem("02.1");
-  eq("pending decision: ticket, stage, session and owner are its own", [g1.request?.key, g1.request?.stage, g1.request?.session, g1.request?.owner, g1.fromId], ["02.1", "implementation", "implementation", workers(wa).get("ag1")?.hqId, workers(wa).get("ag1")?.hqId]);
+  // Being the one live session is not evidence: until a session's own report raises it, the gate is unidentified.
+  eq("pending decision: its own ticket and stage; no session credited without its own report", [g1.request?.key, g1.request?.stage, g1.request?.session, g1.request?.owner, g1.fromId], ["02.1", "implementation", null, null, COORDINATOR_ID]);
+  check("…unidentified, and it says why", /No session on 02\.1 reported this gate.*still running/.test(g1.request?.diagnostic ?? ""), g1.request?.diagnostic);
   eq("pending decision: the question is Pathfinder's gate, verbatim", g1.details, "Which account should the live check use?");
   const g3 = gateItem("03.1");
   eq("a historical session never inherits a later gate", [g3.request?.owner, g3.fromId], [null, COORDINATOR_ID]);
-  check("…and the request says it can't identify the session, and why", /reported this gate or was live when Pathfinder recorded it.*ended handed-off/.test(g3.request?.diagnostic ?? ""), g3.request?.diagnostic);
+  check("…and the request says it can't identify the session, and why", /No session on 03\.1 reported this gate.*ended handed-off/.test(g3.request?.diagnostic ?? ""), g3.request?.diagnostic);
   eq("both identifiable requests count toward Needs you, nothing else does", counted(), { items: ["gate-02.1", "gate-03.1"], asking: [] });
   eq("the coordinator relays the open gates (it needs you)", [coordinator(wa).state, coordinator(wa).relaying], ["needs-input", ["02.1", "03.1"]]);
 
@@ -499,7 +505,7 @@ w.run.deliveryOf = () => null;
   unsub();
   wa.link.delayMs = 0;
   eq("double click: typed into the coordinator exactly once", wa.typed.length, 1);
-  check("the answer names the ticket and the session that asked", wa.typed[0].includes("02.1 gate") && wa.typed[0].includes(wa.hub.name(workers(wa).get("ag1")!.hqId)), wa.typed[0]);
+  check("the answer to an unidentified gate goes through the coordinator, naming the ticket and no session", wa.typed[0].includes("02.1 gate") && wa.typed[0].includes("raised by an unidentified session") && !wa.typed[0].includes(wa.hub.name(workers(wa).get("ag1")!.hqId)), wa.typed[0]);
   eq("the answer shows Sending → Delivered", states, ["sending", "delivered"]);
   eq("delivered is not resolved: the gate stays open until Pathfinder records it", gateItem("02.1").status, "open");
   eq("delivered: no longer counted as Needs you", counted().items, []);
@@ -567,16 +573,110 @@ w.run.deliveryOf = () => null;
   subStart(wr, "ar1");
   await refresh(wr);
   eq("resume dispatched while a gate is open: not its owner", [gateItem("02.1").request?.owner, gateItem("02.1").request?.session], [null, null]);
-  check("…the diagnostic says it started after the gate", /started after it \(still running\)/.test(gateItem("02.1").request?.diagnostic ?? ""), gateItem("02.1").request?.diagnostic);
+  check("…the diagnostic says no session reported it", /No session on 02\.1 reported this gate.*still running and hasn't reported/.test(gateItem("02.1").request?.diagnostic ?? ""), gateItem("02.1").request?.diagnostic);
   // The resume loads the ticket and rewrites Updated while the same gate stays open: still not its gate.
   stateFile(wr, "02.1", { State: "human-gate", Gate: q, Updated: new Date().toISOString() });
   await refresh(wr);
-  eq("a rewritten Updated doesn't move the gate into the resume's window", gateItem("02.1").request?.owner, null);
+  eq("a rewritten Updated doesn't credit the resume", gateItem("02.1").request?.owner, null);
   // Its own report raises that gate: now it is the owner.
   writeSub(wr, "ar1", { prompt: brief("02.1", "resume"), toolUseId: "tu_r1", report: `GATE: ${q}` });
   subStop(wr, "ar1");
   await refresh(wr);
   eq("…unless its own report raised that gate", [gateItem("02.1").request?.owner, gateItem("02.1").request?.session], [workers(wr).get("ar1")?.hqId, "resume"]);
+}
+
+// ================================================================ review 2 M1: no credit from timing or from being the one live worker
+
+{
+  // Each reported failure: owner null, an "Unable to identify session" diagnostic, and the ticket, the question and
+  // the coordinator-mediated answer path intact.
+  const unidentified = (w: World, key: string, q: string, label: string) => {
+    const it = (w.hub.snap.actionItems ?? []).find((i) => i.id === `gate-${key}`);
+    eq(`${label}: owner is null, from the coordinator`, [it?.request ? it.request.owner : "missing", it?.request ? it.request.session : "missing", it?.fromId], [null, null, COORDINATOR_ID]);
+    eq(`${label}: the ticket and the question are kept`, [it?.request?.key, it?.details, it?.status], [key, q, "open"]);
+    check(`${label}: the diagnostic says why`, new RegExp(`No session on ${key.replace(".", "\\.")} reported this gate`).test(it?.request?.diagnostic ?? ""), it?.request?.diagnostic);
+    return it!;
+  };
+
+  // 1. A kitchen restart after a resume (dispatched while the gate was open) rewrote `Updated` via /ticket load.
+  {
+    const repo = makeRepo("repo-m1-restart");
+    const w = boot(repo, "tt-m1-restart");
+    const q = "Approve the second account for the live check?";
+    stateFile(w, "02.1", { State: "human-gate", Gate: q, Updated: new Date(Date.now() - 120_000).toISOString() });
+    setRows(w, [row("02.1", "human-gate", { gate: q })]);
+    preAgent(w, "tu_r1", brief("02.1", "resume"), "02.1 resume");
+    postAgent(w, "tu_r1", brief("02.1", "resume"), "ar1");
+    writeSub(w, "ar1", { prompt: brief("02.1", "resume"), toolUseId: "tu_r1" });
+    subStart(w, "ar1");
+    await refresh(w);
+    stateFile(w, "02.1", { State: "human-gate", Gate: q, Updated: new Date().toISOString() });
+    await refresh(w);
+    unidentified(w, "02.1", q, "M1 restart: before the restart, Updated rewritten");
+    const w2 = boot(repo, "tt-m1-restart", w.rows);
+    await refresh(w2);
+    eq("M1 restart: the resume is rebuilt live", workers(w2).get("ar1")?.live, true);
+    unidentified(w2, "02.1", q, "M1 restart: after the restart, the resume isn't credited");
+    // The answer path still works for it: typed into the coordinator, naming no session.
+    const it = (w2.hub.snap.actionItems ?? []).find((i) => i.id === "gate-02.1")!;
+    await w2.run.answerGate("gate-02.1", "Yes, use it", it.request!.revision);
+    eq("M1 restart: Send answer reaches the coordinator", [it.answer?.state, w2.typed.length], ["delivered", 1]);
+    check("M1 restart: …saying an unidentified session raised it", (w2.typed[0] ?? "").includes("02.1 gate") && (w2.typed[0] ?? "").includes("raised by an unidentified session"), w2.typed[0]);
+  }
+
+  // 2. The same question raised again later on the same ticket, after the original session finished.
+  {
+    const w = boot(makeRepo("repo-m1-repeat"), "tt-m1-repeat");
+    const q = "Repair budget exhausted: accept, repair again, or drop?";
+    preAgent(w, "tu_1", brief("02.1"), "02.1 dev");
+    postAgent(w, "tu_1", brief("02.1"), "a1");
+    writeSub(w, "a1", { prompt: brief("02.1"), toolUseId: "tu_1" });
+    subStart(w, "a1");
+    stateFile(w, "02.1", { State: "human-gate", Gate: q, Updated: new Date().toISOString() });
+    setRows(w, [row("02.1", "human-gate", { gate: q })]);
+    await refresh(w);
+    unidentified(w, "02.1", q, "M1 repeat: first raise while a1 is live and hasn't reported");
+    writeSub(w, "a1", { prompt: brief("02.1"), toolUseId: "tu_1", report: "DONE: abc", finished: true });
+    subStop(w, "a1");
+    stateFile(w, "02.1", { State: "working", Updated: new Date().toISOString() });
+    setRows(w, [row("02.1", "working")]);
+    await refresh(w);
+    preAgent(w, "tu_2", brief("02.1", "review", "tester"), "02.1 review");
+    postAgent(w, "tu_2", brief("02.1", "review", "tester"), "a2");
+    writeSub(w, "a2", { prompt: brief("02.1", "review", "tester"), toolUseId: "tu_2" });
+    subStart(w, "a2");
+    writeSub(w, "a2", { prompt: brief("02.1", "review", "tester"), toolUseId: "tu_2", report: "VERDICT: FINDINGS", finished: true });
+    subStop(w, "a2");
+    stateFile(w, "02.1", { State: "human-gate", Gate: q, Updated: new Date().toISOString() });
+    setRows(w, [row("02.1", "human-gate", { gate: q })]);
+    await refresh(w);
+    const it = unidentified(w, "02.1", q, "M1 repeat: the same question raised again later");
+    check("M1 repeat: the old finished session isn't credited", it.request?.owner !== workers(w).get("a1")?.hqId && /ended handed-off/.test(it.request?.diagnostic ?? ""), it.request);
+  }
+
+  // 3. A gate the coordinator records while exactly one worker on that ticket is live.
+  {
+    const w = boot(makeRepo("repo-m1-coord"), "tt-m1-coord");
+    stateFile(w, "02.1", { State: "working", Updated: new Date(Date.now() - 30_000).toISOString() });
+    setRows(w, [row("02.1", "working")]);
+    preAgent(w, "tu_d", brief("02.1"), "02.1 dev");
+    postAgent(w, "tu_d", brief("02.1"), "ad");
+    writeSub(w, "ad", { prompt: brief("02.1"), toolUseId: "tu_d" });
+    subStart(w, "ad");
+    await refresh(w);
+    const q = "Coordinator: 02.1 conflicts with 05.1 on server/pathfinder.ts; serialize?";
+    stateFile(w, "02.1", { State: "human-gate", Gate: q, Updated: new Date().toISOString() });
+    setRows(w, [row("02.1", "human-gate", { gate: q })]);
+    await refresh(w);
+    eq("M1 coordinator gate: the one live worker is still live", workers(w).get("ad")?.live, true);
+    unidentified(w, "02.1", q, "M1 coordinator gate: the one live worker isn't credited");
+    // The matching-report case is still credited: once the worker's own report raises this question, it owns it.
+    writeSub(w, "ad", { prompt: brief("02.1"), toolUseId: "tu_d", report: `GATE: **${q.toLowerCase()}**`, finished: true });
+    subStop(w, "ad");
+    await refresh(w);
+    const it = (w.hub.snap.actionItems ?? []).find((i) => i.id === "gate-02.1")!;
+    eq("M1 matching report: the worker whose own GATE line states this question owns it", [it.request?.owner, it.request?.session, it.request?.diagnostic, it.fromId], [workers(w).get("ad")?.hqId, "implementation", null, workers(w).get("ad")?.hqId]);
+  }
 }
 
 console.log(`\n${passes} passed, ${failures} failed`);

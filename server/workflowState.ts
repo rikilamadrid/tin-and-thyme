@@ -75,15 +75,13 @@ export function sessionEnding(
 
 // ---------------------------------------------------------------- who raised a gate
 
-/** One session on a gated ticket, as the gate-owner decision sees it. Times are epoch ms; null = not known. */
+/** One session on a gated ticket, as the gate-owner decision sees it. */
 export interface GateCandidate {
   id: string;
   name: string;
   session: string;
   live: boolean;
-  /** When the session started (its transcript's first record, else when the kitchen first saw it). */
-  start: number | null;
-  /** When it stopped; null while live (or not known). */
+  /** When it stopped (epoch ms); null while live or not known. Only orders sessions that each reported the gate. */
   end: number | null;
   /** Its own report, once it ended with one. */
   report: { verdict: string; text: string } | null;
@@ -97,27 +95,20 @@ export function sameQuestion(a: string, b: string): boolean {
 }
 
 /**
- * Who raised a ticket's gate, credited only on positive evidence:
- *   1. a session's own report says `GATE: <this question>` (the latest such session); or
- *   2. Pathfinder recorded the gate (`gateAt`, its state file's `Updated` when the gate appeared) inside exactly
- *      one session's live window.
- * Anything else stays unidentified, with a diagnostic saying why: a session is never credited for being the
- * latest, the only live one, or for having stopped at some earlier gate.
+ * Who raised a ticket's gate, credited only on positive evidence: a session whose own report says
+ * `GATE: <this question>` (sameQuestion; the latest such session). Nothing else credits a session: not when it
+ * ran or when Pathfinder recorded the gate, not being the only live one, not being the latest, not having stopped
+ * at some earlier gate. A gate the coordinator recorded, or one a session raised without reporting it, stays
+ * unidentified, with a diagnostic saying why.
  */
-export function gateOwner(key: string, gate: string, gateAt: number | null, sessions: GateCandidate[]): { owner: GateCandidate | null; diagnostic: string | null } {
+export function gateOwner(key: string, gate: string, sessions: GateCandidate[]): { owner: GateCandidate | null; diagnostic: string | null } {
   const reported = sessions.filter((s) => s.report?.verdict === "GATE" && sameQuestion(s.report.text, gate));
   if (reported.length) return { owner: reported.reduce((a, b) => ((b.end ?? Infinity) >= (a.end ?? Infinity) ? b : a)), diagnostic: null };
-  if (!sessions.length) return { owner: null, diagnostic: `No session on ${key} was seen by this kitchen (the gate may predate its start).` };
+  if (!sessions.length) return { owner: null, diagnostic: `No session on ${key} was seen by this kitchen, so none reported this gate (it may predate the kitchen's start, or the coordinator recorded it).` };
   const who = (s: GateCandidate) => `${s.name} (${s.session})`;
-  if (gateAt === null) return { owner: null, diagnostic: `No session on ${key} reported this gate, and its state file records no time for it (no Updated line).` };
-  const when = new Date(gateAt).toISOString();
-  // An unknown bound could contain the gate: it counts as a candidate, so it can only make the answer less certain.
-  const inside = sessions.filter((s) => (s.start === null || s.start <= gateAt) && (s.live || s.end === null || gateAt <= s.end));
-  if (inside.length === 1) return { owner: inside[0], diagnostic: null };
-  if (inside.length > 1) return { owner: null, diagnostic: `${inside.length} sessions on ${key} were live when Pathfinder recorded this gate (${when}): ${inside.map(who).join(", ")}; none reported it, so Tin & Thyme can't tell which one raised it.` };
   const last = sessions.at(-1)!;
-  const how = last.live ? `started after it (still running)` : `ended ${last.outcome ?? "without a recorded outcome"}${last.report?.verdict === "GATE" ? ` at a different gate ("${last.report.text}")` : ""}`;
-  return { owner: null, diagnostic: `No session on ${key} reported this gate or was live when Pathfinder recorded it (${when}). The latest, ${who(last)}, ${how}.` };
+  const how = last.live ? `is still running and hasn't reported` : `ended ${last.outcome ?? "without a recorded outcome"}${last.report?.verdict === "GATE" ? ` at a different gate ("${last.report.text}")` : ""}`;
+  return { owner: null, diagnostic: `No session on ${key} reported this gate in its own GATE line, so Tin & Thyme can't tell who raised it (the coordinator may have recorded it). The latest, ${who(last)}, ${how}.` };
 }
 
 // ---------------------------------------------------------------- the board
