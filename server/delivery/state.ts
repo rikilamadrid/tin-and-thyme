@@ -106,6 +106,41 @@ export interface Approval {
   at?: string;
 }
 
+/**
+ * A merge as GitHub reported it, with the approval it was made under. Once
+ * recorded it is never erased or replaced: it is what every later check
+ * verifies against. It is evidence of what was merged, never permission for a
+ * new push or merge (that is `DeliveryState.approval`, and a recorded merge is
+ * never merged again whatever approval a later call carries).
+ */
+export interface MergeRecord {
+  at: string;
+  pr: number;
+  commit: string | null;
+  /** The exact approval (head, base, tree, at) the merge was made under. */
+  approval: Approval;
+  /** The last successful verification of the merge commit against that approval. */
+  verification: { at: string; parent: string; tree: string; main: string } | null;
+}
+
+/**
+ * A merge command whose outcome GitHub has not confirmed. Written immediately
+ * before the command is sent, so an interrupted merge is never mistaken for
+ * "not merged". It is settled from GitHub and origin (merged, or not merged)
+ * before any new merge attempt is allowed.
+ * - `sent`: the command was sent and no outcome was recorded (e.g. interrupted);
+ * - `confirmation-pending`: the command succeeded, or origin already has the
+ *   approved head or tree, but GitHub does not report the PR merged yet;
+ * - `unknown`: the command failed and GitHub's state could not settle it.
+ */
+export interface PendingMerge {
+  at: string;
+  pr: number;
+  approval: Approval;
+  status: "sent" | "confirmation-pending" | "unknown";
+  note: string;
+}
+
 export interface DeliveryState {
   schema: "tin-and-thyme.delivery/1";
   key: string;
@@ -124,7 +159,9 @@ export interface DeliveryState {
    * merge whose verification fails or is interrupted is recorded as
    * merged-but-unverified (`merged` set, `verified` false), never as "not merged".
    */
-  merged: { at: string; pr: number; commit: string | null } | null;
+  merged: MergeRecord | null;
+  /** A merge command sent whose outcome is not confirmed yet; see PendingMerge. */
+  pendingMerge: PendingMerge | null;
   mergeCommit: string | null;
   verified: boolean;
   steps: Partial<Record<StepName, StepResult>>;
@@ -148,6 +185,7 @@ export function emptyState(key: string): DeliveryState {
     approval: null,
     invalidated: null,
     merged: null,
+    pendingMerge: null,
     mergeCommit: null,
     verified: false,
     steps: {},

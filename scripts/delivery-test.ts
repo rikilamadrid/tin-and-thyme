@@ -132,6 +132,18 @@ class World {
   createFail: RunResult | null = null;
   defaultChecks: Check[] | "none" = "none";
   defaultMergeable: FakePr["mergeable"] = "MERGEABLE";
+  /** GitHub lagging behind its own merge: each `pr view` of a merged PR takes the next answer ("open" or "fail"). */
+  viewLag: ("open" | "fail")[] = [];
+  /** The merge command fails without merging. */
+  mergeRefuse: RunResult | null = null;
+  /** The merge command merges, then reports this (a merge reported badly). */
+  mergeReport: RunResult | null = null;
+  /** Runs right after the fake merge lands. */
+  afterMerge: (() => void) | null = null;
+  /** The next N fetches fail (a transient network failure). */
+  fetchFails = 0;
+  /** Squash merges actually performed on the simulated GitHub. */
+  merges = 0;
 
   constructor(readonly repo: string) {}
 
@@ -157,6 +169,10 @@ class World {
       return result(sha ? `${sha}\t${ref}\n` : "");
     }
     if (sub === "fetch") {
+      if (this.fetchFails > 0) {
+        this.fetchFails--;
+        return result("", 128, "fatal: unable to access 'https://github.com/owner/project.git/': Could not resolve host: github.com");
+      }
       const m = /^\+refs\/heads\/(.+):(refs\/remotes\/origin\/.+)$/.exec(args[3] ?? "");
       const sha = m && this.remote.get(`refs/heads/${m[1]}`);
       if (!m || !sha) return result("", 128, "fatal: couldn't find remote ref");
@@ -240,7 +256,12 @@ class World {
       pr.isDraft = false;
       return result("");
     }
-    if (sub === "view") return result(JSON.stringify(this.view(pr)));
+    if (sub === "view") {
+      const lag = pr.state === "MERGED" ? this.viewLag.shift() : undefined;
+      if (lag === "fail") return result("", 1, "HTTP 502: Bad Gateway (https://api.github.com/graphql)");
+      if (lag === "open") return result(JSON.stringify({ ...this.view(pr), state: "OPEN", mergeCommit: null }));
+      return result(JSON.stringify(this.view(pr)));
+    }
     if (sub === "checks") {
       if (pr.checks === "none") return result("", 1, `no checks reported on the '${pr.headRefName}' branch`);
       const code = pr.checks.some((c) => c.bucket === "fail") ? 1 : pr.checks.some((c) => c.bucket === "pending") ? 8 : 0;
@@ -251,6 +272,7 @@ class World {
       const pinned = this.flag(args, "--match-head-commit");
       const head = this.view(pr).headRefOid;
       if (pinned !== head) return result("", 1, "Head branch was modified. Review and try the merge again.");
+      if (this.mergeRefuse) return this.mergeRefuse;
       // A real squash: the merge of the branch onto the current remote main, as one commit.
       const main = this.remote.get(`refs/heads/${pr.baseRefName}`)!;
       const merged = git(this.repo, "merge-tree", "--write-tree", main, head).split("\n")[0];
@@ -259,6 +281,9 @@ class World {
       const commit = git(this.repo, "commit-tree", tree, "-p", parent, "-m", this.flag(args, "--subject") ?? pr.title);
       this.remote.set(`refs/heads/${pr.baseRefName}`, commit);
       Object.assign(pr, { state: "MERGED", headRefOid: head, mergeCommit: commit });
+      this.merges++;
+      this.afterMerge?.();
+      if (this.mergeReport) return this.mergeReport;
       return result("");
     }
     return result("", 99, `fake gh: unexpected pr ${sub}`);
@@ -962,6 +987,188 @@ async function main() {
     refused(`verify still fails (${tamper})`, await s.delivery.verify("10.1"), "failed", /NOT verified/);
     eq(`one merge call (${tamper})`, s.world.count("gh", "pr", "merge"), 1);
     check(`still merged-unverified (${tamper})`, s.delivery.read("10.1").merged?.commit === m && !s.delivery.read("10.1").verified);
+  }
+
+  // ---- N1: a recorded merge keeps the approval it was made under, and its evidence
+  const sameApproval = (x: Approval | undefined | null, y: Approval) => !!x && x.key === y.key && x.head === y.head && x.base === y.base && x.tree === y.tree;
+  const fast = { confirmDelaysMs: [0, 0] };
+  {
+    // Repeated checks, before and after the merge; later approvals never change the record or merge again.
+    const s = await ready("n1-repeated", pass);
+    const d = s.make(fast);
+    const original = approvalOf(s.i);
+    for (let n = 1; n <= 3; n++) {
+      ok(`n1: inspect before the merge (${n})`, await d.inspect("10.1"));
+      refused(`n1: verify before the merge refuses (${n})`, await d.verify("10.1"), "refused");
+    }
+    ok("n1: approve", await d.approve("10.1", original));
+    for (let n = 1; n <= 3; n++) refused(`n1: verify of an open PR (${n})`, await d.verify("10.1"), "refused", /OPEN, not merged/);
+    check("n1: nothing recorded as merged before the merge", d.read("10.1").merged === null && d.read("10.1").pendingMerge === null);
+    ok("n1: merge", await d.merge("10.1", original));
+    const m = s.world.remote.get("refs/heads/main")!;
+    const rec = d.read("10.1").merged!;
+    check("n1: the merge record keeps the approval it was made under", sameApproval(rec.approval, original) && !!rec.approval.at && rec.approval.at === d.read("10.1").approval?.at, rec);
+    check("n1: the merge record keeps its evidence", rec.commit === m && rec.pr === s.world.prs[0].number && rec.verification?.parent === s.base && rec.verification?.tree === s.i.tree && d.read("10.1").verified, rec);
+    let after: Inspection | null = null;
+    for (let n = 1; n <= 3; n++) {
+      after = ok(`n1: inspect after the merge (${n})`, await d.inspect("10.1"));
+      const st = d.read("10.1");
+      check(`n1: inspect cleared only the permission, never the record (${n})`, st.approval === null && sameApproval(st.merged?.approval, original) && st.merged?.approval.at === rec.approval.at && st.merged?.verification !== null && st.verified, st);
+      const v = ok(`n1: verify after inspect (${n})`, await d.verify("10.1"));
+      eq(`n1: verified against the recorded approval (${n})`, [v.mergeCommit, v.parent, v.tree], [m, s.base, s.i.tree]);
+    }
+    eq("n1: inspection now sees the squash as the base", after!.base, m);
+    ok("n1: a fresh approval after the merge is recorded", await d.approve("10.1", approvalOf(after!)));
+    const others: [string, Approval][] = [
+      ["the fresh approval", approvalOf(after!)],
+      ["the original approval", original],
+      ["a different-base approval", { ...original, base: m }],
+    ];
+    for (const [label, a] of others) {
+      const again = ok(`n1: merge with ${label}`, await d.merge("10.1", a));
+      check(`n1: ${label}: already merged, nothing merged again`, again.already && again.mergeCommit === m && s.world.count("gh", "pr", "merge") === 1);
+      const st = d.read("10.1");
+      check(`n1: ${label}: still verified, the record unchanged`, st.verified && sameApproval(st.merged?.approval, original) && st.merged?.approval.at === rec.approval.at && st.merged?.at === rec.at, st.merged);
+      ok(`n1: verify after ${label}`, await d.verify("10.1"));
+    }
+    eq("n1: one merge performed", s.world.merges, 1);
+    // Restart: a fresh store and Delivery read the same record back and verify against it.
+    const fresh = s.make(fast);
+    const back = fresh.read("10.1");
+    check("n1 restart: the record and its approval survive", sameApproval(back.merged?.approval, original) && back.merged?.approval.at === rec.approval.at && back.merged?.commit === m && back.verified, back.merged);
+    ok("n1 restart: verify", await fresh.verify("10.1"));
+    check("n1 restart: merge is already merged", ok("n1 restart: merge", await fresh.merge("10.1", approvalOf(after!))).already);
+    eq("n1 restart: still one merge call", s.world.count("gh", "pr", "merge"), 1);
+  }
+  {
+    // A verification that fails is retried, and recovers, without any second merge.
+    const s = await ready("n1-recovery", pass);
+    const d = s.make(fast);
+    const original = approvalOf(s.i);
+    s.world.afterMerge = () => {
+      s.world.fetchFails = 1;
+    };
+    refused("n1: merged, verification failed (network)", await d.merge("10.1", original), "failed", /merged as [0-9a-f]{40} but NOT verified/);
+    s.world.afterMerge = null;
+    const m = s.world.remote.get("refs/heads/main")!;
+    const st = d.read("10.1");
+    check("n1: merged-unverified, with its approval", st.merged?.commit === m && !st.verified && sameApproval(st.merged?.approval, original) && st.merged?.verification === null && st.pendingMerge === null, st);
+    ok("n1: inspect after the merge", await d.inspect("10.1"));
+    check("n1: inspect cleared the permission only", d.read("10.1").approval === null && sameApproval(d.read("10.1").merged?.approval, original));
+    s.world.fetchFails = 1;
+    refused("n1: verify fails again (network)", await d.verify("10.1"), "failed", /NOT verified/);
+    refused("n1: merge retry fails the same way, without merging", await (async () => ((s.world.fetchFails = 1), d.merge("10.1", original)))(), "failed", /NOT verified/);
+    check("n1: still merged-unverified", !d.read("10.1").verified && d.read("10.1").merged?.commit === m);
+    const v = ok("n1: verify recovers against the recorded approval", await d.verify("10.1"));
+    eq("n1: recovered verification", [v.mergeCommit, v.parent, v.tree], [m, s.base, s.i.tree]);
+    check("n1: now verified", d.read("10.1").verified && d.read("10.1").merged?.verification?.parent === s.base);
+    // A later re-check that fails never flips a verified merge back.
+    s.world.fetchFails = 1;
+    refused("n1: a failing re-check is reported", await d.verify("10.1"), "failed", /stays verified; this re-check failed/);
+    check("n1: still verified after a failing re-check", d.read("10.1").verified && d.read("10.1").merged?.verification !== null);
+    const other = { ...original, base: m, tree: git(s.repo, "rev-parse", `${m}^{tree}`) };
+    ok("n1: merge with a different approval: already merged", await d.merge("10.1", other));
+    check("n1: still verified, record unchanged, after a different approval", d.read("10.1").verified && sameApproval(d.read("10.1").merged?.approval, original));
+    eq("n1 recovery: one merge call", s.world.count("gh", "pr", "merge"), 1);
+    eq("n1 recovery: one merge performed", s.world.merges, 1);
+  }
+
+  // ---- N2: a merge GitHub has not confirmed is pending or unknown, never "not merged"
+  {
+    // The command succeeds; GitHub reports OPEN, then cannot be read, then MERGED.
+    const s = await ready("n2-open-lag", pass);
+    const d = s.make(fast);
+    const original = approvalOf(s.i);
+    s.world.viewLag = ["open", "open", "open"];
+    const o = await d.merge("10.1", original);
+    refused("n2: an unconfirmed merge is confirmation pending", o, "blocked", /succeeded, but GitHub does not report it merged yet: confirmation pending/);
+    check("n2: never reported as not merged", !o.ok && !/not merged/i.test(o.message), o);
+    const st = d.read("10.1");
+    check("n2: pending recorded with its approval", st.merged === null && st.pendingMerge?.status === "confirmation-pending" && sameApproval(st.pendingMerge.approval, original) && st.pendingMerge.pr === s.world.prs[0].number, st.pendingMerge);
+    check("n2: the merge step is not recorded as not merged", !/not merged/i.test(st.steps.merge?.message ?? "x not merged"));
+    s.world.viewLag = ["open"];
+    const before = s.world.calls.length;
+    refused("n2: a retry while GitHub still lags stays pending", await d.merge("10.1", original), "blocked", /still unknown: .*already has [0-9a-f]{40} with the approved head or tree/);
+    check("n2: the retry read origin main to reconcile", s.world.calls.slice(before).some((c) => c.args[0] === "ls-remote" && c.args[2] === "refs/heads/main"));
+    eq("n2: the retry merged nothing", s.world.count("gh", "pr", "merge"), 1);
+    s.world.viewLag = ["fail"];
+    refused("n2: verify while GitHub cannot be read stays unknown", await d.verify("10.1"), "blocked", /still unknown: GitHub could not be read/);
+    check("n2: still pending", d.read("10.1").pendingMerge !== null && d.read("10.1").merged === null);
+    // Restart, then GitHub catches up.
+    const fresh = s.make(fast);
+    check("n2 restart: the pending record survives", fresh.read("10.1").pendingMerge?.status === "confirmation-pending");
+    const v = ok("n2: verify once GitHub reports MERGED", await fresh.verify("10.1"));
+    const done = fresh.read("10.1");
+    check("n2: settled as merged and verified, under the original approval", done.pendingMerge === null && done.verified && sameApproval(done.merged?.approval, original) && done.merged?.commit === v.mergeCommit, done);
+    check("n2: merge after settling is already merged", ok("n2: merge after settling", await fresh.merge("10.1", original)).already);
+    eq("n2: one merge call in all", s.world.count("gh", "pr", "merge"), 1);
+  }
+  {
+    // The command succeeds; every re-read fails. A later retry with another approval settles it first.
+    const s = await ready("n2-read-fails", pass);
+    const d = s.make(fast);
+    const original = approvalOf(s.i);
+    s.world.viewLag = ["fail", "fail", "fail"];
+    refused("n2: re-reads fail after a successful merge: confirmation pending", await d.merge("10.1", original), "blocked", /confirmation pending/);
+    check("n2: pending, not 'not merged'", d.read("10.1").pendingMerge?.status === "confirmation-pending" && d.read("10.1").merged === null);
+    const m = s.world.remote.get("refs/heads/main")!;
+    const again = ok("n2: a retry with another approval settles as merged", await d.merge("10.1", { ...original, base: m }));
+    check("n2: the settled retry merged nothing", again.already && again.mergeCommit === m && s.world.count("gh", "pr", "merge") === 1);
+    check("n2: recorded and verified under the original approval", sameApproval(d.read("10.1").merged?.approval, original) && d.read("10.1").verified);
+  }
+  {
+    // The command fails after GitHub merged (reported badly).
+    const s = await ready("n2-reported-badly", pass);
+    const d = s.make(fast);
+    const original = approvalOf(s.i);
+    s.world.mergeReport = result("", 1, "HTTP 504: Gateway Timeout");
+    ok("n2: a badly reported merge GitHub confirms is verified", await d.merge("10.1", original));
+    check("n2: and recorded", sameApproval(d.read("10.1").merged?.approval, original) && d.read("10.1").verified && d.read("10.1").pendingMerge === null);
+    const t = await ready("n2-reported-badly-lag", pass);
+    const e = t.make(fast);
+    t.world.mergeReport = result("", 1, "HTTP 504: Gateway Timeout");
+    t.world.viewLag = ["open", "open"];
+    const o = await e.merge("10.1", approvalOf(t.i));
+    refused("n2: failed command, GitHub lagging: outcome unknown", o, "failed", /Gateway Timeout; whether PR #\d+ merged is unknown/);
+    check("n2: recorded as pending, never not merged", e.read("10.1").pendingMerge !== null && e.read("10.1").merged === null && !o.ok && !/not merged/i.test(o.message), e.read("10.1").pendingMerge);
+    t.world.mergeReport = null;
+    const again = ok("n2: the retry settles as merged once GitHub reports it", await e.merge("10.1", approvalOf(t.i)));
+    check("n2: no second merge after a badly reported one", again.already && t.world.count("gh", "pr", "merge") === 1 && t.world.merges === 1);
+  }
+  {
+    // The command is refused and origin main has not moved: settled as not merged, and the retry merges once.
+    const s = await ready("n2-refused", pass);
+    const d = s.make(fast);
+    s.world.mergeRefuse = result("", 1, "GraphQL: Pull request is not mergeable (mergePullRequest)");
+    const o = await d.merge("10.1", approvalOf(s.i));
+    check("n2: a refused merge with main unmoved is settled as not merged", !o.ok && /not mergeable/.test(o.message) && !/unknown/.test(o.message) && d.read("10.1").pendingMerge === null && d.read("10.1").merged === null, o);
+    s.world.mergeRefuse = null;
+    ok("n2: the retry merges", await d.merge("10.1", approvalOf(s.i)));
+    eq("n2: exactly one merge performed", s.world.merges, 1);
+  }
+  for (const merged of [true, false]) {
+    // The kitchen stopped right after sending the command: only the write-ahead record exists.
+    const s = await ready(`n2-interrupted-${merged ? "merged" : "not-merged"}`, pass);
+    const original = approvalOf(s.i);
+    const n = s.world.prs[0].number;
+    const at = new Date().toISOString();
+    new DeliveryStore(s.stateDir).update("10.1", (st) => {
+      st.approval = { ...original, at };
+      st.pendingMerge = { at, pr: n, approval: { ...original, at }, status: "sent", note: "the merge command was sent" };
+    });
+    if (merged) await s.world.runner("gh", ["pr", "merge", String(n), "-R", "owner/project", "--squash", "--match-head-commit", s.head, "--subject", "interrupted"]);
+    const calls = s.world.count("gh", "pr", "merge");
+    const fresh = s.make(fast);
+    if (merged) {
+      s.world.viewLag = ["open"];
+      refused("n2 restart: an interrupted merge is settled before anything else", await fresh.merge("10.1", original), "blocked", /still unknown/);
+      ok("n2 restart: verify settles it as merged", await fresh.verify("10.1"));
+      check("n2 restart: recorded under the pending approval", sameApproval(fresh.read("10.1").merged?.approval, original) && fresh.read("10.1").merged?.approval.at === at && fresh.read("10.1").verified);
+      eq("n2 restart: no merge call after the interrupted one", s.world.count("gh", "pr", "merge"), calls);
+    } else {
+      ok("n2 restart: an interrupted merge that did not land is settled, then merged once", await fresh.merge("10.1", original));
+      eq("n2 restart: one merge performed", s.world.merges, 1);
+    }
   }
 
   // ---- state file: permissions, unique temp files, corrupt state (L5)
