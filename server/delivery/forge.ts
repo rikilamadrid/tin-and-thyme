@@ -63,6 +63,28 @@ export function commandFailure(r: RunResult, what: string, tool: "gh" | "git"): 
 
 export const ghFailure = (r: RunResult, what: string) => commandFailure(r, what, "gh");
 
+/** How long the merge command may run before it is killed. */
+export const MERGE_TIMEOUT_MS = 60_000;
+
+/** Text of an unclear failure: the request may or may not have reached GitHub and completed. */
+const UNCLEAR_TEXT = /\b5\d\d\b|timed? ?out|timeout|killed|SIGTERM|SIGKILL|signal|ECONN|ETIMEDOUT|EPIPE|EOF|connection|connect|network|resolve host|TLS|socket|something went wrong|try again later|rate limit|command failed|gh failed/i;
+
+/**
+ * GitHub's explicit refusal of a merge request: the mutation was rejected, so
+ * this request can never merge the PR later. Only this text, or a sign-in
+ * failure (the request was never authorized), counts; a timeout, kill, 5xx,
+ * network error or anything unrecognized is unclear and never settles a merge
+ * as not merged on its own.
+ */
+const REFUSAL_TEXT =
+  /head branch was modified|base branch was modified|is not mergeable|not mergeable|merge commit cannot be cleanly created|required status checks?|status check .* is expected|approving reviews? (?:is|are) required|review is required|changes requested|repository rule violations|base branch policy prohibits|merging is blocked|merge method .* not allowed|is in (?:clean|dirty|blocked|unstable|behind|draft) status|pull request is (?:still )?a draft|protected branch/i;
+
+export function isClearMergeRefusal(err: DeliveryError): boolean {
+  if (UNCLEAR_TEXT.test(err.message)) return false;
+  if (err.kind === "auth") return true;
+  return REFUSAL_TEXT.test(err.message);
+}
+
 // ---------------------------------------------------------------- shapes
 
 export type PrState = "OPEN" | "MERGED" | "CLOSED";
@@ -198,6 +220,6 @@ export class Forge {
   /** Squash merge pinned to the approved head. Never `--auto`, never `--delete-branch`. */
   async squashMerge(n: number, head: string, subject: string): Promise<void> {
     if (!SHA.test(head)) throw new DeliveryError("invalid", `not a full commit id: ${head}`);
-    await this.gh(["pr", "merge", String(n), "-R", this.repo, "--squash", "--match-head-commit", head, "--subject", subject], "merging the pull request", 60_000);
+    await this.gh(["pr", "merge", String(n), "-R", this.repo, "--squash", "--match-head-commit", head, "--subject", subject], "merging the pull request", MERGE_TIMEOUT_MS);
   }
 }

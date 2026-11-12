@@ -107,18 +107,27 @@ export interface Approval {
 }
 
 /**
- * A merge as GitHub reported it, with the approval it was made under. Once
- * recorded it is never erased or replaced: it is what every later check
- * verifies against. It is evidence of what was merged, never permission for a
- * new push or merge (that is `DeliveryState.approval`, and a recorded merge is
- * never merged again whatever approval a later call carries).
+ * A merge as GitHub reported it. Once recorded it is never erased. It is
+ * evidence of what was merged, never permission for a new push or merge (that
+ * is `DeliveryState.approval`, and a recorded merge is never merged again
+ * whatever approval a later call carries).
+ *
+ * `approval` is the approval the merge is bound to, and once set it is never
+ * replaced: every later check verifies against it.
+ * - A merge this app sent (a `pendingMerge` existed) is bound at once to the
+ *   approval the command was sent under.
+ * - A merge made outside the app is recorded with no approval
+ *   (merged-unverified). An approval is bound to it only once it verifies
+ *   (the merge commit's parent is its base and its tree is its tree), so a
+ *   wrong or post-merge approval never becomes permanent and a correct one can
+ *   still verify it later.
  */
 export interface MergeRecord {
   at: string;
   pr: number;
   commit: string | null;
-  /** The exact approval (head, base, tree, at) the merge was made under. */
-  approval: Approval;
+  /** The exact approval (head, base, tree, at) the merge is bound to; null until one verifies (outside merges). */
+  approval: Approval | null;
   /** The last successful verification of the merge commit against that approval. */
   verification: { at: string; parent: string; tree: string; main: string } | null;
 }
@@ -126,19 +135,56 @@ export interface MergeRecord {
 /**
  * A merge command whose outcome GitHub has not confirmed. Written immediately
  * before the command is sent, so an interrupted merge is never mistaken for
- * "not merged". It is settled from GitHub and origin (merged, or not merged)
- * before any new merge attempt is allowed.
- * - `sent`: the command was sent and no outcome was recorded (e.g. interrupted);
- * - `confirmation-pending`: the command succeeded, or origin already has the
- *   approved head or tree, but GitHub does not report the PR merged yet;
- * - `unknown`: the command failed and GitHub's state could not settle it.
+ * "not merged". Its approval is kept until the outcome is confirmed, and no new
+ * merge is attempted until it is settled, with reads only.
+ * - `sent`: the command was sent and no outcome was recorded (e.g. interrupted): unknown;
+ * - `confirmation-pending`: the command exited 0, or origin already has the
+ *   approved head or tree, but GitHub does not report the PR merged yet:
+ *   pending. It is never settled as not merged by time (a queued or async merge
+ *   can land much later); only GitHub reporting it merged, or the PR closed, settles it;
+ * - `unknown`: the command failed unclearly (timeout, kill, 5xx, network): unknown;
+ * - `refused`: GitHub clearly refused the command (`refusal`): settled as not
+ *   merged once GitHub and origin confirm nothing landed.
  */
 export interface PendingMerge {
   at: string;
   pr: number;
   approval: Approval;
-  status: "sent" | "confirmation-pending" | "unknown";
+  status: "sent" | "confirmation-pending" | "unknown" | "refused";
   note: string;
+  /** GitHub's clear refusal, when `status` is `refused`. */
+  refusal?: string;
+}
+
+/**
+ * The last merge attempt that was settled as confirmed not merged, with the
+ * approval it was sent under and the positive evidence. Kept so that a merge
+ * landing even later can still be verified against that original approval.
+ */
+export interface SettledAttempt {
+  at: string;
+  pr: number;
+  approval: Approval;
+  outcome: "not-merged";
+  settledAt: string;
+  reason: string;
+}
+
+/**
+ * The four merge outcomes, kept apart (plus `none`, nothing sent):
+ * - `pending`: the command exited 0 but GitHub has not confirmed the merge;
+ * - `unknown`: the command failed unclearly, was interrupted, or is not settled yet;
+ * - `merged`: GitHub reports the PR merged (verified or not: see `verified`);
+ * - `not-merged`: confirmed not merged on positive evidence (a clear refusal,
+ *   the PR closed, or no merge long after the merge timeout).
+ */
+export type MergeOutcome = "none" | "pending" | "unknown" | "merged" | "not-merged";
+
+export function mergeOutcome(s: Pick<DeliveryState, "merged" | "pendingMerge" | "lastAttempt">): MergeOutcome {
+  if (s.merged) return "merged";
+  if (s.pendingMerge) return s.pendingMerge.status === "confirmation-pending" ? "pending" : "unknown";
+  if (s.lastAttempt?.outcome === "not-merged") return "not-merged";
+  return "none";
 }
 
 export interface DeliveryState {
@@ -162,6 +208,8 @@ export interface DeliveryState {
   merged: MergeRecord | null;
   /** A merge command sent whose outcome is not confirmed yet; see PendingMerge. */
   pendingMerge: PendingMerge | null;
+  /** The last attempt settled as confirmed not merged; see SettledAttempt. */
+  lastAttempt: SettledAttempt | null;
   mergeCommit: string | null;
   verified: boolean;
   steps: Partial<Record<StepName, StepResult>>;
@@ -186,6 +234,7 @@ export function emptyState(key: string): DeliveryState {
     invalidated: null,
     merged: null,
     pendingMerge: null,
+    lastAttempt: null,
     mergeCommit: null,
     verified: false,
     steps: {},

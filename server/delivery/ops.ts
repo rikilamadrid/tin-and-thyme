@@ -17,8 +17,8 @@
 import { join } from "node:path";
 import type { RunResult } from "../lib/exec";
 import { parseCliJson } from "../lib/json";
-import { commandFailure, defaultRunner, Forge, summarizeChecks, type Check, type ChecksSummary, type PrDetail, type PrSummary, type Runner } from "./forge";
-import { DeliveryError, DeliveryStore, emptyState, isTicketKey, redact, redactDeep, type Approval, type DeliveryState, type FailureKind, type PendingMerge, type StepName } from "./state";
+import { commandFailure, defaultRunner, Forge, isClearMergeRefusal, MERGE_TIMEOUT_MS, summarizeChecks, type Check, type ChecksSummary, type PrDetail, type PrSummary, type Runner } from "./forge";
+import { DeliveryError, DeliveryStore, emptyState, isTicketKey, redact, redactDeep, type Approval, type DeliveryState, type FailureKind, type PendingMerge, type SettledAttempt, type StepName } from "./state";
 
 // ---------------------------------------------------------------- pure rules
 
@@ -262,6 +262,14 @@ export interface DeliveryConfig {
    * the last, the merge is recorded as confirmation pending, never as not merged.
    */
   confirmDelaysMs?: number[];
+  /**
+   * An unclear merge failure (timeout, kill, 5xx, network, interrupted) is
+   * settled as not merged only when, this long after the command was sent,
+   * GitHub still does not report the PR merged and origin has neither the
+   * approved head nor tree. Must be longer than the merge timeout
+   * (default 5 minutes; the merge command is killed after 60 s).
+   */
+  settleAfterMs?: number;
 }
 
 export type Outcome<T> =
@@ -312,6 +320,7 @@ export class Delivery {
   private readonly forge: Forge;
   private readonly now: () => Date;
   private readonly confirmDelaysMs: number[];
+  private readonly settleAfterMs: number;
 
   constructor(private readonly cfg: DeliveryConfig) {
     this.runner = cfg.runner ?? defaultRunner;
@@ -321,6 +330,9 @@ export class Delivery {
     this.forge = new Forge(this.runner, cfg.repo, this.base, cfg.root);
     this.now = cfg.now ?? (() => new Date());
     this.confirmDelaysMs = cfg.confirmDelaysMs ?? [500, 1500];
+    this.settleAfterMs = cfg.settleAfterMs ?? 5 * MERGE_TIMEOUT_MS;
+    if (!Number.isFinite(this.settleAfterMs) || this.settleAfterMs <= MERGE_TIMEOUT_MS)
+      throw new DeliveryError("invalid", `settleAfterMs must be longer than the merge timeout (${MERGE_TIMEOUT_MS} ms)`);
   }
 
   /** The stored delivery state (what a reconnecting UI restores). */
@@ -448,17 +460,19 @@ export class Delivery {
   private async mergeLocked(key: string, a: Approval): Promise<{ data: MergeResult; message: string }> {
     const recorded = this.cfg.store.read(key);
     // A recorded merge is never merged again, whatever approval this call carries:
-    // it is verified against the approval it was made under.
+    // it is verified against the approval it is bound to. An unbound (outside) merge
+    // is offered this call's approval, which is bound only if it verifies.
     if (recorded.merged) {
       await this.validRepo();
-      return this.alreadyMerged(key);
+      return this.alreadyMerged(key, [a]);
     }
     // A merge whose outcome GitHub has not confirmed is settled first, from GitHub
     // and origin, before any new attempt: merged (and verified), or not merged.
     if (recorded.pendingMerge) {
       await this.validRepo();
       const r = await this.reconcile(key, recorded.pendingMerge);
-      if (r.merged) return this.alreadyMerged(key);
+      if (r.merged) return this.alreadyMerged(key, [a]);
+      // Confirmed not merged, on positive evidence: a new attempt may follow, fully re-checked.
     }
 
     const claim = await this.validClaim(key);
@@ -467,9 +481,10 @@ export class Delivery {
     const pr = await this.forge.viewPr(found.number);
 
     if (pr.state === "MERGED") {
-      // Merged outside this app (no merge or pending merge recorded): recorded once, under this approval.
-      this.recordMerged(key, pr, { ...a, at: this.now().toISOString() });
-      return this.alreadyMerged(key);
+      // Merged outside this app (no merge or pending merge recorded): recorded with no approval.
+      // This call's approval is bound only if it verifies; a wrong one is never kept.
+      this.recordMerged(key, pr, null);
+      return this.alreadyMerged(key, [a]);
     }
     if (pr.state !== "OPEN") throw new DeliveryError("refused", `PR #${pr.number} is ${pr.state}`);
 
@@ -535,11 +550,15 @@ export class Delivery {
       throw new DeliveryError("blocked", `${note}. Do not merge again: verify it in a moment; it is settled from GitHub and origin before any new merge attempt`);
     }
 
-    // The command failed and GitHub does not report a merge. Only GitHub and origin together settle it as not merged.
-    this.setPending(key, "unknown", `the merge command for PR #${pr.number} failed (${failure.message}) and GitHub does not report it merged; outcome unknown`);
+    // The command failed and GitHub does not report a merge. A clear refusal from GitHub is
+    // settled as not merged once GitHub and origin confirm nothing landed; an unclear failure
+    // (timeout, kill, 5xx, network) stays unknown, with its approval, until reads settle it.
+    const refusal = isClearMergeRefusal(failure) ? failure.message : null;
+    if (refusal) this.setPending(key, "refused", `GitHub refused the merge command for PR #${pr.number} (${refusal})`, refusal);
+    else this.setPending(key, "unknown", `the merge command for PR #${pr.number} failed unclearly (${failure.message}) and GitHub does not report it merged; outcome unknown`);
     let settled: { merged: true } | { merged: false; reason: string };
     try {
-      settled = await this.reconcile(key, { ...sent, status: "unknown" });
+      settled = await this.reconcile(key, { ...sent, status: refusal ? "refused" : "unknown", ...(refusal ? { refusal } : {}) });
     } catch (e) {
       const why = e instanceof Error ? e.message : String(e);
       throw new DeliveryError(failure.kind, `${failure.message}; whether PR #${pr.number} merged is unknown (${why}). It is settled from GitHub and origin before any new merge attempt`, {
@@ -573,17 +592,16 @@ export class Delivery {
       const s = this.cfg.store.read(key);
       if (!s.merged && s.pendingMerge) {
         const r = await this.reconcile(key, s.pendingMerge);
-        if (!r.merged) throw new DeliveryError("refused", `PR #${s.pendingMerge.pr} is not merged: ${r.reason}`);
+        if (!r.merged) throw new DeliveryError("refused", `PR #${s.pendingMerge.pr} is confirmed not merged: ${r.reason}`);
       } else if (!s.merged) {
-        const a = s.approval;
-        if (!a) throw new DeliveryError("refused", `no approval is recorded for ${key}; nothing to verify against`);
         const number = s.pr?.number ?? (s.branch && isTicketBranch(s.branch, key) ? (await this.forge.findPr(s.branch))?.number : undefined);
         if (!number) throw new DeliveryError("refused", `no PR is recorded for ${key}`);
         const pr = await this.forge.viewPr(number);
         if (pr.state !== "MERGED") throw new DeliveryError("refused", `PR #${pr.number} is ${pr.state}, not merged`);
-        this.recordMerged(key, pr, a);
+        // Merged outside this app: recorded with no approval; one is bound only once it verifies.
+        this.recordMerged(key, pr, null);
       }
-      // Always against the approval the merge was made under, never the caller's or the current one.
+      // Against the approval the merge is bound to; an unbound (outside) merge binds the first recorded approval that verifies.
       const v = await this.verifyRecorded(key);
       return { data: v, message: `${this.base} has ${v.mergeCommit}: parent ${v.parent}, tree ${v.tree}` };
     });
@@ -836,14 +854,16 @@ export class Delivery {
   /**
    * Records GitHub's report of the merge with the approval it was made under.
    * The first record is kept: a later report only fills in a merge commit GitHub
-   * did not report at first, and a recorded approval is never replaced.
+   * did not report at first, and a recorded approval is never replaced. `approval`
+   * is the one this app's own merge command was sent under, or null for a merge
+   * made outside the app (bound later, only by verification).
    */
-  private recordMerged(key: string, pr: PrDetail, approval: Approval): void {
+  private recordMerged(key: string, pr: PrDetail, approval: Approval | null): void {
     if (pr.state !== "MERGED") throw new DeliveryError("refused", `PR #${pr.number} is ${pr.state}, not merged`);
     const commit = isSha(pr.mergeCommit) ? pr.mergeCommit : null;
     this.cfg.store.update(key, (s) => {
       if (!s.merged) {
-        s.merged = { at: this.now().toISOString(), pr: pr.number, commit, approval: { ...approval, at: approval.at ?? this.now().toISOString() }, verification: null };
+        s.merged = { at: this.now().toISOString(), pr: pr.number, commit, approval: approval ? { ...approval, at: approval.at ?? this.now().toISOString() } : null, verification: null };
         s.verified = false;
       } else if (!s.merged.commit && commit && s.merged.pr === pr.number) {
         s.merged.commit = commit;
@@ -854,9 +874,9 @@ export class Delivery {
     });
   }
 
-  private setPending(key: string, status: PendingMerge["status"], note: string): void {
+  private setPending(key: string, status: PendingMerge["status"], note: string, refusal?: string): void {
     this.cfg.store.update(key, (s) => {
-      if (s.pendingMerge) s.pendingMerge = { ...s.pendingMerge, status, note };
+      if (s.pendingMerge) s.pendingMerge = { ...s.pendingMerge, status, note, ...(refusal ? { refusal } : {}) };
     });
   }
 
@@ -877,19 +897,32 @@ export class Delivery {
   /**
    * Settles a merge whose outcome was not confirmed, with reads only: GitHub's
    * PR state, then origin's base (`ls-remote`), then whether the approved head
-   * or tree is now on it. Returns merged (recorded under the pending approval)
-   * or not merged (the pending record is cleared); anything else stays pending
-   * and throws, so no new merge is attempted.
+   * or tree is now on it.
+   * - Confirmed merged: GitHub reports the PR merged; recorded under the pending approval.
+   * - Confirmed not merged: GitHub does not report it merged, origin has neither
+   *   the approved head nor tree, and there is positive evidence it cannot merge
+   *   later from this command: GitHub clearly refused it, the PR is closed, or (for
+   *   an unclear failure only) more than `settleAfterMs`, longer than the merge
+   *   timeout, has passed since it was sent. The pending record is then cleared
+   *   and kept as `lastAttempt`, approval included.
+   * - Anything else stays pending (the command exited 0: never settled by time)
+   *   or unknown, keeps its approval, and throws, so no new merge is attempted.
    */
   private async reconcile(key: string, p: PendingMerge): Promise<{ merged: true } | { merged: false; reason: string }> {
-    const unknown = (why: string): never => {
+    const pending = p.status === "confirmation-pending";
+    const hold = (why: string): never => {
+      if (pending)
+        throw new DeliveryError(
+          "blocked",
+          `the merge of PR #${p.pr} is pending (its command succeeded; GitHub has not confirmed it), so whether it merged is still unknown: ${why}. Nothing is merged again until GitHub confirms it or the PR is closed; check again later, or leave it to the human`,
+        );
       throw new DeliveryError("blocked", `whether PR #${p.pr} merged is still unknown: ${why}. Nothing is merged again until it is settled; check again in a moment, or leave it to the human`);
     };
     let pr: PrDetail;
     try {
       pr = await this.forge.viewPr(p.pr);
     } catch (e) {
-      return unknown(`GitHub could not be read (${e instanceof Error ? e.message : String(e)})`);
+      return hold(`GitHub could not be read (${e instanceof Error ? e.message : String(e)})`);
     }
     if (pr.state === "MERGED") {
       this.recordMerged(key, pr, p.approval);
@@ -899,28 +932,48 @@ export class Delivery {
     try {
       main = await this.remoteHead(this.base);
     } catch (e) {
-      return unknown(`origin ${this.base} could not be read (${e instanceof Error ? e.message : String(e)})`);
+      return hold(`origin ${this.base} could not be read (${e instanceof Error ? e.message : String(e)})`);
     }
-    if (!main) return unknown(`origin has no ${this.base}`);
-    let reason: string;
+    if (!main) return hold(`origin has no ${this.base}`);
+    let where: string;
     if (main === p.approval.base) {
-      reason = `GitHub reports PR #${p.pr} ${pr.state} and origin ${this.base} is still at the approved base ${p.approval.base}`;
+      where = `origin ${this.base} is still at the approved base ${p.approval.base}`;
     } else {
       let landed: string | null;
       try {
         landed = await this.landedOnBase(p.approval);
       } catch (e) {
-        return unknown(`origin ${this.base} could not be compared with the approval (${e instanceof Error ? e.message : String(e)})`);
+        return hold(`origin ${this.base} could not be compared with the approval (${e instanceof Error ? e.message : String(e)})`);
       }
       if (landed) {
         const note = `GitHub reports PR #${p.pr} ${pr.state}, but origin ${this.base} already has ${landed} with the approved head or tree: confirmation pending`;
         this.setPending(key, "confirmation-pending", note);
-        return unknown(note);
+        return hold(note);
       }
-      reason = `GitHub reports PR #${p.pr} ${pr.state} and origin ${this.base} (${main}) has neither the approved head nor the approved tree`;
+      where = `origin ${this.base} (${main}) has neither the approved head nor the approved tree`;
     }
+    // Nothing has landed yet. Only positive evidence settles it as not merged.
+    const elapsed = this.now().getTime() - Date.parse(p.at);
+    const evidence =
+      pr.state === "CLOSED"
+        ? `PR #${p.pr} is closed without merging`
+        : p.status === "refused"
+          ? `GitHub refused the merge command (${p.refusal ?? p.note})`
+          : !pending && elapsed > this.settleAfterMs
+            ? `no merge ${Math.round(elapsed / 1000)} s after the command was sent, longer than the merge timeout`
+            : null;
+    if (!evidence) {
+      if (pending) return hold(`GitHub reports PR #${p.pr} ${pr.state} and ${where} yet; a merge whose command succeeded (e.g. queued) can still land`);
+      const left = Number.isFinite(elapsed) ? `; it is settled only once ${Math.round(this.settleAfterMs / 1000)} s, longer than the merge timeout, have passed since the command with nothing landed (${Math.max(0, Math.round(elapsed / 1000))} s so far)` : "";
+      return hold(`GitHub reports PR #${p.pr} ${pr.state} and ${where}, but the command's failure was unclear and GitHub may still complete it${left}`);
+    }
+    const reason = `GitHub reports PR #${p.pr} ${pr.state}, ${where}, and ${evidence}`;
+    const settled: SettledAttempt = { at: p.at, pr: p.pr, approval: p.approval, outcome: "not-merged", settledAt: this.now().toISOString(), reason };
     this.cfg.store.update(key, (s) => {
-      if (s.pendingMerge && s.pendingMerge.pr === p.pr && s.pendingMerge.at === p.at) s.pendingMerge = null;
+      if (s.pendingMerge && s.pendingMerge.pr === p.pr && s.pendingMerge.at === p.at) {
+        s.pendingMerge = null;
+        s.lastAttempt = settled;
+      }
     });
     return { merged: false, reason };
   }
@@ -937,9 +990,9 @@ export class Delivery {
     return null;
   }
 
-  /** The recorded merge, verified (again) against the approval it was made under. Never merges. */
-  private async alreadyMerged(key: string): Promise<{ data: MergeResult; message: string }> {
-    const v = await this.verifyRecorded(key);
+  /** The recorded merge, verified (again) against the approval it is bound to. Never merges. */
+  private async alreadyMerged(key: string, offered: Approval[] = []): Promise<{ data: MergeResult; message: string }> {
+    const v = await this.verifyRecorded(key, offered);
     const s = this.cfg.store.read(key);
     const n = s.merged!.pr;
     const url = s.pr?.number === n ? s.pr.url : `https://github.com/${this.cfg.repo}/pull/${n}`;
@@ -947,29 +1000,50 @@ export class Delivery {
   }
 
   /**
-   * Verifies the recorded merge against its recorded approval. A merge that was
+   * Verifies the recorded merge against the approval it is bound to. A merge
+   * with no bound approval (made outside the app) is checked against the
+   * approvals on record (the last settled attempt, the invalidated and current
+   * approvals) and any `offered` by the caller, and the first that verifies is
+   * bound for good; one that does not verify is never kept. A merge that was
    * never verified stays merged-but-unverified when this fails (it is never
    * merged again); a merge that was verified stays verified, and the failed
    * re-check is reported.
    */
-  private async verifyRecorded(key: string): Promise<VerifyResult> {
+  private async verifyRecorded(key: string, offered: Approval[] = []): Promise<VerifyResult> {
     const before = this.cfg.store.read(key);
     let rec = before.merged;
     if (!rec) throw new DeliveryError("refused", `no merge is recorded for ${key}`);
     try {
-      if (!rec.approval) throw new DeliveryError("refused", "the merge record carries no approval to verify against");
       if (!rec.commit) {
-        this.recordMerged(key, await this.forge.viewPr(rec.pr), rec.approval);
+        this.recordMerged(key, await this.forge.viewPr(rec.pr), null);
         rec = this.cfg.store.read(key).merged!;
         if (!rec.commit) throw new DeliveryError("failed", `GitHub reports no merge commit for PR #${rec.pr}`);
       }
-      const v = await this.checkMergeCommit(rec.commit, rec.approval);
-      this.cfg.store.update(key, (s) => {
-        s.mergeCommit = v.mergeCommit;
-        s.verified = true;
-        if (s.merged) s.merged.verification = { at: this.now().toISOString(), parent: v.parent, tree: v.tree, main: v.main };
-      });
-      return v;
+      const candidates = rec.approval ? [rec.approval] : approvalCandidates(key, [before.lastAttempt?.approval, before.invalidated?.approval, before.approval, ...offered]);
+      if (!candidates.length) throw new DeliveryError("refused", "no approval is recorded to verify it against; approve the head, base and tree it was merged from, then verify");
+      const main = await this.fetchBase();
+      const errors: string[] = [];
+      for (const a of candidates) {
+        let v: VerifyResult;
+        try {
+          v = await this.checkMergeCommit(rec.commit, a, main);
+        } catch (e) {
+          if (!(e instanceof DeliveryError) || e.kind !== "failed" || candidates.length === 1) throw e;
+          errors.push(e.message);
+          continue;
+        }
+        const bound: Approval = { ...a, at: a.at ?? this.now().toISOString() };
+        this.cfg.store.update(key, (s) => {
+          s.mergeCommit = v.mergeCommit;
+          s.verified = true;
+          if (s.merged) {
+            if (!s.merged.approval) s.merged.approval = bound;
+            s.merged.verification = { at: this.now().toISOString(), parent: v.parent, tree: v.tree, main: v.main };
+          }
+        });
+        return v;
+      }
+      throw new DeliveryError("failed", `no recorded or offered approval matches it (${errors.join("; ")})`);
     } catch (e) {
       const err = e instanceof DeliveryError ? e : new DeliveryError("failed", e instanceof Error ? e.message : String(e));
       if (before.verified && rec.verification)
@@ -978,9 +1052,8 @@ export class Delivery {
     }
   }
 
-  /** The merge commit is one squash commit on the approved base, with the approved tree, and it is on the base branch. */
-  private async checkMergeCommit(m: string, a: Approval): Promise<VerifyResult> {
-    const main = await this.fetchBase();
+  /** The merge commit is one squash commit on the approved base, with the approved tree, and it is on the base branch (`main`, freshly fetched). */
+  private async checkMergeCommit(m: string, a: Approval, main: string): Promise<VerifyResult> {
     const parents = (await this.gitOk(["rev-list", "--parents", "-n", "1", m], `reading ${m}`)).split(/\s+/).filter(Boolean).slice(1);
     if (parents.length !== 1) throw new DeliveryError("failed", `${m} is not a squash commit (${parents.length} parents)`);
     const [parent] = parents;
@@ -990,6 +1063,16 @@ export class Delivery {
     if (m !== main && !(await this.isAncestor(m, main))) throw new DeliveryError("failed", `${m} is not on ${this.base} (${main})`);
     return { mergeCommit: m, parent, tree, main };
   }
+}
+
+/** Distinct, well-formed approvals for this key, in order (the same head, base and tree once). */
+function approvalCandidates(key: string, list: (Approval | null | undefined)[]): Approval[] {
+  const out: Approval[] = [];
+  for (const a of list) {
+    if (!a || a.key !== key || !isSha(a.head) || !isSha(a.base) || !isSha(a.tree)) continue;
+    if (!out.some((b) => b.head === a.head && b.base === a.base && b.tree === a.tree)) out.push(a);
+  }
+  return out;
 }
 
 function text(v: unknown, max: number): string | null {
