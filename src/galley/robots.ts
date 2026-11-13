@@ -2,9 +2,14 @@
 // designs (Basil, the six cooks, Dash) are ported from
 // docs/art-concepts/galley-robots.html unchanged. Pinch (adversary) and the
 // neutral crew bot are new silhouettes made to sit beside them.
+//
+// The Feature 09 variants (VARIANTS below) are each built from a base def: the base parts with a
+// few dropped, an accessory added and the palette accent from the crew catalogue. The base defs
+// themselves are never edited.
 
-import type { CharacterId } from "../data/crew";
-import { INK, type Backend } from "./backend";
+import { CREW_VARIANTS, type CharacterId } from "../data/crew";
+import type { CrewCharacterId, VariantCharacterId } from "../data/crewContract";
+import { INK, shade, type Backend } from "./backend";
 
 export const C = {
   white: "#e8eef6", light: "#c9d3e0", steel: "#8f9cb2", dark: "#3a4660", screen: "#1b2338", cyan: "#6fe3ff", gold: "#ffc93a",
@@ -14,15 +19,20 @@ export const C = {
 
 type Part = [kind: "b" | "e", x: number, y: number, w: number, h: number, colour: string, opts?: { r?: number; noShade?: boolean }];
 type Detail = [x: number, y: number, w: number, h: number, colour: string];
+/** A round scanner eye: centre, ink radius, pupil radius, pupil colour. */
+type Eye = [x: number, y: number, r: number, pupil: number, colour: string];
 interface RobotDef {
   w: number;
   h: number;
   parts: Part[];
   details: Detail[];
+  /** Dash's single scanner eye. */
   eye?: [number, number];
+  /** Variant eyes, drawn instead of `eye`. */
+  eyes?: Eye[];
 }
 
-export const ROBOTS: Record<CharacterId, RobotDef> = {
+const BASE: Record<CharacterId, RobotDef> = {
   basil: { w: 20, h: 34, parts: [
     ["b", 6, 26, 3, 6, C.steel], ["b", 11, 26, 3, 6, C.steel], ["b", 5, 31, 5, 3, C.dark, { r: 1 }], ["b", 10, 31, 5, 3, C.dark, { r: 1 }],
     ["b", 1, 15, 3, 9, C.light, { r: 1 }], ["b", 16, 15, 3, 9, C.light, { r: 1 }],
@@ -76,6 +86,181 @@ export const ROBOTS: Record<CharacterId, RobotDef> = {
   ], details: [[8, 0, 2, 3, C.steel], [8, -1, 2, 1, C.cyan], [5, 5, 8, 3, C.screen], [6, 6, 2, 1, C.cyan], [10, 6, 2, 1, C.cyan], [5, 14, 8, 5, "#6f7c94"], [6, 15, 6, 1, "#c9d3e0"], [6, 17, 4, 1, "#c9d3e0"]] },
 };
 
+// ---------------------------------------------------------------- Variants (Feature 09)
+
+const WOOD = "#c9a06a";
+const BROWN = "#8a5a34";
+
+interface Variation {
+  /** Recolour: exact base colour → new colour, in parts and details. */
+  tint?: Record<string, string>;
+  /** Base parts and details to leave out, by index in the base def. */
+  dropParts?: number[];
+  dropDetails?: number[];
+  /** Parts drawn behind the base parts, and in front of them. */
+  under?: Part[];
+  parts?: Part[];
+  /** Details drawn over the base details. */
+  details?: Detail[];
+  /** Replaces the base eye (an empty list removes it). */
+  eyes?: Eye[];
+}
+
+/** A variant def: the base silhouette with an accessory. Width and height stay the base's, so a variant stands where its base would. */
+function vary(base: CharacterId, v: Variation): RobotDef {
+  const b = BASE[base];
+  const t = (c: string) => v.tint?.[c] ?? c;
+  const parts = b.parts.filter((_, i) => !v.dropParts?.includes(i)).map((p): Part => [p[0], p[1], p[2], p[3], p[4], t(p[5]), p[6]]);
+  const details = b.details.filter((_, i) => !v.dropDetails?.includes(i)).map((d): Detail => [d[0], d[1], d[2], d[3], t(d[4])]);
+  return {
+    w: b.w,
+    h: b.h,
+    parts: [...(v.under ?? []), ...parts, ...(v.parts ?? [])],
+    details: [...details, ...(v.details ?? [])],
+    ...(v.eyes ? { eyes: v.eyes } : b.eye ? { eye: b.eye } : {}),
+  };
+}
+
+const accent = (id: VariantCharacterId) => CREW_VARIANTS[id].accent;
+
+/** Tester variants: Dash's hull with the lower saucer and running lights in the accent, and no ticket mast (details 0-2). */
+const drone = (id: VariantCharacterId, v: Variation): RobotDef =>
+  vary("dash", { ...v, tint: { [C.light]: accent(id), [C.teal]: accent(id), "#2a9a92": shade(accent(id), 0.7) }, dropDetails: [0, 1, 2] });
+
+/** Adversary variants: Pinch's shell, belly line and highlight in the accent. */
+const crab = (id: VariantCharacterId, v: Variation): RobotDef =>
+  vary("pinch", { ...v, tint: { [C.coral]: accent(id), "#b8452f": shade(accent(id), 0.7), "#ff9c84": shade(accent(id), 1.3) } });
+
+/** Box-bot variants: the Crew bot with its chest panel and antenna tip in the accent. */
+const box = (id: VariantCharacterId, v: Variation): RobotDef =>
+  vary("unit", { ...v, tint: { "#6f7c94": accent(id), "#c9d3e0": shade(accent(id), 0.55), [C.cyan]: accent(id), ...v.tint } });
+
+// Index notes for the drops below.
+//   dash  parts: 0 thruster, 1 lower saucer, 2 upper saucer, 3 dome
+//   pinch parts: 0-3 legs, 4-5 arms, 6-7 claws, 8 shell, 9-10 eyestalks, 11-12 eyes
+//         details: 0-1 claw slits, 2-3 pupils, 4-6 mouth, 7 belly line, 8 highlight, 9-10 tasting spoon
+//   unit  parts: 0-1 feet, 2-3 arms, 4 body, 5 head
+//         details: 0-1 antenna, 2-4 visor and eyes, 5-7 chest panel
+const VARIANTS: Record<VariantCharacterId, RobotDef> = {
+  // ---- tester family (base Dash)
+  // Dot · twin scanner eyes + antenna.
+  dot: drone("dot", {
+    eyes: [[8.5, 7.5, 2, 1, accent("dot")], [13.5, 7.5, 2, 1, accent("dot")]],
+    details: [[11, 0, 1, 4, C.steel], [10, -2, 3, 2, accent("dot")]],
+  }),
+  // Blip · magnifier lens (gold rim, handle) + a clipboard hanging under the rim.
+  blip: drone("blip", {
+    under: [["b", 1, 16, 5, 7, C.cream, { noShade: true }]],
+    parts: [["e", 11, 7.5, 4.2, 4.2, C.gold, { noShade: true }]],
+    eyes: [[11, 7.5, 3, 2.2, C.glass]],
+    details: [[14, 10, 1, 1, BROWN], [15, 11, 2, 2, BROWN], [17, 13, 2, 2, BROWN], [2, 15, 3, 2, C.steel], [2, 18, 3, 1, C.steel], [2, 20, 2, 1, C.steel]],
+  }),
+  // Zest · visor band instead of an eye + an order spike on the left.
+  zest: drone("zest", {
+    eyes: [],
+    details: [[6, 6, 10, 3, C.screen], [7, 7, 8, 1, accent("zest")], [3, 0, 1, 12, C.steel], [2, 2, 3, 2, "#ffffff"], [2, 5, 3, 2, accent("zest")], [2, 8, 3, 2, "#fff6df"]],
+  }),
+
+  // ---- adversary family (base Pinch)
+  // Tang · monocle on the right eye + a notepad where the left claw was.
+  tang: crab("tang", {
+    dropParts: [6],
+    dropDetails: [0, 9, 10],
+    parts: [["b", 0, 2, 5, 7, C.cream, { noShade: true }], ["e", 17, 5, 3.6, 3.6, C.gold, { noShade: true }], ["e", 17, 5, 2.4, 2.4, C.white]],
+    details: [[0, 2, 5, 1, C.steel], [1, 4, 3, 1, C.steel], [1, 6, 2, 1, C.steel], [17, 5, 1, 1, INK], [20, 8, 1, 2, C.gold], [21, 10, 1, 2, C.gold]],
+  }),
+  // Nib · tall eyestalks + a pepper mill where the right claw was.
+  nib: crab("nib", {
+    dropParts: [7, 9, 10, 11, 12],
+    dropDetails: [1, 2, 3, 9, 10],
+    parts: [
+      ["b", 8, 2, 2, 9, C.steel, { noShade: true }], ["b", 16, 2, 2, 9, C.steel, { noShade: true }],
+      ["e", 9, 1, 2.4, 2.4, C.white], ["e", 17, 1, 2.4, 2.4, C.white],
+      ["b", 22, 1, 4, 8, BROWN, { r: 1 }],
+    ],
+    details: [[9, 1, 1, 1, INK], [17, 1, 1, 1, INK], [22, 4, 4, 1, C.cream], [23, -1, 2, 2, C.steel]],
+  }),
+  // Brine · a pickle jar on the shell + a dropper where the right claw was.
+  brine: crab("brine", {
+    dropParts: [7],
+    dropDetails: [1, 9, 10],
+    parts: [["b", 10, 4, 6, 9, C.glass, { r: 1 }], ["b", 23, 3, 2, 5, C.glass, { noShade: true }], ["e", 24, 1.5, 2, 2, C.dark]],
+    details: [[10, 3, 6, 2, shade(accent("brine"), 0.7)], [11, 8, 2, 3, C.green], [13, 7, 2, 2, "#3f8f5a"], [24, 6, 1, 1, accent("brine")]],
+  }),
+
+  // ---- helper family (base Crew bot)
+  // Whisk · a balloon whisk for an antenna + wheels for feet.
+  whisk: box("whisk", {
+    dropParts: [0, 1],
+    dropDetails: [0, 1],
+    under: [["e", 5.5, 23.5, 2.5, 2.5, C.dark], ["e", 12.5, 23.5, 2.5, 2.5, C.dark]],
+    details: [
+      [9, 2, 1, 1, C.steel], [7, -2, 5, 1, C.light], [6, -1, 1, 2, C.light], [12, -1, 1, 2, C.light], [7, 1, 5, 1, C.light], [8, -1, 1, 2, C.light], [10, -1, 1, 2, C.light],
+      [5, 23, 1, 1, accent("whisk")], [12, 23, 1, 1, accent("whisk")], [3, 11, 12, 1, accent("whisk")],
+    ],
+  }),
+  // Ladle · right arm raised with a ladle + a cream apron.
+  ladle: box("ladle", {
+    dropParts: [3],
+    dropDetails: [5, 6, 7],
+    parts: [["b", 15, 9, 3, 5, C.steel, { r: 1 }], ["e", 17, 1, 2.6, 2.2, C.light]],
+    details: [
+      [17, 3, 1, 6, C.steel], [16, 0, 2, 1, accent("ladle")],
+      [5, 12, 8, 10, C.cream], [5, 11, 1, 1, C.cream], [12, 11, 1, 1, C.cream], [7, 16, 4, 3, accent("ladle")], [7, 16, 4, 1, shade(accent("ladle"), 0.7)],
+    ],
+  }),
+  // Scoop · big scoop hands carrying a crate.
+  scoop: box("scoop", {
+    dropDetails: [5, 6, 7],
+    parts: [["b", 2, 15, 14, 6, WOOD, { noShade: true }], ["b", -2, 16, 5, 5, accent("scoop"), { r: 1 }], ["b", 15, 16, 5, 5, accent("scoop"), { r: 1 }]],
+    details: [[3, 17, 12, 1, BROWN], [3, 19, 12, 1, BROWN], [4, 12, 10, 1, accent("scoop")]],
+  }),
+  // Tongs · both arms raised as tongs + a satchel on a cross strap.
+  tongs: box("tongs", {
+    dropParts: [2, 3],
+    dropDetails: [5, 6, 7],
+    parts: [["b", 0, 8, 3, 6, C.steel, { r: 1 }], ["b", 15, 8, 3, 6, C.steel, { r: 1 }], ["b", 10, 16, 6, 5, BROWN, { r: 1 }]],
+    details: [
+      [0, 2, 1, 6, C.light], [2, 2, 1, 6, C.light], [15, 2, 1, 6, C.light], [17, 2, 1, 6, C.light], [0, 7, 3, 1, accent("tongs")], [15, 7, 3, 1, accent("tongs")],
+      [4, 12, 2, 1, BROWN], [6, 13, 2, 1, BROWN], [8, 14, 2, 1, BROWN], [10, 15, 2, 1, BROWN], [10, 16, 6, 2, accent("tongs")], [12, 18, 2, 1, C.gold],
+    ],
+  }),
+
+  // ---- planner and integrator
+  // Sage · a menu board under the left arm + a pencil behind the head.
+  sage: box("sage", {
+    dropDetails: [0, 1],
+    parts: [["b", -3, 11, 7, 9, C.screen, { noShade: true }]],
+    details: [[-3, 11, 7, 1, accent("sage")], [-2, 13, 4, 1, "#ffffff"], [-2, 15, 5, 1, C.light], [-2, 17, 3, 1, C.light], [12, -1, 2, 4, C.yellow], [12, -2, 2, 1, C.cream], [3, 11, 12, 1, accent("sage")]],
+  }),
+  // Clove · a cloche for a hat + tweezers in the right hand.
+  clove: box("clove", {
+    dropDetails: [0, 1],
+    under: [["e", 9, 3.5, 6, 4, C.light]],
+    details: [[8, -2, 2, 2, accent("clove")], [3, 3, 12, 1, C.steel], [15, 18, 1, 5, C.light], [17, 18, 1, 5, C.light], [3, 11, 12, 1, accent("clove")]],
+  }),
+
+  // ---- unknown roles
+  // Bolt · a question-mark panel, big side bolts and a brow band in the accent.
+  bolt: box("bolt", {
+    dropDetails: [0, 1, 5, 6, 7],
+    parts: [["b", 1, 6, 3, 3, accent("bolt"), { r: 1 }], ["b", 14, 6, 3, 3, accent("bolt"), { r: 1 }]],
+    details: [[5, 3, 8, 1, accent("bolt")], [5, 13, 8, 7, C.screen], [8, 14, 3, 1, accent("bolt")], [10, 15, 1, 1, accent("bolt")], [9, 16, 1, 1, accent("bolt")], [9, 18, 1, 1, accent("bolt")]],
+  }),
+  // Cog · a gear badge, a toothed crown, head in the accent.
+  cog: box("cog", {
+    tint: { "#b3bdcc": accent("cog"), "#6f7c94": "#6f7c94" },
+    dropDetails: [0, 1, 6, 7],
+    details: [
+      [5, 2, 2, 1, C.steel], [8, 2, 2, 1, C.steel], [11, 2, 2, 1, C.steel],
+      [8, 14, 1, 1, accent("cog")], [10, 14, 1, 1, accent("cog")], [7, 15, 5, 1, accent("cog")], [7, 16, 2, 1, accent("cog")], [10, 16, 2, 1, accent("cog")], [7, 17, 5, 1, accent("cog")], [8, 18, 1, 1, accent("cog")], [10, 18, 1, 1, accent("cog")],
+    ],
+  }),
+};
+
+/** Every crew character's sprite: the base designs and the variants. */
+export const ROBOTS: Record<CrewCharacterId, RobotDef> = { ...BASE, ...VARIANTS };
+
 function part(B: Backend, p: Part, x: number, y: number, o: { ink?: boolean; inkOnly?: boolean; shade?: boolean; hi?: boolean }) {
   const [k, px, py, w, h, c, po = {}] = p;
   if (k === "b") B.box(x + px, y + py, w, h, c, { r: po.r ?? 0, ...o });
@@ -83,7 +268,7 @@ function part(B: Backend, p: Part, x: number, y: number, o: { ink?: boolean; ink
 }
 
 /** Cel-only personality: inked tool lines and motion marks. */
-function celFlair(B: Backend, id: CharacterId, x: number, y: number) {
+function celFlair(B: Backend, id: CrewCharacterId, x: number, y: number) {
   if (id === "roux") {
     B.path(`M${x + 18.5} ${y + 12} q-2.6 -3 0 -6.6 q2.6 3.6 0 6.6z`, "none", { stroke: INK, width: 0.6 });
     B.path(`M${x + 18.5} ${y + 12} q-1 -3 0 -6.6 q1 3.6 0 6.6z`, "none", { stroke: INK, width: 0.5 });
@@ -92,6 +277,10 @@ function celFlair(B: Backend, id: CharacterId, x: number, y: number) {
   if (id === "ember") B.path(`M${x + 15.5} ${y + 1} q-2 -2 0 -4 q2 -2 0 -4`, "none", { stroke: "#c9d3e0", width: 0.7 });
   if (id === "pepper") B.path(`M${x + 17} ${y + 7} h5 v7 h-5z`, "none", { stroke: INK, width: 0.6 });
   if (id === "pinch") B.path(`M${x + 0.5} ${y + 3} l2 2 M${x + 25.5} ${y + 3} l-2 2`, "none", { stroke: INK, width: 0.6 });
+  // Variants: hover marks in the drone's own accent, and a mark over whichever claw a crab kept.
+  if (id === "dot" || id === "blip" || id === "zest") B.path(`M${x + 1} ${y + 18} q2 1 4 0 M${x + 17} ${y + 18} q2 1 4 0`, "none", { stroke: accent(id), width: 0.6 });
+  if (id === "nib" || id === "brine") B.path(`M${x + 0.5} ${y + 3} l2 2`, "none", { stroke: INK, width: 0.6 });
+  if (id === "tang") B.path(`M${x + 25.5} ${y + 3} l-2 2`, "none", { stroke: INK, width: 0.6 });
 }
 
 export interface RobotOpts {
@@ -100,18 +289,19 @@ export interface RobotOpts {
 }
 
 /** Draws a robot with its top-left at (x, y). */
-export function drawRobot(B: Backend, id: CharacterId, x: number, y: number, o: RobotOpts = {}) {
+export function drawRobot(B: Backend, id: CrewCharacterId, x: number, y: number, o: RobotOpts = {}) {
   const R0 = ROBOTS[id];
   const cel = B.kind === "cel";
   const draw = () => {
     if (!cel) R0.parts.forEach((p) => part(B, p, x, y, { ink: true, inkOnly: true }));
     R0.parts.forEach((p) => part(B, p, x, y, { ink: cel, shade: !p[6]?.noShade, hi: true }));
     R0.details.forEach(([dx, dy, w, h, c]) => B.rect(x + dx, y + dy, w, h, c));
-    if (R0.eye) {
-      const [ex, ey] = R0.eye;
-      B.ell(x + ex, y + ey, 3, 3, INK, { ink: cel });
-      B.ell(x + ex, y + ey, 1.8, 1.8, C.teal);
-      B.rect(x + ex - 1, y + ey - 1, 1, 1, "#ffffff");
+    const eyes: Eye[] = R0.eyes ?? (R0.eye ? [[R0.eye[0], R0.eye[1], 3, 1.8, C.teal]] : []);
+    for (const [ex, ey, r, pupil, colour] of eyes) {
+      B.ell(x + ex, y + ey, r, r, INK, { ink: cel });
+      B.ell(x + ex, y + ey, pupil, pupil, colour);
+      // The glint would cover a small pixel-art pupil whole, so only cel draws it there.
+      if (cel || r >= 3) B.rect(x + ex - 1, y + ey - 1, 1, 1, "#ffffff");
     }
     if (cel) celFlair(B, id, x, y);
   };
@@ -119,7 +309,7 @@ export function drawRobot(B: Backend, id: CharacterId, x: number, y: number, o: 
   draw();
 }
 
-export const robotSize = (id: CharacterId) => ({ w: ROBOTS[id].w, h: ROBOTS[id].h });
+export const robotSize = (id: CrewCharacterId) => ({ w: ROBOTS[id].w, h: ROBOTS[id].h });
 
 export type IconKind = "work" | "review" | "needs" | "wait" | "off" | "lock" | "idle" | "done";
 
