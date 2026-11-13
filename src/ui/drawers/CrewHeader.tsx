@@ -43,7 +43,7 @@ export function CrewHeader({ id }: { id: string }) {
   return (
     <div className="border-b-[3px] border-line bg-[#0c1226] px-3 py-2.5 font-[system-ui] text-[#eef6ff]">
       <div className="flex items-center gap-3">
-        <RobotPortrait character={c.character} size={64} dim={!c.running} />
+        <RobotPortrait character={c.character} size={64} dim={!c.running} accent={c.color} />
         <div className="min-w-0 flex-1">
           <div className="text-[24px] font-black leading-[26px]">{c.name}</div>
           <div className="text-[15px] font-extrabold text-[#ffc93a]">
