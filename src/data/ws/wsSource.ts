@@ -87,6 +87,7 @@ export function createWsSource(token: string): OfficeDataSource {
     setContextAlert: (pct) => send("setContextAlert", pct),
     ackContextAlert: (id) => send("ackContextAlert", id),
     summariseAgent: (id) => send("summariseAgent", id),
+    freshContext: (id) => send("freshContext", id),
     checkpointFresh: (id) => send("checkpointFresh", id),
     retryHandoff: (key) => send("retryHandoff", key),
     stopAgent: (id) => send("stopAgent", id),
