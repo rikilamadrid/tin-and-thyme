@@ -4,6 +4,13 @@ Compact record of completed work.
 
 ## Completed
 
+### 2026-11-13 — Feature 10: In-App Ticket Delivery
+
+- Outcome: Exact-head delivery approval, merge verification, labelled preview, safe local-main reconciliation, idempotent coordinator handback, constrained completion-records PRs and refreshed board/dispatch state. All five Feature 10 tickets are Complete.
+- Verification: Final independent PASS on `f7656bf`; repaired production wiring reproduced eight failures before the fix and passed 32 checks afterward. Developer combined checks passed after-merge 508, attention 432, UI 311, summary 11, fresh-context 16, typecheck/build. Final implementation merge tree equals the reviewed tree. GitHub CI did not run.
+- Commit/PR: PR #21 (`c674c1e`), following the earlier delivery/preview increments; [final review](reviews/10.3-review-f7656bf.md). The old `9281359` approval was superseded by explicit approval of repaired head `f7656bf`.
+- Follow-up: Live delivery activation, real GitHub-to-coordinator handback and native sessions/harnesses were not tested. Claude handoff → clear → READY remains blocked by account limits; Codex `/new`, native hook timing and clipboard paste remain unverified. Saved handoffs and visible refusal on unconfirmed resets remain required; no automatic continuation or rollback is claimed. Preserve the unadopted 10.5 timeout/cache/polling draft (only its stale-readiness refusal was adopted) and assign the preview banner overlap noted in 10.3. Live kitchen activation and credential changes remain prohibited.
+
 ### 2026-11-13 — Feature 03: Agent Context Tools
 
 - Outcome: Agent-written summaries with Copy and a guarded handoff → clear → orientation flow for idle interactive agents; Pathfinder workflow workers keep their existing checkpoint flow. Human accepted delivery with the native-verification limitations below.
