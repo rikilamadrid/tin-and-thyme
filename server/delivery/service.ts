@@ -420,6 +420,10 @@ export function createDeliveryService(o: DeliveryServiceOptions): DeliveryServic
         engineError = null;
       } catch (e) {
         engineError = redact(e instanceof Error ? e.message : String(e));
+        // Rows from an earlier read stay listed but are never ready while the engine cannot be read: the guard
+        // before a write (claim, blockers, stacking) is enforced on a fresh read or not at all, never on an old answer.
+        const reason = `the engine could not be read (${engineError})`;
+        rows = new Map([...rows].map(([k, r]) => [k, { ...r, readiness: { ...r.readiness, ready: false, reason } }]));
       }
       const want = keys();
       for (const k of want) await checkMain(k);

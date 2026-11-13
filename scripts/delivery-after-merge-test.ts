@@ -80,10 +80,11 @@ interface PlanFixture {
   blocked: { key: string; title: string; reason: string; waiting: string[] }[];
 }
 
-/** What a scenario can make git do: refuse the fast-forward (as a held lock would), or fail while moving files. */
+/** What a scenario can make git do: refuse the fast-forward (as a held lock would), or fail while moving files; and the engine: fail its status read. */
 interface Hooks {
   failMerge: boolean;
   failUnstage: boolean;
+  failStatus: boolean;
 }
 
 function runnerFor(world: World, plan: { current: PlanFixture | null }, owners: { n: number }, hooks: Hooks): Runner {
@@ -91,6 +92,7 @@ function runnerFor(world: World, plan: { current: PlanFixture | null }, owners: 
     if (cmd === "git" && args[0] === "merge" && hooks.failMerge) return result("", 128, "fatal: Unable to create '.git/index.lock': File exists.");
     if (cmd === "git" && args[1] === "rm" && hooks.failUnstage) return result("", 128, "fatal: Unable to create '.git/index.lock': File exists.");
     if (cmd === "node" && args[1] === "status") {
+      if (hooks.failStatus) return result("", 1, "orchestrate: the engine could not answer");
       const rows = [...world.claims.entries()].map(([key, c]) => ({ key, state: c.state, title: c.title, updated: "u1" }));
       return result(JSON.stringify({ ok: true, rows }));
     }
@@ -121,7 +123,7 @@ async function kitchen(name: string, opts: { coordinator?: boolean; records?: bo
     current: { dispatch: [], deferred: [], blocked: [{ key: "10.2", title: "Next ticket", reason: "blocked by 10.1", waiting: ["10.1"] }] },
   };
   const owners = { n: 0 };
-  const hooks: Hooks = { failMerge: false, failUnstage: false };
+  const hooks: Hooks = { failMerge: false, failUnstage: false, failStatus: false };
   const runner = runnerFor(s.world, plan, owners, hooks);
   const typed: Typed = { texts: [], answer: true };
   const coordinator =
@@ -1000,6 +1002,32 @@ async function stackedNotReady() {
   check("no claim ref: not ready", !v("05.1").readiness.ready && /claim ref/.test(v("05.1").readiness.reason ?? ""), v("05.1").readiness);
 }
 
+// ---------------------------------------------------------------- the guard fails closed when readiness cannot be re-read before a write
+
+async function guardFailsClosed() {
+  const k = await kitchen("guard-closed");
+  check("ready while the engine answers", k.view().readiness.ready, k.view().readiness);
+  // Since the last good read the ticket gained an unfinished blocker; the re-read before the write then fails.
+  // The answer from the earlier read (ready) must not be what the server enforces.
+  k.world.tickets.set("10.1", { status: "In Progress", blockers: ["10.9"] });
+  k.hooks.failStatus = true;
+  const pushes = () => k.world.calls.filter((x) => x.cmd === "git" && x.args[0] === "push").length;
+  const T = { key: "10.1", head: k.head, base: k.base, tree: k.head };
+  refusedReply("engine unreadable: inspect refused", await k.call("inspect", { key: "10.1" }), "refused", /the engine could not be read \(cannot read the engine's status: orchestrate: the engine could not answer\)/);
+  refusedReply("engine unreadable: approve refused", await k.call("approve", T), "refused", /engine could not be read/);
+  refusedReply("engine unreadable: push refused", await k.call("push", { key: "10.1", head: k.head }), "refused", /engine could not be read/);
+  refusedReply("engine unreadable: PR refused", await k.call("ensurePr", { key: "10.1" }), "refused", /engine could not be read/);
+  refusedReply("engine unreadable: merge refused", await k.call("merge", T), "refused", /engine could not be read/);
+  eq("engine unreadable: nothing pushed, no PR", [pushes(), k.world.prs.length], [0, 0]);
+  check("engine unreadable: the ticket stays listed, not ready, and says why", !!k.hub.snap.delivery?.byKey["10.1"] && !k.view().readiness.ready && /engine could not be read/.test(k.view().readiness.reason ?? ""), k.view().readiness);
+  check("engine unreadable: nothing was inspected", k.view().inspection === null && k.view().head === null);
+  // The engine answers again: the blocker it now reports is what refuses.
+  k.hooks.failStatus = false;
+  refusedReply("engine back: refused on the unfinished blocker", await k.call("inspect", { key: "10.1" }), "refused", /10\.9 \(missing from the store, not Complete\)/);
+  k.world.tickets.delete("10.1");
+  okReply("engine back, no blocker: inspect runs", await k.call("inspect", { key: "10.1" }));
+}
+
 // ---------------------------------------------------------------- readPlan, alone
 
 async function planAlone() {
@@ -1040,6 +1068,7 @@ async function main() {
   engineRelease();
   await readinessCache();
   await stackedNotReady();
+  await guardFailsClosed();
   await planAlone();
 }
 
