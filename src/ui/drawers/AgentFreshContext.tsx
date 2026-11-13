@@ -23,7 +23,7 @@ export function AgentFreshContext({ agent, status, connected, onRequest }: {
           const step = refresh.steps[key];
           return <li key={key} className="flex gap-2">
             <span aria-label={step.state}>{MARKS[step.state]}</span>
-            <span><b>{LABELS[key]}</b>{step.detail && <span className="block text-muted">{step.detail}</span>}</span>
+            <span><b>{LABELS[key]}</b>{step.detail && <span className="block whitespace-pre-wrap text-muted">{step.detail}</span>}</span>
           </li>;
         })}
       </ol>}

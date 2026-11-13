@@ -17,8 +17,9 @@ export interface Keyboard {
   enter(agentId: string): Promise<boolean>;
 }
 
+type VerifyReply = (reply: string | undefined, marker: string) => void;
 interface ContextSequence {
-  requestTurn(prompt: (marker: string) => string, timeoutMs: number): Promise<string>;
+  requestTurn(prompt: (marker: string) => string, timeoutMs: number, verifyReply?: VerifyReply): Promise<string>;
   clear(command: "/clear" | "/new", timeoutMs: number): Promise<void>;
 }
 interface ContextLease {
@@ -37,7 +38,7 @@ export class Inbox {
   private lastHook = new Map<string, number>();
   private lastSubmit = new Map<string, number>();
   private typing = new Set<string>();
-  private requests = new Map<string, { marker: string; submitted: boolean; finish(error?: Error): void }>();
+  private requests = new Map<string, { marker: string; submitted: boolean; sessionId?: string; verifyReply?: VerifyReply; finish(error?: Error): void }>();
   private timer: NodeJS.Timeout;
   private contextLeases = new Map<string, ContextLease>();
   private sessionIds = new Map<string, string>();
@@ -56,7 +57,7 @@ export class Inbox {
   }
 
   /** A single marked prompt, acknowledged by UserPromptSubmit then Stop. Never retries. */
-  requestTurn(agentId: string, prompt: (marker: string) => string, timeoutMs = 120_000, owner?: symbol): Promise<string> {
+  requestTurn(agentId: string, prompt: (marker: string) => string, timeoutMs = 120_000, owner?: symbol, verifyReply?: VerifyReply): Promise<string> {
     if (!this.canType(agentId, owner) || (!owner && this.pending(agentId)))
       return Promise.reject(new Error("The agent's prompt is not ready or has queued messages. Wait until it is idle and try again."));
     const marker = `tt-request-${randomUUID()}`;
@@ -71,7 +72,7 @@ export class Inbox {
         else resolve(marker);
       };
       const timer = setTimeout(() => finish(new Error("Timed out waiting for the agent to finish. No second prompt was sent.")), timeoutMs);
-      this.requests.set(agentId, { marker, submitted: false, finish });
+      this.requests.set(agentId, { marker, submitted: false, verifyReply, finish });
       // Do not await typing: even a stuck terminal operation must respect the timeout.
       Promise.resolve().then(() => this.requests.get(agentId)?.marker === marker
         ? this.keys.type(agentId, `[${marker}] ${prompt(marker)}`.replace(/\s*\n\s*/g, " "))
@@ -89,9 +90,9 @@ export class Inbox {
     this.contextLeases.set(agentId, lease);
     try {
       await action({
-        requestTurn: async (prompt, timeoutMs) => {
+        requestTurn: async (prompt, timeoutMs, verifyReply) => {
           await this.contextPromptReady(agentId, lease, timeoutMs);
-          return this.requestTurn(agentId, prompt, timeoutMs, lease.token);
+          return this.requestTurn(agentId, prompt, timeoutMs, lease.token, verifyReply);
         },
         clear: async (command, timeoutMs) => {
           await this.contextPromptReady(agentId, lease, timeoutMs);
@@ -151,9 +152,17 @@ export class Inbox {
   }
 
   /** Called only for an actual Stop; notifications and screen polling cannot complete a request. */
-  finishTurn(agentId: string) {
+  finishTurn(agentId: string, reply?: string, sessionId?: string) {
     const request = this.requests.get(agentId);
-    if (request?.submitted) request.finish();
+    if (!request?.submitted) return;
+    if (request.verifyReply && request.sessionId && request.sessionId !== sessionId)
+      return request.finish(new Error("The Stop did not identify the session that submitted this request."));
+    try {
+      request.verifyReply?.(reply, request.marker);
+      request.finish();
+    } catch (error) {
+      request.finish(error instanceof Error ? error : new Error("Could not verify the agent's response."));
+    }
   }
 
   push(agentId: string, item: InboxItem) {
@@ -188,8 +197,12 @@ export class Inbox {
       if (event === "SessionStart" || event === "SessionEnd") {
         if (!clearing?.started) this.cancelContext(agentId, new Error("The session changed during fresh context. No next step was sent."));
         else if (event === "SessionStart") {
-          // Claude identifies /clear explicitly; Codex /new creates a different session.
-          if (session?.source === "clear" || (clearing.previousSession && session?.session_id && session.session_id !== clearing.previousSession)) {
+          // A resumed context is not fresh. Claude proves /clear explicitly; Codex
+          // must report a new startup session (some versions defer this and time out).
+          const confirmed = clearing.command === "/clear"
+            ? session?.source === "clear"
+            : session?.source === "startup" && !!clearing.previousSession && !!session.session_id && session.session_id !== clearing.previousSession;
+          if (confirmed) {
             clearing.confirmed = true;
             clearing.finish();
           } else this.cancelContext(agentId, new Error("A new session arrived without evidence of the requested clear. Orientation was not sent."));
@@ -197,8 +210,10 @@ export class Inbox {
       }
     }
     if (request && event === "UserPromptSubmit") {
-      if (prompt?.startsWith(`[${request.marker}]`)) request.submitted = true;
-      else request.finish(new Error("Another prompt replaced the marked request. Nothing was resent."));
+      if (prompt?.startsWith(`[${request.marker}]`)) {
+        request.submitted = true;
+        request.sessionId = session?.session_id;
+      } else request.finish(new Error("Another prompt replaced the marked request. Nothing was resent."));
     }
     if (event === "SessionStart" || event === "SessionEnd") request?.finish(new Error("The agent's session changed before the request finished."));
     if (event === "Stop" || event === "SessionStart" || event === "Notification") setTimeout(() => void this.tryType(agentId), QUIET_MS + 100);

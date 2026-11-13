@@ -41,10 +41,14 @@ function fixture(timeout = 3000) {
   hub.setSession(id, { state: "running", workspace: dir }); inbox.sessionReattached(id);
   const fresh = new AgentFreshContext(hub, inbox, timeout);
   const status = () => hub.status(id)!;
-  const hook = (event: string, prompt?: string, session_id = "old", source?: string) => handleHook(hub, inbox, id, event, { prompt, session_id, source });
+  const hook = (event: string, prompt?: string, session_id = "old", source?: string, last_assistant_message?: string) => handleHook(hub, inbox, id, event, { prompt, session_id, source, last_assistant_message });
   const write = (prompt: string, content = "Feature: 03\nDone: summary\nVerified: tests\nOpen: none\nNext: review\nRead next: ticket03.2") => {
     const marker = /^\[(tt-request-[^\]]+)\]/.exec(prompt)![1];
     writeFileSync(join(dir, HANDOFF_FILE), `<!-- ${marker} -->\n${content}\n`);
+  };
+  const ready = (prompt: string, session = "new", reply?: string) => {
+    const marker = /^\[(tt-request-[^\]]+)\]/.exec(prompt)![1];
+    hook("Stop", undefined, session, undefined, reply ?? `READY [${marker}]\nDone: summary\nOpen: none\nNext: review`);
   };
   const automate = (options: { handoff?: (prompt: string) => void; clear?: (command: string) => void; orient?: (prompt: string) => void; } = {}) => {
     type = async (text) => {
@@ -58,12 +62,12 @@ function fixture(timeout = 3000) {
         hook("Stop");
       } else {
         hook("UserPromptSubmit", text, "new");
-        if (options.orient) options.orient(text); else hook("Stop", undefined, "new");
+        if (options.orient) options.orient(text); else ready(text);
       }
       return true;
     };
   };
-  return { dir, hub, id, inbox, fresh, status, hook, sent, write, automate, setType: (f: typeof type) => { type = f; }, enters: () => enters };
+  return { dir, hub, id, inbox, fresh, status, hook, sent, write, ready, automate, setType: (f: typeof type) => { type = f; }, enters: () => enters };
 }
 const tests: [string, () => Promise<void>][] = [
   ["Claude and Codex run handoff → exact clear command → marked orientation; progress survives snapshot copy", async () => {
@@ -74,6 +78,7 @@ const tests: [string, () => Promise<void>][] = [
       f.automate({ clear() { f.hook("SessionEnd"); f.hook("SessionStart", undefined, "new", cli === "claude" ? "clear" : "startup"); } });
       await f.fresh.start(f.id);
       assert.equal(f.status().contextRefresh?.state, "ready");
+      assert.equal(f.status().contextRefresh?.steps.orient.detail, "READY\nDone: summary\nOpen: none\nNext: review");
       assert.equal(f.sent.length, 3); assert.equal(f.sent[1], cli === "claude" ? "/clear" : "/new");
       assert.match(f.sent[2], /Read .jsmhq-handoff.md.*reply READY.*3-line status/);
       assert.ok(observed.some((s) => s.includes('"clear":{"state":"running"}')));
@@ -174,6 +179,42 @@ const tests: [string, () => Promise<void>][] = [
     assert.equal(f.sent.length, 3); assert.equal(f.status().contextRefresh?.steps.handoff.state, "ok");
     assert.equal(f.status().contextRefresh?.steps.clear.state, "ok"); assert.equal(f.status().contextRefresh?.steps.orient.state, "failed");
     assert.equal(f.enters(), 0);
+  }],
+  ["orientation Stop without a request-specific READY status fails visibly", async () => {
+    for (const mode of ["absent", "refusal", "stale", "incomplete", "session"]) {
+      const f = fixture();
+      f.automate({ orient(prompt) {
+        if (mode === "absent") f.hook("Stop", undefined, "new");
+        if (mode === "refusal") f.ready(prompt, "new", "I could not read the handoff.");
+        if (mode === "stale") f.ready(prompt, "new", "READY [tt-request-old]\nDone: previous\nOpen: none\nNext: previous");
+        if (mode === "incomplete") f.ready(prompt, "new", `READY [${/^\[(tt-request-[^\]]+)\]/.exec(prompt)![1]}]`);
+        if (mode === "session") f.ready(prompt, "old");
+      } });
+      await f.fresh.start(f.id);
+      assert.equal(f.status().contextRefresh?.state, "error", mode);
+      assert.equal(f.status().contextRefresh?.steps.orient.state, "failed", mode);
+      assert.equal(f.sent.length, 3, mode);
+    }
+  }],
+  ["Claude resume with different session ID cannot confirm clear; Codex resume cannot confirm new", async () => {
+    for (const cli of ["claude", "codex"] as const) {
+      const f = fixture(); f.hub.cfg(f.id)!.cli = cli;
+      f.automate({ clear() { f.hook("SessionStart", undefined, "resumed-other-context", "resume"); } });
+      await f.fresh.start(f.id);
+      assert.equal(f.status().contextRefresh?.state, "error"); assert.equal(f.sent.length, 2);
+      assert.equal(f.status().contextRefresh?.steps.orient.state, "pending");
+    }
+  }],
+  ["Claude startup with a different ID is refused, and Codex deferred startup times out without orientation", async () => {
+    const claude = fixture(); claude.hub.cfg(claude.id)!.cli = "claude";
+    claude.automate({ clear() { claude.hook("SessionStart", undefined, "unrelated-new-session", "startup"); } });
+    await claude.fresh.start(claude.id);
+    assert.equal(claude.sent.length, 2); assert.equal(claude.status().contextRefresh?.steps.clear.state, "failed");
+    const codex = fixture(1200); codex.hub.cfg(codex.id)!.cli = "codex";
+    codex.automate({ clear() {} }); await codex.fresh.start(codex.id);
+    assert.equal(codex.sent[1], "/new"); assert.equal(codex.sent.length, 2);
+    assert.equal(codex.status().contextRefresh?.steps.orient.state, "pending");
+    assert.match(codex.status().contextRefresh!.error!, /Timed out confirming/);
   }],
   ["drawer shows running steps, errors, disabled reasons, and hides fresh context for workflow workers", async () => {
     const f = fixture(40); const agent = f.hub.cfg(f.id)!;

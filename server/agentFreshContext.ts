@@ -57,9 +57,18 @@ export class AgentFreshContext {
         await sequence.clear(command, this.timeoutMs);
         ok(`${command} confirmed by the new session hook.`);
         begin("orient");
-        await sequence.requestTurn(() => `Read ${HANDOFF_FILE}, orient from its current work and next action, and reply READY followed by a 3-line status: done, open, next. ` +
-          `Do not resume implementation or change files. Finish this turn after reporting your status.`, this.timeoutMs);
-        ok("Orientation finished. Read the READY status in the terminal.");
+        let ready = "";
+        await sequence.requestTurn((request) => `Read ${HANDOFF_FILE}, orient from its current work and next action, and reply READY with a 3-line status. ` +
+          `Use exactly four lines: first line READY [${request}], then Done: <what was done>, Open: <open items or none>, Next: <next action>. ` +
+          `Base all three status lines on the handoff. Do not resume implementation or change files. Finish this turn after reporting your status.`, this.timeoutMs,
+          (reply, request) => {
+            const lines = reply?.trim().split(/\r?\n/);
+            if (!lines || lines[0] !== `READY [${request}]` || lines.length !== 4 ||
+              !/^Done: \S/.test(lines[1]) || !/^Open: \S/.test(lines[2]) || !/^Next: \S/.test(lines[3]))
+              throw new Error("The orientation ended without a verified READY response and three-line status for this request. Check the terminal; no prompt was resent.");
+            ready = ["READY", ...lines.slice(1)].join("\n");
+          });
+        ok(ready);
       });
       refresh.state = "ready";
       refresh.at = new Date().toISOString();
