@@ -8,8 +8,8 @@ import type { PlanFile } from "./store";
 
 export const PLAN_EXPORT_PATH = "docs/plan.md";
 
-const BOX: Record<TaskStatus, string> = { todo: "[ ]", "in-progress": "[ ]", "in-review": "[ ]", blocked: "[ ]", done: "[x]" };
-const STATUS: Record<TaskStatus, string> = { todo: "", "in-progress": "in progress", "in-review": "in review", blocked: "blocked", done: "" };
+const BOX: Record<TaskStatus, string> = { todo: "[ ]", "in-progress": "[ ]", "in-review": "[ ]", reviewed: "[ ]", blocked: "[ ]", done: "[x]" };
+const STATUS: Record<TaskStatus, string> = { todo: "", "in-progress": "in progress", "in-review": "in review", reviewed: "reviewed, ready to deliver", blocked: "blocked", done: "" };
 
 export function planMarkdown(config: HqConfig, plan: PlanFile): string {
   const name = (id: string | null) => (id ? (config.team.find((a) => a.id === id)?.name ?? id) : null);

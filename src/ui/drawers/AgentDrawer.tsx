@@ -32,6 +32,9 @@ export function AgentDrawer({ id, initialTab }: { id: string; initialTab?: Agent
     );
   }
   const unread = snap.messages.filter((m) => m.toId === id).length;
+  // A workflow worker is a background subagent of the coordinator: its view is an activity transcript, and
+  // Claude Code offers no way to type into it. Only the coordinator's (and native agents') terminals are live.
+  const transcriptOnly = !!agent.crew?.session && !agent.isLead;
   const access = snap.accessRequests?.find((r) => r.agentId === id && r.status === "pending");
 
   return (
@@ -58,7 +61,14 @@ export function AgentDrawer({ id, initialTab }: { id: string; initialTab?: Agent
           // One line, always: a note that wraps or unwraps would change the terminal's height under you.
           <div className={`truncate border-b-[3px] border-line px-3 py-1.5 text-[14px] ${status.state === "needs-input" ? "bg-danger text-[#ff7a9c]" : "bg-cream-2"}`} title={status.note}>
             {status.note}
-            {status.state === "needs-input" && <span className="ml-2 text-muted">— answer in the terminal and press Enter</span>}
+            {status.state === "needs-input" &&
+              (transcriptOnly ? (
+                <button className="ml-2 underline" onClick={() => ui.openActions()}>
+                  — answer in Action items (sent through the coordinator)
+                </button>
+              ) : (
+                <span className="ml-2 text-muted">— answer in the terminal and press Enter</span>
+              ))}
           </div>
         )
       )}
@@ -69,7 +79,7 @@ export function AgentDrawer({ id, initialTab }: { id: string; initialTab?: Agent
           value={tab}
           onChange={setTab}
           tabs={[
-            { id: "terminal", label: "Terminal" },
+            { id: "terminal", label: transcriptOnly ? "Activity" : "Terminal" },
             { id: "shell", label: "Shell" },
             { id: "task", label: "Task" },
             { id: "sandbox", label: "Sandbox" },
@@ -80,7 +90,18 @@ export function AgentDrawer({ id, initialTab }: { id: string; initialTab?: Agent
       <div className="min-h-0 flex-1 overflow-hidden">
         {tab === "terminal" &&
           (status.session.state === "running" ? (
-            <TerminalView agentId={id} />
+            transcriptOnly ? (
+              <div className="flex h-full flex-col">
+                <div className="border-b-[3px] border-line bg-cream-2 px-3 py-1 text-[12px] text-muted">
+                  Activity transcript of a background session (read-only). It can't be typed to; answer its requests in Action items, through the coordinator.
+                </div>
+                <div className="min-h-0 flex-1">
+                  <TerminalView agentId={id} readOnly />
+                </div>
+              </div>
+            ) : (
+              <TerminalView agentId={id} />
+            )
           ) : (
             <NotRunning agent={agent} status={status} />
           ))}
@@ -208,7 +229,7 @@ function AccessCard({ request, agent }: { request: AccessRequest; agent: AgentCo
   );
 }
 
-const SESSION_COLOR = { running: "#00e436", starting: "#29adff", stopped: "#83769c", failed: "#ff004d" } as const;
+const SESSION_COLOR = { running: "#00e436", starting: "#29adff", stopped: "#83769c", failed: "#ff004d", unknown: "#83769c" } as const;
 
 /** Session state + Start/Stop + the agent's folder. */
 function SessionBar({ agent, status }: { agent: AgentConfig; status: AgentStatus }) {
@@ -249,10 +270,10 @@ function NotRunning({ agent, status }: { agent: AgentConfig; status: AgentStatus
       <div className="max-w-[380px]">
         {agent.crew?.session ? (
           <>
-            <p className="mb-2 font-term text-[22px]">This {agent.crew.session} session has finished</p>
+            <p className="mb-2 font-term text-[22px]">{s.state === "unknown" ? `This ${agent.crew.session} session's liveness is unknown` : `This ${agent.crew.session} session has finished`}</p>
             {s.detail && <p className="mb-3 font-term text-[16px] text-[#9aa6d1]">{s.detail}</p>}
             <p className="text-[13px] text-[#9aa6d1]">
-              Its report went back to the coordinator. Pathfinder decides the next session for {agent.crew.ticket ?? "this ticket"}; Tin &amp; Thyme does not restart workers.
+              {s.state === "unknown" ? "Its transcript identifies the worker, but no new activity or completion has been observed. It is not counted as a running worker." : `Pathfinder decides the next session for ${agent.crew.ticket ?? "this ticket"}; Tin & Thyme does not restart workers.`}
             </p>
           </>
         ) : s.state === "starting" ? (
@@ -309,7 +330,7 @@ function TaskTab({ snap, agent, taskId }: { snap: OfficeSnapshot; agent: AgentCo
             <button key={b.id} className="panel mb-2 block w-full px-3 py-2 text-left" onClick={() => ui.openBoards(b.id)}>
               <b>{b.title}</b>
               <div className="font-term text-[17px] text-muted">
-                {count("todo")} to do · {count("in-progress")} in progress · {count("in-review")} in review · {count("done")} done
+                {count("todo")} to do · {count("in-progress")} in progress · {count("in-review")} in review · {count("reviewed")} reviewed · {count("done")} done
               </div>
             </button>
           );

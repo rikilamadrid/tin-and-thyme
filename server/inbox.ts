@@ -253,7 +253,8 @@ export class Inbox {
       !!st &&
       this.sessionUp.has(agentId) &&
       st.session.state === "running" &&
-      st.state === "idle" &&
+      // A coordinator waiting on its workers has its prompt ready, like an idle one.
+      (st.state === "idle" || st.state === "waiting") &&
       !this.typing.has(agentId) &&
       (!this.contextLeases.has(agentId) || this.contextLeases.get(agentId)?.token === owner) &&
       Date.now() - (this.lastHook.get(agentId) ?? 0) >= QUIET_MS
@@ -284,7 +285,8 @@ export class Inbox {
       }
       // If the prompt didn't submit (Enter swallowed), press it once more.
       await new Promise((r) => setTimeout(r, SUBMIT_CHECK_MS));
-      if ((this.lastSubmit.get(agentId) ?? 0) < typedAt && this.hub.status(agentId)?.state === "idle") {
+      const after = this.hub.status(agentId)?.state;
+      if ((this.lastSubmit.get(agentId) ?? 0) < typedAt && (after === "idle" || after === "waiting")) {
         log.warn(`${agentId}: no prompt submit after typing; pressing Enter again`);
         await this.keys.enter(agentId);
       }

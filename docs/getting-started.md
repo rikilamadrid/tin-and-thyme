@@ -48,8 +48,11 @@ From then on:
   **beams out** when it stops;
 - every ticket keeps one card on the left; between stages it says what it is waiting for;
 - a **Needs you** badge means Pathfinder is waiting on a human gate. Open **Action
-  items**, read Pathfinder's question, and answer: your reply is typed into the
-  coordinator's session.
+  items**, read Pathfinder's question and who asked it, and **Send answer**: your
+  reply is typed into the coordinator's session once, and the request shows
+  **Recorded** when Pathfinder records it;
+- **Waiting on workers** on the Head Chef means its turn ended while workers it
+  dispatched are still running: nothing is asked of you.
 
 The coordinator runs under a local-only policy: pushes, pull requests, issues, GitHub API
 calls, deploys and `npm publish` are refused and become a human gate.
