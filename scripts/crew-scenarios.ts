@@ -6,7 +6,9 @@
 //
 // Results are reported in three separate sections, as Feature 09 asks: FIXTURE, LIVE and MOCK.
 // This runner produces fixture results only. The live section lists what 09.8 still has to run and
-// never counts a fixture result as live. Exit code 1 when a check fails, when the self-check can't
+// never counts a fixture result as live. A NOT COVERED section then lists, once each, every part of
+// an acceptance item that no fixture check decides, with the ticket or Feature that owns it: a
+// fixture pass is never a pass for those. Exit code 1 when a check fails, when the self-check can't
 // make the invariant checks fail, or when a fixture acceptance item has no scenario.
 
 import {
@@ -89,14 +91,20 @@ const failedScenarios = fixture.filter((r) => failedIn(r.checks));
 const checks = fixture.reduce((n, r) => n + r.checks.length, 0);
 const failedChecks = fixture.reduce((n, r) => n + failedIn(r.checks), 0);
 const selfFailed = failedIn(selfCheck);
-const openItems = fixture.reduce((n, r) => n + r.notCovered.length, 0);
+// Each not-covered item once, with the scenarios that name it.
+const openItems = new Map<string, string[]>();
+for (const r of fixture) for (const n of r.notCovered) openItems.set(n, [...(openItems.get(n) ?? []), r.id]);
+
+console.log("\n================ NOT COVERED by any fixture check ================");
+console.log("A fixture pass above says nothing about these. Each names its owner.");
+for (const [item, ids] of openItems) console.log(`  - ${item} [${ids.join(", ")}]`);
 
 console.log("\n================ Summary ================");
 console.log(`fixture: ${fixture.length - failedScenarios.length}/${fixture.length} scenarios passed · ${checks - failedChecks}/${checks} checks`);
 console.log(`live:    0 run · ${CREW_LIVE_ACCEPTANCE.length} not run`);
 console.log(`mock:    ${mock.length} run`);
 console.log(`self-check: ${selfCheck.length - selfFailed}/${selfCheck.length} broken cases caught`);
-console.log(`not covered by any fixture check: ${openItems} items, listed above under their scenarios`);
+console.log(`not covered by any fixture check: ${openItems.size} items, listed above with their owners`);
 for (const a of uncovered) console.log(`NO SCENARIO for acceptance item: ${CREW_FIXTURE_ACCEPTANCE[a]}`);
 for (const r of failedScenarios) console.log(`FAILED ${tag(r.evidence)} ${r.id}`);
 if (failedScenarios.length || selfFailed || uncovered.length) process.exit(1);

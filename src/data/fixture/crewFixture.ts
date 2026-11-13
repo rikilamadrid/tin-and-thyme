@@ -2,7 +2,9 @@
 //
 // FIXTURE DATA ONLY. Nothing here reads a server, a transcript or ~/.controlroom, and nothing
 // here is evidence about a live kitchen. Every book it builds is keyed CREW_FIXTURE_KITCHEN, and
-// every session id starts with "fx", so fixture data can't be mistaken for live data.
+// every session id carries an "fx" marker, so fixture data can't be mistaken for live data:
+// worker and helper ids start with "fx" ("fx0001", "fxl0p"), and coordinator ids are
+// "coordinator:fx-<name>", because the contract keys a coordinator `coordinator:<transcript name>`.
 //
 // It holds three things, all built on the 09.1 contract (src/data/crewContract.ts,
 // docs/crew-contract.md) and changing none of it:
@@ -19,7 +21,7 @@ import type { ArtStyle } from "../../galley/backend";
 import { CREW_CHARACTERS } from "../crew";
 import {
   beginRestore, CHARACTER_FAMILY, compareSessionAge, COORDINATOR_CHARACTER, CREW_STATE_BADGE, CREW_STATES, crewColor, crewFloorChanges, crewName, crewOnFloor,
-  crewTransitionKind, deriveCrewState, emptyCrewBook, endSession, FAMILY_POOLS, FAMILY_PRESENCE, familyFor, migrateLegacy, reconcileAfterRestore, restoreSession,
+  crewTransitionKind, customizeCharacter, deriveCrewState, emptyCrewBook, endSession, FAMILY_POOLS, FAMILY_PRESENCE, familyFor, migrateLegacy, reconcileAfterRestore, restoreSession,
   retireCharacter, startSession,
   type CrewBook, type CrewCharacterId, type CrewCharacterRecord, type CrewCharacterView, type CrewObservation, type CrewOutcome, type CrewSession, type CrewSessionFacts,
   type CrewSessionView, type CrewSnapshot, type CrewState, type CrewTelemetry, type LegacyCrewJson, type LegacySessionsJson, type RoleFamily,
@@ -168,12 +170,25 @@ export function crewHistoryProblems(before: CrewBook, after: CrewBook): string[]
 }
 
 /**
- * What is wrong with a snapshot of `book`, or []: a character listed twice, a repeated or numbered
- * name, a session missing from current + history, a live session not shown on its own character,
- * an available character still showing a ticket or readings, or a badge that disagrees with the state.
+ * What is wrong with a snapshot of `book`, or []. It works on any projection, the fixture's or the
+ * real one (09.3), so a ticket that changes how a snapshot is built can run it unchanged:
+ *   - a character listed twice or with no record, a repeated or numbered name, a name, colour,
+ *     family, customized or retired flag that disagrees with the character's record;
+ *   - a badge that disagrees with the state;
+ *   - a character that shows a session which is not in the book or does not wear it;
+ *   - a character whose ticket, stage, role, readings or badge ticket are not exactly those of the
+ *     session it shows (all null when it shows none). This is the reuse defect: a character on a
+ *     fresh session still showing the last session's ticket or readings;
+ *   - a session listed with any field that differs from the book's record, or under a character
+ *     name that is not its own character's (null for overflow);
+ *   - a session missing from current + history, listed twice or in the wrong list, a live session
+ *     not shown on its own character, an overflow list that disagrees.
+ * `book` is the book the snapshot was built from: every comparison is against its records.
+ * It needs no observations, so it can't check `state` beyond the badge, or `stateSince`.
  */
 export function crewSnapshotProblems(snap: CrewSnapshot, book: CrewBook): string[] {
   const problems: string[] = [];
+  const json = (v: unknown) => JSON.stringify(v ?? null);
   const ids = new Set<string>();
   const names = new Map<string, string>();
   for (const c of snap.characters) {
@@ -184,21 +199,46 @@ export function crewSnapshotProblems(snap: CrewSnapshot, book: CrewBook): string
     names.set(n, c.id);
     if (/\d$/.test(n)) problems.push(`${c.id} has the numbered name ${c.name}`);
     if (!/^#[0-9a-f]{6}$/.test(c.accent)) problems.push(`${c.id} has no colour`);
+    const rec = book.characters[c.id];
+    if (!rec) problems.push(`${c.id} is listed but has no record`);
+    else {
+      if (c.name !== crewName(c.id, rec)) problems.push(`${c.id} is named ${c.name}, but its record says ${crewName(c.id, rec)}`);
+      if (c.accent !== crewColor(c.id, rec)) problems.push(`${c.id} is drawn in ${c.accent}, but its record says ${crewColor(c.id, rec)}`);
+      if (c.family !== rec.family) problems.push(`${c.id} is listed in family ${c.family}, but its record says ${rec.family}`);
+      if (c.customized !== (rec.name !== null || rec.color !== null)) problems.push(`${c.id} customized flag disagrees with its record`);
+      if (c.retired !== rec.retired) problems.push(`${c.id} retired flag disagrees with its record`);
+    }
     if ((c.badge?.kind ?? null) !== CREW_STATE_BADGE[c.state]) problems.push(`${c.id} is ${c.state} but its badge is ${c.badge?.kind ?? "none"}`);
-    if (c.state === "available" && (c.sessionId || c.ticket || c.stage || c.role || c.telemetry)) problems.push(`${c.id} is available but still shows a session, ticket or readings`);
-    if (c.sessionId && book.sessions[c.sessionId]?.characterId !== c.id) problems.push(`${c.id} shows session ${c.sessionId}, which does not wear it`);
+    if (c.state === "available" && c.sessionId) problems.push(`${c.id} is available but still shows session ${c.sessionId}`);
+    const shown = c.sessionId ? book.sessions[c.sessionId] ?? null : null;
+    if (c.sessionId && !shown) problems.push(`${c.id} shows session ${c.sessionId}, which is not in the book`);
+    if (shown && shown.characterId !== c.id) problems.push(`${c.id} shows session ${c.sessionId}, which does not wear it`);
+    const of = shown ? `session ${shown.id}` : "no session";
+    for (const f of ["ticket", "stage", "role", "telemetry"] as const) {
+      if (json(c[f]) !== json(shown?.[f])) problems.push(`${c.id} shows ${of} but its ${f} is ${json(c[f])}, not ${json(shown?.[f])}`);
+    }
+    if (c.badge && json(c.badge.ticket) !== json(shown?.ticket)) problems.push(`${c.id} shows ${of} but its badge names ticket ${json(c.badge.ticket)}, not ${json(shown?.ticket)}`);
   }
   const listed = new Set<string>();
   for (const s of snap.current) {
     if (s.phase !== "live") problems.push(`current lists ended session ${s.id}`);
     if (s.characterId && snap.characters.find((c) => c.id === s.characterId)?.sessionId !== s.id) problems.push(`live session ${s.id} is not shown on ${s.characterId}`);
     if ((s.characterId === null) !== snap.overflow.includes(s.id)) problems.push(`overflow list disagrees for session ${s.id}`);
-    if ((s.characterId === null) !== (s.characterName === null)) problems.push(`session ${s.id} character name disagrees with its character`);
   }
   for (const s of snap.history) if (s.phase !== "ended") problems.push(`history lists live session ${s.id}`);
   for (const s of [...snap.current, ...snap.history]) {
     if (listed.has(s.id)) problems.push(`session ${s.id} is listed twice`);
     listed.add(s.id);
+    const rec = book.sessions[s.id];
+    if (!rec) {
+      problems.push(`session ${s.id} is listed but is not in the book`);
+      continue;
+    }
+    for (const f of Object.keys(rec) as (keyof CrewSession)[]) {
+      if (json(s[f]) !== json(rec[f])) problems.push(`session ${s.id} is listed with ${f} ${json(s[f])}, but the book says ${json(rec[f])}`);
+    }
+    const name = rec.characterId ? crewName(rec.characterId, book.characters[rec.characterId]) : null;
+    if (s.characterName !== name) problems.push(`session ${s.id} is listed under the character name ${json(s.characterName)}, but ${rec.characterId ?? "overflow"} is ${json(name)}`);
   }
   for (const id of Object.keys(book.sessions)) if (!listed.has(id)) problems.push(`session ${id} is in neither current nor history`);
   for (const id of snap.overflow) if (!snap.current.some((s) => s.id === id)) problems.push(`overflow names ${id}, which is not a current session`);
@@ -214,10 +254,12 @@ export function canonicalCrewBook(book: CrewBook): string {
 // ---------------------------------------------------------------- The scripted kitchen
 
 /** What the fixture says the server observed for a session on the current poll. */
-export type FixtureSight = "starting" | "working" | "idle" | "needs-input" | "stopped" | "failed";
+export type FixtureSight = "starting" | "no-tools" | "working" | "idle" | "needs-input" | "stopped" | "failed";
 
 const SIGHT: Record<FixtureSight, Pick<CrewObservation, "session" | "agent" | "tools">> = {
   starting: { session: "starting", agent: "idle", tools: 0 },
+  // The process is running and the agent is busy, but it has made no tool call yet.
+  "no-tools": { session: "running", agent: "working", tools: 0 },
   working: { session: "running", agent: "working", tools: 4 },
   idle: { session: "running", agent: "idle", tools: 4 },
   "needs-input": { session: "running", agent: "needs-input", tools: 4 },
@@ -238,6 +280,10 @@ export class FixtureKitchen {
   readonly violations: string[] = [];
   /** How many book changes were checked. */
   steps = 0;
+  /** Problems crewSnapshotProblems found in any snapshot this kitchen took, with its number and time. */
+  readonly snapshotViolations: string[] = [];
+  /** How many snapshots were taken and checked. */
+  snapshots = 0;
   /** Seconds since CREW_FIXTURE_T0. */
   clock = 0;
   private count = 0;
@@ -320,10 +366,24 @@ export class FixtureKitchen {
     this.audit(`${retired ? "retire" : "un-retire"} ${id}`);
   }
 
-  /** One poll: every session still in sight is read again (its `at` is now), then the snapshot is built. */
+  /** Renames or recolours a character through the contract's one write path. Returns its refusal, or null. */
+  customize(id: CrewCharacterId, change: { name?: string | null; color?: string | null }): string | null {
+    const refused = customizeCharacter(this.book, id, change, this.iso);
+    this.audit(`customize ${id}`);
+    return refused;
+  }
+
+  /**
+   * One poll: every session still in sight is read again (its `at` is now), then the snapshot is
+   * built and checked with crewSnapshotProblems, so a stale ticket or reading on a reused character
+   * is caught on the poll that shows it, not only in a scenario's last snapshot.
+   */
   snapshot(): CrewSnapshot {
     for (const [id, o] of Object.entries(this.observations)) if (!this.lost.has(id)) o.at = this.iso;
-    return crewFixtureSnapshot(this.book, this.observations, this.now);
+    const snap = crewFixtureSnapshot(this.book, this.observations, this.now);
+    this.snapshots += 1;
+    for (const p of crewSnapshotProblems(snap, this.book)) this.snapshotViolations.push(`snapshot ${this.snapshots} at +${this.clock}s: ${p}`);
+    return snap;
   }
 }
 
@@ -345,7 +405,11 @@ export interface CrewScenarioOutcome {
   snapshot: CrewSnapshot;
 }
 
-/** The fixture items of Feature 09's acceptance, verbatim, plus the fixture rehearsals of its live and Settings items. */
+/**
+ * The fixture items of Feature 09's acceptance, in its words, plus the fixture rehearsals of its
+ * live and Settings items. A bracket says how much of the item a fixture can decide; the rest is
+ * listed by each scenario as not covered, with its owner.
+ */
 export const CREW_FIXTURE_ACCEPTANCE = {
   concurrent: "2 developers + 2 testers + 2 adversaries together",
   reuse: "finish → relax → a fresh session on the same character, with no stale ticket or readings",
@@ -353,10 +417,10 @@ export const CREW_FIXTURE_ACCEPTANCE = {
   "coordinator-waiting": "a coordinator waiting with no false badge",
   endings: "interrupted and failed sessions",
   "rapid-handoffs": "rapid handoffs and overlapping arrivals",
-  overflow: "more sessions than stations or seats",
-  presentation: "both art styles, reduced motion, and sound on and off",
+  overflow: "more sessions than stations or seats (data only: more sessions than characters; the station and seat layout is 09.5)",
+  presentation: "both art styles, reduced motion, and sound on and off (data only)",
   restart: "a restart or reconnect with no duplicate crew, replayed arrivals, lost history or session launch (fixture rehearsal of the live item)",
-  team: "Settings → Team shows roles, crew, current sessions and history, with no repeated editable rows (data only)",
+  team: "Settings → Team shows roles, crew, current sessions and history, with no repeated editable rows (crew data only: roles are Feature 07, the Settings page is 09.4)",
 } as const;
 export type CrewAcceptanceId = keyof typeof CREW_FIXTURE_ACCEPTANCE;
 
@@ -394,10 +458,17 @@ class Checks {
 function close(k: FixtureKitchen, c: Checks, notCovered: string[] = []): CrewScenarioOutcome {
   const snapshot = k.snapshot();
   c.none(`no character shared by two live sessions, at any of ${k.steps} steps`, k.violations);
+  c.none(`every snapshot taken (${k.snapshots}) shows each character with its own session's ticket, stage, role and readings`, k.snapshotViolations);
   c.none("final book holds the contract invariants", crewBookProblems(k.book));
   c.none("final snapshot: no repeated or numbered name, every session in current or history", crewSnapshotProblems(snapshot, k.book));
   return { checks: c.list, notCovered, book: k.book, snapshot };
 }
+
+/** What the two scenarios that cover the Settings → Team item leave open. */
+const TEAM_NOT_COVERED = [
+  "Settings → Team: the role contracts it shows (roles are read from roles/<role>.md: Feature 07)",
+  "Settings → Team: the page itself, that crew, current sessions and history are drawn with no repeated editable rows (visual, 09.4); only the crew data behind it is checked here",
+];
 
 const who = (snap: CrewSnapshot, id: CrewCharacterId) => snap.characters.find((c) => c.id === id) ?? null;
 const states = (snap: CrewSnapshot) => Object.fromEntries(snap.characters.map((c) => [c.id, c.state]));
@@ -480,9 +551,15 @@ function reuse(): CrewScenarioOutcome {
   k.tick(50);
   const b = k.worker("implementation", "09.4");
   k.see(b.id, "starting");
-  const fresh = who(k.snapshot(), "pepper");
+  const freshSnap = k.snapshot();
+  const fresh = who(freshSnap, "pepper");
   c.same("fresh session: a new session id on the same character", [b.characterId, b.id !== a.id, b.transcript !== a.transcript, b.startedAt], ["pepper", true, true, at(120)]);
   c.same("fresh session: the new ticket and no stale readings", [fresh?.state, fresh?.sessionId, fresh?.ticket, fresh?.telemetry, fresh?.badge], ["assigned", b.id, "09.4", null, { kind: "starting", reason: null, ticket: "09.4" }]);
+  c.none("fresh session: the shared snapshot check finds nothing of the finished session on pepper", crewSnapshotProblems(freshSnap, k.book));
+  k.see(b.id, "no-tools");
+  const noTools = who(k.snapshot(), "pepper");
+  k.see(b.id, "working");
+  c.same("a running session with no tool call yet is still assigned, and working after its first", [noTools?.state, noTools?.badge?.kind, who(k.snapshot(), "pepper")?.state], ["assigned", "starting", "working"]);
   c.same("history keeps the finished session, its ticket and its frozen readings", [k.book.sessions[a.id].phase, k.book.sessions[a.id].ticket, k.book.sessions[a.id].telemetry], ["ended", "07.2", { ...readings, at: at(5) }]);
   k.tick(80);
   k.end(b.id, "handed-off", "review");
@@ -500,7 +577,7 @@ function reuse(): CrewScenarioOutcome {
   const snap = k.snapshot();
   c.same("Team data: one pepper row, three pepper sessions in history", [snap.characters.filter((ch) => ch.id === "pepper").length, snap.history.filter((h) => h.characterId === "pepper").map((h) => h.ticket)], [1, ["06.3", "09.4", "07.2"]]);
   c.same("one live session per character", snap.current.map((s) => s.characterId), ["basil", "roux"]);
-  return close(k, c);
+  return close(k, c, TEAM_NOT_COVERED);
 }
 
 function gate(): CrewScenarioOutcome {
@@ -620,6 +697,7 @@ function rapidHandoffs(): CrewScenarioOutcome {
   const worn: Record<string, (CrewCharacterId | null)[]> = Object.fromEntries(tickets.map((t) => [t, []]));
   const liveOn: Record<string, CrewSession | null> = Object.fromEntries(tickets.map((t) => [t, null]));
   const arrivals: CrewCharacterId[][] = [];
+  const departures: CrewCharacterId[][] = [];
   const replays: number[] = [];
   let prev = k.snapshot();
   for (const stage of stages) {
@@ -632,7 +710,10 @@ function rapidHandoffs(): CrewScenarioOutcome {
       worn[t].push(liveOn[t]!.characterId);
     }
     const next = k.snapshot();
-    arrivals.push(crewFloorChanges(prev, next).arrivals);
+    // The floor change of THIS handoff: the snapshot before it against the snapshot after it.
+    const change = crewFloorChanges(prev, next);
+    arrivals.push(change.arrivals);
+    departures.push(change.departures);
     replays.push(crewFloorChanges(next, k.snapshot()).arrivals.length);
     prev = next;
   }
@@ -647,7 +728,7 @@ function rapidHandoffs(): CrewScenarioOutcome {
   const count = Object.keys(k.book.sessions).length;
   const again = startSession(k.book, live.id, k.facts(live.id, "review", "07.2", "tester"), k.iso);
   c.same("a session reported twice is one session: no second allocation, no new record", [again === k.book.sessions[live.id], again.characterId, Object.keys(k.book.sessions).length], [true, "dash", count]);
-  c.same("a handoff never beams a robot out", crewFloorChanges(prev, snap).departures, []);
+  c.same("a handoff never beams a robot out: no departure at any of the four handoffs, though every character changes session", departures, [[], [], [], []]);
   return close(k, c);
 }
 
@@ -680,7 +761,10 @@ function overflow(): CrewScenarioOutcome {
   const ended = snap.history.find((h) => h.id === devs[6].id);
   c.same("an overflow session keeps its history: ticket, outcome, and no character", [ended?.ticket, ended?.end?.outcome, ended?.characterId, ended?.characterName], ["10.7", "failed", null, null]);
   c.same("seventeen sessions started, none lost", [snap.current.length + snap.history.length, Object.keys(k.book.sessions).length], [17, 17]);
-  return close(k, c);
+  return close(k, c, [
+    "more sessions than STATIONS OR SEATS: where robots stand and sit, and that robots, ticket badges and nameplates don't overlap (visual, 09.5). This scenario shows more sessions than characters, as data",
+    "the compact crew list that shows overflow sessions, and an off-floor overflow leaving through the transporter (visual, 09.5)",
+  ]);
 }
 
 /** What the transcript restore reports for one session after a restart. `hook` = it arrived through startSession instead. */
@@ -724,13 +808,18 @@ function restartFromBook(): CrewScenarioOutcome {
   k.tick(5);
   const dev1 = k.worker("implementation", "07.2");
   const dev2 = k.worker("implementation", "08.1");
+  // Five testers for a pool of four: the fifth is overflow before the restart.
   const test1 = k.worker("review", "07.1");
   const test2 = k.worker("review", "08.2");
+  const test3 = k.worker("review", "06.3");
+  const test4 = k.worker("review", "05.2");
+  const test5 = k.worker("review", "09.4");
   const lead = k.worker("implementation", "09.9", "lead");
   k.readings(dev1.id, { context: { used: 61_000, limit: 200_000 }, model: null, tokens: null, costUsd: null, tools: null });
-  c.same("before the restart: who wears what", [dev1, dev2, test1, test2, lead].map((s) => s.characterId), ["pepper", "roux", "dash", "dot", null]);
+  c.same("a custom name and colour are accepted; a numbered name and the needs-you pink are refused", [k.customize("pepper", { name: "Paprika", color: "#3366CC" }), k.customize("roux", { name: "Dash 2" }) !== null, k.customize("roux", { color: "#ff77a8" }) !== null], [null, true, true]);
+  c.same("before the restart: who wears what; the fifth tester and the lead are overflow", [dev1, dev2, test1, test2, test3, test4, test5, lead].map((s) => s.characterId), ["pepper", "roux", "dash", "dot", "blip", "zest", null, null]);
   const before = k.snapshot();
-  // The kitchen stops at +100 s and is back at +600 s. The book goes to disk and back as JSON.
+  // The kitchen stops at +30 s and is back at +600 s. The book goes to disk and back as JSON.
   const persisted = clone(k.book);
   const live = (s: CrewSession): Sighting => ({ id: s.id, facts: { ...k.facts(s.id, String(s.stage), String(s.ticket), s.role), kind: s.kind, phase: "live" } });
   const newDev = "fx9001";
@@ -738,51 +827,91 @@ function restartFromBook(): CrewScenarioOutcome {
   const newEnded = "fx9003";
   const sightings: Sighting[] = [
     { id: coordinator.id, facts: { kind: "coordinator", hqId: "coordinator", phase: "live" } },
-    live(dev1),
+    // dev1 kept running, but the restore reads it differently from the book on every link it
+    // carries: another id, role, stage, ticket, title, worktree, transcript path and start time.
+    { id: dev1.id, facts: { kind: "worker", hqId: `w-99.9-review-${dev1.id}`, role: "tester", stage: "review", ticket: "99.9", title: "A brief header read wrongly", worktree: ".pathfinder/worktrees/99.9", transcript: `/fixture/moved/${dev1.id}.jsonl`, startedAt: at(590), phase: "live" } },
     live(test1),
+    live(test3),
+    live(test4),
+    live(test5),
     live(lead),
-    // dev2 handed off while the kitchen was down. test2's transcript is gone: nothing reports it.
+    // dev2 handed off while the kitchen was down. test2's transcript is gone: nothing reports it, so dot comes free.
     { id: dev2.id, facts: { ...k.facts(dev2.id, "implementation", "08.1", "developer"), phase: "ended", end: ending("handed-off", 300, "review") } },
-    { id: old1.id, facts: { ...k.facts(old1.id, "implementation", "06.3", "developer"), phase: "ended" } },
+    // old1 handed off at +25 s. The restore reports another ending and another time for it.
+    { id: old1.id, facts: { ...k.facts(old1.id, "implementation", "06.3", "developer"), phase: "ended", end: ending("interrupted", 500), endedAt: at(500) } },
+    // old2 failed at +25 s. Its transcript still looks live, and the restore even counts it as running: a stale sighting.
+    { id: old2.id, facts: { ...k.facts(old2.id, "implementation", "05.2", "developer"), phase: "live" } },
     // Three sessions the book has never seen: one a hook reports, one the restore finds live, one that came and went.
     { id: newDev, hook: true, facts: { ...k.facts(newDev, "implementation", "09.4", "developer"), startedAt: at(400), phase: "live" } },
     { id: newTester, facts: { ...k.facts(newTester, "review", "08.1", "tester"), startedAt: at(350), phase: "live" } },
     { id: newEnded, facts: { ...k.facts(newEnded, "implementation", "10.1", "developer"), startedAt: at(420), phase: "ended", end: ending("failed", 500) } },
   ];
-  const running = [coordinator.id, dev1.id, test1.id, lead.id, newDev, newTester];
+  const running = [coordinator.id, dev1.id, test1.id, test3.id, test4.id, test5.id, lead.id, old2.id, newDev, newTester];
   const forward = restart(persisted, "migrateLegacy", sightings, running, 600);
   const reverse = restart(persisted, "migrateLegacy", [...sightings].reverse(), running, 600);
   const begun = restart(persisted, "beginRestore", sightings, running, 600);
   const begunReverse = restart(persisted, "beginRestore", [...sightings].reverse(), running, 600);
   const book = forward.book;
   const s = book.sessions;
+  const links = (x: CrewSession) => [x.hqId, x.role, x.stage, x.family, x.ticket, x.title, x.worktree, x.transcript, x.startedAt];
 
   c.same("the restore pass was open for every sighting and is closed after reconcile", [forward.opened, reverse.opened, begun.opened, begunReverse.opened, book.restorePass], [true, true, true, true, null]);
   c.same("reverse restore order gives the same book", canonicalCrewBook(reverse.book) === canonicalCrewBook(book), true);
   c.same("beginRestore gives the same book as migrateLegacy, in either order", [canonicalCrewBook(begun.book) === canonicalCrewBook(book), canonicalCrewBook(begunReverse.book) === canonicalCrewBook(book)], [true, true]);
   c.same("nothing is allocated while the pass is open, and an unseen session keeps its character", [forward.midPass.sessions[newDev].characterId, forward.midPass.sessions[newTester].characterId, forward.midPass.sessions[test2.id].phase, forward.midPass.sessions[test2.id].characterId], [null, null, "live", "dot"]);
   c.none("no duplicate crew: the restarted book holds the invariants", crewBookProblems(book));
-  c.same("sessions that kept running keep their characters", [s[dev1.id].characterId, s[test1.id].characterId, s[coordinator.id].characterId, s[coordinator.id].phase], ["pepper", "dash", "basil", "live"]);
-  c.same("a session that was overflow before the restart stays overflow", [s[lead.id].characterId, s[lead.id].phase], [null, "live"]);
+  c.same("sessions that kept running keep their characters", [s[dev1.id].characterId, s[test1.id].characterId, s[test3.id].characterId, s[test4.id].characterId, s[coordinator.id].characterId, s[coordinator.id].phase], ["pepper", "dash", "blip", "zest", "basil", "live"]);
+  c.same("a tester that was overflow before the restart stays overflow, though dot came free during it and went to a new session", [s[test5.id].characterId, s[test5.id].reassignedFrom, s[test5.id].phase, book.characters.dot?.sessionId], [null, null, "live", newTester]);
+  c.same("an orchestrator-family worker has no character before or after: basil is reserved for the coordinator", [s[lead.id].characterId, s[lead.id].phase], [null, "live"]);
   c.same("a session that ended while the kitchen was down keeps its real outcome and time", [s[dev2.id].phase, s[dev2.id].end?.outcome, s[dev2.id].endedAt], ["ended", "handed-off", at(300)]);
   c.same("a session nobody saw again ends with its outcome unknown, not interrupted", [s[test2.id].phase, s[test2.id].end, s[test2.id].endedAt], ["ended", null, at(600)]);
   c.same("new sessions get a free character of their own family at reconcile", [s[newDev].characterId, s[newTester].characterId], ["roux", "dot"]);
   c.same("a session that came and went while the kitchen was down is history with no robot", [s[newEnded].phase, s[newEnded].characterId, s[newEnded].end?.outcome], ["ended", null, "failed"]);
   c.same("no session launch: the book gained only the three sessions the restore observed", Object.keys(s).filter((id) => !persisted.sessions[id]).sort(), [newDev, newTester, newEnded]);
-  c.none("no lost history: every earlier session, outcome, ticket link and transcript path is kept", crewHistoryProblems(persisted, book));
+  c.same("a sighting that disagrees with the book on every link changes none: the stored id, role, stage, ticket, title, worktree, transcript and start time win", [links(s[dev1.id]), s[dev1.id].ticket, s[dev1.id].transcript], [links(persisted.sessions[dev1.id]), "07.2", `/fixture/${dev1.id}.jsonl`]);
+  c.same("a sighting with another ending for a session whose outcome is recorded changes neither the outcome nor its time", [s[old1.id].end?.outcome, s[old1.id].endedAt], ["handed-off", at(25)]);
+  c.same("a stale live sighting of an ended session revives nothing: it stays ended with its outcome and time, and its old character is free for a new session", [s[old2.id].phase, s[old2.id].end?.outcome, s[old2.id].endedAt, s[old2.id].characterId, book.characters.roux?.sessionId], ["ended", "failed", at(25), "roux", newDev]);
+  c.none("no lost history: every earlier session, outcome, ticket link and transcript path is kept, against sightings that disagree", crewHistoryProblems(persisted, book));
   c.same("readings that were never read stay null across the restart", s[dev1.id].telemetry, { context: { used: 61_000, limit: 200_000 }, model: null, tokens: null, costUsd: null, tools: null, at: at(30) });
   c.same("a start that imports nothing appends no migration entry, so no backup is owed", book.migrations.length, 0);
   const observations = Object.fromEntries(running.map((id) => [id, { ...SIGHT.working, attention: null, at: at(600) }]));
   const snapshot = crewFixtureSnapshot(book, observations, CREW_FIXTURE_T0 + 600_000);
   c.same("no replayed arrivals: the first snapshot after a restart announces nothing", crewFloorChanges(null, snapshot), { arrivals: [], departures: [] });
-  c.same("no duplicate crew: the same robots as before the restart, each once", [snapshot.characters.map((ch) => ch.id), before.characters.map((ch) => ch.id)], [["pepper", "roux", "dash", "dot", "basil"], ["pepper", "roux", "dash", "dot", "basil"]]);
+  c.same("no duplicate crew: the same robots as before the restart, each once", [snapshot.characters.map((ch) => ch.id), before.characters.map((ch) => ch.id)], [["pepper", "roux", "dash", "dot", "blip", "zest", "basil"], ["pepper", "roux", "dash", "dot", "blip", "zest", "basil"]]);
+  c.same("the overflow list names the same two sessions before and after the restart", [before.overflow, snapshot.overflow], [[test5.id, lead.id], [test5.id, lead.id]]);
+  c.same("a custom name and colour cross the restart, in the book, on the character and on its session", [book.characters.pepper?.name, book.characters.pepper?.color, who(snapshot, "pepper")?.name, who(snapshot, "pepper")?.accent, who(snapshot, "pepper")?.customized, snapshot.current.find((x) => x.id === dev1.id)?.characterName], ["Paprika", "#3366cc", "Paprika", "#3366cc", true, "Paprika"]);
   c.none("the restarted snapshot is sound", crewSnapshotProblems(snapshot, book));
   const settled = canonicalCrewBook(book);
   c.same("a second reconcile finds nothing to do", [reconcileAfterRestore(book, running, at(600)), canonicalCrewBook(book) === settled], [[], true]);
-  const twice = restart(book, "migrateLegacy", sightings.map((x) => ({ ...x, hook: false })), running, 600);
+  const seenAgain = sightings.map((x) => ({ ...x, hook: false }));
+  const twice = restart(book, "migrateLegacy", seenAgain, running, 600);
   c.same("a second restart with the same sightings changes nothing", canonicalCrewBook(twice.book) === settled, true);
+
+  // An upgrade pass: a legacy crew.json found next to the book holds one running worker the old
+  // code put on Basil. The coordinator is already in the book, so no coordinator START moves the
+  // worker off: reconcile has to. Legacy files carry no start time, so by the age order the worker
+  // is the OLDER of the two on Basil: only the "Basil is the coordinator's" rule can move it.
+  const onBasil = "fxl7b";
+  const legacy = { crew: { [onBasil]: { id: "basil", name: "Basil 2", job: "Head Chef" } } as LegacyCrewJson, sessions: {} };
+  const upgrade = [...seenAgain, { id: onBasil, facts: { ...k.facts(onBasil, "implementation", "09.9", "lead"), phase: "live" as const } }];
+  const late = restart(book, "migrateLegacy", upgrade, [...running, onBasil], 660, legacy);
+  const lateReverse = restart(book, "migrateLegacy", [...upgrade].reverse(), [...running, onBasil], 660, legacy);
+  const moved = late.book.sessions[onBasil];
+  c.same("upgrade: a legacy worker on basil shares him with the coordinator only until reconcile", [late.midPass.sessions[onBasil].characterId, late.midPass.sessions[onBasil].phase, late.midPass.sessions[coordinator.id].characterId], ["basil", "live", "basil"]);
+  c.same("upgrade: reconcile moves it to overflow, records the conflict and keeps its legacy row; the coordinator keeps basil", [moved.characterId, moved.reassignedFrom, moved.phase, moved.startedAt, moved.legacy?.name, late.conflicts.map((x) => [x.sessionId, x.characterId]), late.book.migrations.at(-1)?.conflicts.length, late.book.sessions[coordinator.id].characterId, late.book.characters.basil?.sessionId], [null, "basil", "live", null, "Basil 2", [[onBasil, "basil"]], 1, "basil", coordinator.id]);
+  c.same("upgrade: reverse restore order gives the same book", canonicalCrewBook(lateReverse.book) === canonicalCrewBook(late.book), true);
+  c.none("upgrade: the invariants hold and no history is lost", [...crewBookProblems(late.book), ...crewHistoryProblems(book, late.book)]);
   c.none("no character shared by two live sessions before the restart either", k.violations);
-  return { checks: c.list, notCovered: ["a real server restart with real transcripts and a real ~/.controlroom book (live, 09.8)"], book, snapshot };
+  c.none(`every snapshot taken before the restart (${k.snapshots}) shows each character with its own session's ticket, stage, role and readings`, k.snapshotViolations);
+  return {
+    checks: c.list,
+    notCovered: [
+      "a real server restart with real transcripts and a real ~/.controlroom book (live, 09.8)",
+      "a legacy worker on basil moved off by a NEW coordinator session's start (the startSession path; scripts/crew-contract-test.ts of 09.1 checks it). Here the coordinator is already in the book, so the reconcile path is the one checked",
+    ],
+    book,
+    snapshot,
+  };
 }
 
 function restartFromLegacy(): CrewScenarioOutcome {
@@ -803,13 +932,19 @@ function restartFromLegacy(): CrewScenarioOutcome {
   const k = new FixtureKitchen(); // only for its facts(); its book is not used
   const worker = (id: string, stage: string, ticket: string, role: string, phase: "live" | "ended", startedAt: string | null): Sighting => ({ id, facts: { ...k.facts(id, stage, ticket, role), startedAt, phase } });
   const sightings: Sighting[] = [
-    { id: "coordinator:fx-main", facts: { kind: "coordinator", hqId: "coordinator", stage: "coordinate", transcript: "/fixture/fx-main.jsonl", phase: "live" } },
-    ...[0, 1, 3].flatMap((i) => [worker(`fxl${i}p`, "implementation", "05.1", "developer", "ended", null), worker(`fxl${i}d`, "review", "05.1", "tester", "ended", null)]),
+    // Two coordinator transcripts, both reported live and running: the newer one keeps Basil.
+    { id: "coordinator:fx-main", facts: { kind: "coordinator", hqId: "coordinator", stage: "coordinate", transcript: "/fixture/fx-main.jsonl", startedAt: at(-600), phase: "live" } },
+    { id: "coordinator:fx-old", facts: { kind: "coordinator", hqId: "coordinator", stage: "coordinate", transcript: "/fixture/fx-old.jsonl", startedAt: at(-7200), phase: "live" } },
+    ...[0, 1].flatMap((i) => [worker(`fxl${i}p`, "implementation", "05.1", "developer", "ended", null), worker(`fxl${i}d`, "review", "05.1", "tester", "ended", null)]),
     // fxl2p and fxl2d: their transcripts are gone, so nothing reports them.
+    // fxl3p handed off long ago (sessions.json says so), but its transcript still looks live and the
+    // restore even counts it as running: a stale sighting.
+    worker("fxl3p", "implementation", "05.1", "developer", "live", null),
+    worker("fxl3d", "review", "05.1", "tester", "ended", null),
     worker("fxl8d", "review", "07.1", "tester", "live", at(-300)),
     worker("fxl9d", "review", "08.2", "tester", "live", at(-200)),
   ];
-  const running = ["coordinator:fx-main", "fxl8d", "fxl9d"];
+  const running = ["coordinator:fx-main", "coordinator:fx-old", "fxl3p", "fxl8d", "fxl9d"];
   const first = migrateLegacy(crew, sessions, null, { kitchen: CREW_FIXTURE_KITCHEN, now: at(0), backup: "/fixture/backups/crew-fx" });
   c.same("the legacy import opens the restore pass and records one migration with its backup path", [first.restorePass !== null, first.migrations.length, first.migrations[0]?.backup, first.migrations[0]?.imported.length], [true, 1, "/fixture/backups/crew-fx", 12]);
   c.same("two live legacy sessions share dash until every observation is in", Object.values(first.sessions).filter((s) => s.phase === "live" && s.characterId === "dash").map((s) => s.id), ["fxl8d", "fxl9d"]);
@@ -826,7 +961,9 @@ function restartFromLegacy(): CrewScenarioOutcome {
   c.none("no duplicate crew after reconcile", crewBookProblems(book));
   c.same("dash stays with the older live session; the numbered copy becomes dot", [s.fxl8d.characterId, s.fxl9d.characterId, s.fxl9d.reassignedFrom, conflicts.map((x) => [x.sessionId, x.characterId])], ["dash", "dot", "dash", [["fxl9d", "dash"]]]);
   c.same("the conflict is recorded in the migration entry", book.migrations[0]?.conflicts.length, 1);
-  c.same("the legacy row is kept verbatim, and never keyed by its name", [s.fxl9d.legacy, Object.keys(s).length], [{ name: "Dash 2", job: "Expediter", character: "dash" }, 13]);
+  c.same("the legacy row is kept verbatim, and never keyed by its name", [s.fxl9d.legacy, Object.keys(s).length], [{ name: "Dash 2", job: "Expediter", character: "dash" }, 14]);
+  c.same("of two coordinator transcripts the newer keeps basil and the older ends with its outcome unknown, whichever was restored first", [s["coordinator:fx-main"].phase, s["coordinator:fx-main"].characterId, s["coordinator:fx-old"].phase, s["coordinator:fx-old"].end, book.characters.basil?.sessionId, canonicalCrewBook(reverse.book) === canonicalCrewBook(book)], ["live", "basil", "ended", null, "coordinator:fx-main", true]);
+  c.same("a stale live sighting of a session sessions.json ended revives nothing: outcome and time stay, and pepper stays free", [s.fxl3p.phase, s.fxl3p.end?.outcome, s.fxl3p.endedAt, book.characters.pepper?.sessionId], ["ended", "handed-off", at(-1800), null]);
   c.same("a crew-only session that died unobserved ends with its outcome unknown and frees pepper", [s.fxl9p.phase, s.fxl9p.end, book.characters.pepper?.sessionId], ["ended", null, null]);
   c.same("a sessions-only entry is history with no robot, outcome kept", [s.fxl0x.phase, s.fxl0x.characterId, s.fxl0x.end?.outcome], ["ended", null, "gate"]);
   c.same("every recorded outcome is kept: 4 handed-off, 4 interrupted", [0, 1, 2, 3].flatMap((i) => [s[`fxl${i}p`].end?.outcome, s[`fxl${i}d`].end?.outcome]), Array.from({ length: 4 }, () => ["handed-off", "interrupted"]).flat());
@@ -834,15 +971,30 @@ function restartFromLegacy(): CrewScenarioOutcome {
   c.same("a session whose transcript is gone keeps its record with unknown links", [s.fxl2p.phase, s.fxl2p.ticket, s.fxl2p.transcript, s.fxl2p.characterId], ["ended", null, null, "pepper"]);
   const observations = Object.fromEntries(running.map((id) => [id, { ...SIGHT.working, attention: null, at: at(1) }]));
   const snapshot = crewFixtureSnapshot(book, observations, CREW_FIXTURE_T0 + 1000);
-  c.same("Team data: four robots, not twelve rows; the past sessions are history", [snapshot.characters.map((ch) => ch.name), snapshot.current.length, snapshot.history.length], [["Pepper", "Dash", "Dot", "Basil"], 3, 10]);
+  c.same("Team data: four robots, not twelve rows; the past sessions are history", [snapshot.characters.map((ch) => ch.name), snapshot.current.length, snapshot.history.length], [["Pepper", "Dash", "Dot", "Basil"], 3, 11]);
   c.none("no repeated or numbered name reaches the snapshot", crewSnapshotProblems(snapshot, book));
   c.same("no replayed arrivals: migrated robots appear in place", crewFloorChanges(null, snapshot), { arrivals: [], departures: [] });
   const again = migrateLegacy(crew, sessions, book, { kitchen: CREW_FIXTURE_KITCHEN, now: at(60), backup: "/fixture/backups/crew-fx-2" });
   for (const x of sightings) restoreSession(again, x.id, x.facts, at(60));
   reconcileAfterRestore(again, running, at(60));
-  c.same("idempotent: a second start from the same files imports nothing and changes nothing", [again.migrations.length, Object.keys(again.sessions).length, canonicalCrewBook(again) === canonicalCrewBook(book)], [1, 13, true]);
+  c.same("idempotent: a second start from the same files imports nothing and changes nothing", [again.migrations.length, Object.keys(again.sessions).length, canonicalCrewBook(again) === canonicalCrewBook(book)], [1, 14, true]);
   c.none("the second start lost no history", crewHistoryProblems(book, again));
-  return { checks: c.list, notCovered: ["the backup copy and the atomic write of crew-book.json (09.3 owns the disk)", "the real ~/.controlroom files of a live kitchen (09.8)"], book, snapshot };
+  // A third start whose restore disagrees with the book: every worker is reported live and running,
+  // under another id, role, stage, ticket, title, worktree and transcript path.
+  const third = migrateLegacy(crew, sessions, book, { kitchen: CREW_FIXTURE_KITCHEN, now: at(120), backup: "/fixture/backups/crew-fx-3" });
+  for (const x of sightings) {
+    const facts = x.facts.kind === "coordinator" ? x.facts : { ...x.facts, hqId: `w-99.9-plan-${x.id}`, role: "lead", stage: "plan", ticket: "99.9", title: "A brief header read wrongly", worktree: ".pathfinder/worktrees/99.9", transcript: `/fixture/moved/${x.id}.jsonl`, phase: "live" as const };
+    restoreSession(third, x.id, facts, at(120));
+  }
+  reconcileAfterRestore(third, sightings.map((x) => x.id), at(120));
+  c.same("a later start whose sightings disagree on every known link and report every session live changes nothing: stored values win, nothing is revived", [third.migrations.length, s.fxl0p.ticket, third.sessions.fxl0p.ticket, third.sessions.fxl0p.phase, canonicalCrewBook(third) === canonicalCrewBook(book)], [1, "05.1", "05.1", "ended", true]);
+  c.none("the disagreeing start lost no history", crewHistoryProblems(book, third));
+  return {
+    checks: c.list,
+    notCovered: ["the backup copy and the atomic write of crew-book.json (09.3 owns the disk)", "the real ~/.controlroom files of a live kitchen (09.8)", ...TEAM_NOT_COVERED],
+    book,
+    snapshot,
+  };
 }
 
 function reconnect(): CrewScenarioOutcome {
@@ -918,10 +1070,10 @@ export const CREW_SCENARIOS: readonly CrewScenario[] = [
   { id: "coordinator-waiting", title: "A coordinator waiting, with no false badge", evidence: "fixture", covers: ["coordinator-waiting"], fixtureOnlyFamilies: [], run: coordinatorWaiting },
   { id: "endings", title: "Interrupted, failed, gated and unrecorded endings", evidence: "fixture", covers: ["endings"], fixtureOnlyFamilies: [], run: endings },
   { id: "rapid-handoffs", title: "Rapid handoffs and overlapping arrivals", evidence: "fixture", covers: ["rapid-handoffs"], fixtureOnlyFamilies: [], run: rapidHandoffs },
-  { id: "overflow", title: "More sessions than characters", evidence: "fixture", covers: ["overflow"], fixtureOnlyFamilies: [], run: overflow },
+  { id: "overflow", title: "More sessions than characters (data only; stations and seats are 09.5)", evidence: "fixture", covers: ["overflow"], fixtureOnlyFamilies: [], run: overflow },
   { id: "presentation", title: "Both art styles, reduced motion, sound on and off (data only)", evidence: "fixture", covers: ["presentation"], fixtureOnlyFamilies: ["adversary"], run: presentation },
-  { id: "restart", title: "Restart from the crew book, forward and reverse restore order", evidence: "fixture", covers: ["restart"], fixtureOnlyFamilies: [], run: restartFromBook },
-  { id: "restart-legacy", title: "First start from legacy crew.json and sessions.json, forward and reverse", evidence: "fixture", covers: ["restart", "team"], fixtureOnlyFamilies: [], run: restartFromLegacy },
+  { id: "restart", title: "Restart from the crew book, forward and reverse restore order, with sightings that disagree", evidence: "fixture", covers: ["restart"], fixtureOnlyFamilies: [], run: restartFromBook },
+  { id: "restart-legacy", title: "First start from legacy crew.json and sessions.json, forward and reverse, with two coordinator transcripts", evidence: "fixture", covers: ["restart", "team"], fixtureOnlyFamilies: [], run: restartFromLegacy },
   { id: "reconnect", title: "Client reconnect, retire and un-retire: nothing replayed", evidence: "fixture", covers: ["restart"], fixtureOnlyFamilies: [], run: reconnect },
 ];
 
@@ -932,7 +1084,11 @@ export const CREW_SCENARIOS: readonly CrewScenario[] = [
  */
 export function crewHarnessSelfCheck(): CrewCheck[] {
   const { kitchen, sessions, snapshot } = crewBusyFixture();
-  const caught = (label: string, problems: string[]): CrewCheck => ({ label, ok: problems.length > 0, detail: problems.length ? null : "the broken data was reported as sound" });
+  // `naming`: the words the report must contain, so a case can't pass on some other complaint.
+  const caught = (label: string, problems: string[], naming?: string): CrewCheck => {
+    const ok = naming === undefined ? problems.length > 0 : problems.some((p) => p.includes(naming));
+    return { label, ok, detail: ok ? null : problems.length ? `reported, but not as "${naming}": ${problems.join("; ")}` : "the broken data was reported as sound" };
+  };
   const shared = clone(kitchen.book);
   shared.sessions[sessions.dev2.id].characterId = "pepper";
   const borrowed = clone(kitchen.book);
@@ -949,6 +1105,24 @@ export function crewHarnessSelfCheck(): CrewCheck[] {
   numbered.characters.find((ch) => ch.id === "dot")!.name = "Dash 2";
   const stale = clone(snapshot);
   stale.characters.find((ch) => ch.id === "sprig")!.ticket = "05.2";
+  // The reuse defect: pepper holds dev1 (07.2, with readings) and roux is at the 08.1 gate.
+  const dev1 = sessions.dev1.id;
+  const otherTicket = clone(snapshot);
+  otherTicket.characters.find((ch) => ch.id === "pepper")!.ticket = sessions.dev3.ticket;
+  const otherReadings = clone(snapshot);
+  otherReadings.characters.find((ch) => ch.id === "pepper")!.telemetry = clone(kitchen.book.sessions[sessions.test1.id].telemetry);
+  const noReadings = clone(snapshot);
+  noReadings.characters.find((ch) => ch.id === "pepper")!.telemetry = null;
+  const otherRole = clone(snapshot);
+  Object.assign(otherRole.characters.find((ch) => ch.id === "pepper")!, { stage: "review", role: "tester" });
+  const otherBadge = clone(snapshot);
+  otherBadge.characters.find((ch) => ch.id === "roux")!.badge!.ticket = "07.2";
+  const misnamed = clone(snapshot);
+  misnamed.current.find((x) => x.id === dev1)!.characterName = "Roux";
+  const misworn = clone(snapshot);
+  misworn.current.find((x) => x.id === dev1)!.characterId = "ember";
+  const relinked = clone(snapshot);
+  relinked.history.find((x) => x.id === sessions.dev4.id)!.ticket = "07.2";
   return [
     caught("catches one character worn by two live sessions", crewBookProblems(shared)),
     caught("catches a character borrowed from another family", crewBookProblems(borrowed)),
@@ -957,6 +1131,14 @@ export function crewHarnessSelfCheck(): CrewCheck[] {
     caught("catches unknown readings turned into 0", crewHistoryProblems(kitchen.book, zeroed)),
     caught("catches an ended session brought back to live", crewHistoryProblems(kitchen.book, revived)),
     caught("catches a numbered name in a snapshot", crewSnapshotProblems(numbered, kitchen.book)),
-    caught("catches a stale ticket on an available character", crewSnapshotProblems(stale, kitchen.book)),
+    caught("catches a stale ticket on an available character", crewSnapshotProblems(stale, kitchen.book), "sprig shows no session but its ticket is"),
+    caught("catches a busy character showing another session's ticket", crewSnapshotProblems(otherTicket, kitchen.book), `pepper shows session ${dev1} but its ticket is`),
+    caught("catches a busy character showing another session's readings", crewSnapshotProblems(otherReadings, kitchen.book), `pepper shows session ${dev1} but its telemetry is`),
+    caught("catches a busy character showing no readings when its session has some", crewSnapshotProblems(noReadings, kitchen.book), `pepper shows session ${dev1} but its telemetry is`),
+    caught("catches a busy character showing another session's stage and role", crewSnapshotProblems(otherRole, kitchen.book), `pepper shows session ${dev1} but its role is`),
+    caught("catches a badge naming another session's ticket", crewSnapshotProblems(otherBadge, kitchen.book), "its badge names ticket"),
+    caught("catches a session listed under another character's name", crewSnapshotProblems(misnamed, kitchen.book), `session ${dev1} is listed under the character name "Roux"`),
+    caught("catches a session listed on a character it does not wear", crewSnapshotProblems(misworn, kitchen.book), `session ${dev1} is listed with characterId "ember"`),
+    caught("catches a history row with another ticket than the book's", crewSnapshotProblems(relinked, kitchen.book), "is listed with ticket"),
   ];
 }
