@@ -403,7 +403,10 @@ export function gateOf(view: DeliveryView, op: DeliveryOp): Gate | null {
       const h = view.after.handback;
       if (h && h.marker === handbackMarkerOf(view.key, view.merged!.commit!)) {
         if (h.status === "sent") return { kind: "refused", message: `Handed back to the coordinator at ${h.at}; it is never sent twice` };
-        if (h.status === "sending") return { kind: "busy", message: "The handback is being sent" };
+        // A persisted "sending" can outlive its process. Active requests are
+        // gated by view.running above and the server's step lock; an idle
+        // request must reach sendHandback to mark an interrupted send
+        // unconfirmed, without typing again on that recovery click.
       }
       if (!view.after.coordinator) return { kind: "unavailable", message: "This server has no coordinator session to hand back to" };
       if (view.after.mainHasMerge !== true) return { kind: "refused", message: "Local main does not contain the merge yet: reconcile the main checkout first (orchestrate release refuses until it does)" };

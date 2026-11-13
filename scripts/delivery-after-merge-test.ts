@@ -110,6 +110,7 @@ let reqN = 0;
 interface Typed {
   texts: string[];
   answer: boolean | "throw";
+  beforeConfirm?: () => Promise<void>;
 }
 
 async function kitchen(name: string, opts: { coordinator?: boolean; records?: boolean } = {}) {
@@ -133,6 +134,7 @@ async function kitchen(name: string, opts: { coordinator?: boolean; records?: bo
           type: async (text: string) => {
             if (typed.answer === "throw") throw new Error("terminal gone");
             typed.texts.push(text);
+            await typed.beforeConfirm?.();
             return typed.answer;
           },
         };
@@ -766,22 +768,45 @@ async function handbackUnconfirmed() {
   });
   const restarted = k2.make();
   await restarted.refresh();
-  check("interrupted: the gate says it is being sent", gateOf(restarted.view("10.1"), "handback")?.kind === "busy");
-  const rec = new Reconciler({ root: k2.repo, repo: "owner/project", base: "main", runner: k2.runner });
-  let kind = "";
-  try {
-    await sendHandback("10.1", {
-      read: (key) => store.read(key),
-      update: (key, c) => void store.update(key, c),
-      link: { type: async (t) => (k2.typed.texts.push(t), true) },
-      mainContains: (c) => rec.mainContains(c),
-      now: () => new Date(),
-    });
-  } catch (e) {
-    kind = (e as { kind?: string }).kind ?? "";
-  }
-  eq("interrupted: not re-sent", [kind, k2.typed.texts.length], ["blocked", 0]);
+  check("interrupted: idle service permits recovery", restarted.view("10.1").running === null && gateOf(restarted.view("10.1"), "handback") === null);
+  check("interrupted: drawer permits recovery", buttons(render(restarted.view("10.1")), "handback").some((b) => !b.includes("disabled")));
+  refusedReply("interrupted: public handler requires checking the terminal", await k2.call("handback", { key: "10.1" }, restarted), "blocked", /check the coordinator's terminal/);
+  eq("interrupted: recovery typed nothing", k2.typed.texts.length, 0);
   check("interrupted: now unconfirmed, for the human", store.read("10.1").handback?.status === "unconfirmed");
+  eq("interrupted: recovery did not count as a send attempt", store.read("10.1").handback?.attempts, 1);
+  check("interrupted: drawer offers explicit retry", /Send the handback again/.test(render(restarted.view("10.1"))));
+  const restartedAgain = k2.make();
+  await restartedAgain.refresh();
+  check("interrupted: unconfirmed survives another restart", restartedAgain.view("10.1").after.handback?.status === "unconfirmed");
+  eq("interrupted: refresh and restart typed nothing", k2.typed.texts.length, 0);
+
+  // Pause an explicit retry after its line is typed but before the terminal
+  // confirms it. Both the active-request guard and the persisted step lock
+  // must prevent another request from treating that live send as interrupted.
+  let entered!: () => void;
+  let finish!: () => void;
+  const typing = new Promise<void>((resolve) => { entered = resolve; });
+  const held = new Promise<void>((resolve) => { finish = resolve; });
+  k2.typed.beforeConfirm = () => { entered(); return held; };
+  const retry = k2.call("handback", { key: "10.1" }, restartedAgain);
+  await typing;
+  try {
+    check("active send: drawer stays busy", gateOf(restartedAgain.view("10.1"), "handback")?.kind === "busy");
+    refusedReply("active send: same service refuses another click", await k2.call("handback", { key: "10.1" }, restartedAgain), "busy");
+    const competing = k2.make();
+    await competing.refresh();
+    refusedReply("active send: another service respects the step lock", await k2.call("handback", { key: "10.1" }, competing), "blocked", /already running/);
+    check("active send: recovery did not rewrite its status", store.read("10.1").handback?.status === "sending");
+    eq("active send: no duplicate line", k2.typed.texts.length, 1);
+  } finally {
+    finish();
+  }
+  okReply("interrupted: explicit retry succeeds", await retry);
+  check("interrupted: retry is recorded as sent", store.read("10.1").handback?.status === "sent" && store.read("10.1").handback?.attempts === 2);
+  const afterSent = k2.make();
+  await afterSent.refresh();
+  refusedReply("interrupted: sent marker still prevents retry after restart", await k2.call("handback", { key: "10.1" }, afterSent), "refused", /never sent twice/);
+  eq("interrupted: only the explicit retry typed a line", k2.typed.texts.length, 1);
 
   // A server with no coordinator (the preview): unavailable, nothing typed.
   const k3 = await kitchen("nocoordinator", { coordinator: false });
