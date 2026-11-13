@@ -187,11 +187,20 @@ export interface FrameState {
 
 // ---------------------------------------------------------------- labels and robots
 
-function nameplate(B: Backend, cx: number, y: number, name: string, job: string, P: boolean, selected = false) {
+/**
+ * The agent's colour on its name tag (CrewMember.color): a strip down the tag's left edge, inside its
+ * padding, so the words stay light on dark whatever the colour. Nothing is drawn without a colour.
+ */
+function tagColor(B: Backend, x: number, y: number, h: number, color: string | null) {
+  if (color) B.rect(x + 1, y + 2, 2, h - 4, color);
+}
+
+function nameplate(B: Backend, cx: number, y: number, name: string, job: string, P: boolean, selected = false, color: string | null = null) {
   const w = Math.max(B.tw(name, 6.8, 800), B.tw(job, 5.2, 700)) + 8;
   const x = Math.round(cx - w / 2);
   if (selected) B.box(x - 1.5, y - 1.5, w + 3, 19, T.accent, { r: 3 });
   B.box(x, y, w, 16, T.plate, { r: 2, ink: !P });
+  tagColor(B, x, y, 16, color);
   B.text(cx, y + 1.3, name, T.plateFg, 6.8, 800, { anchor: "middle" });
   B.text(cx, y + 9.2, job, T.plateSub, 5.2, 700, { anchor: "middle" });
   return { x, y, w, h: 16 };
@@ -211,15 +220,21 @@ function botBox(B: Backend, id: CharacterId, fx: number, fy: number, scale = BOT
   return { x: fx - (w * k) / 2, y: fy - h * k, w: w * k, h: h * k };
 }
 
-/** Draws a robot with its feet centred on (fx, fy): a floor shadow, then the sprite at the room's robot scale. */
-function bot(B: Backend, id: CharacterId, fx: number, fy: number, alpha = 1, scale = BOT_K): Box {
+/**
+ * Draws a robot with its feet centred on (fx, fy): a floor shadow, then the sprite at the room's robot scale.
+ * `accent` is the agent's colour for the design's accent part; without it the design is drawn as is.
+ */
+function bot(B: Backend, id: CharacterId, fx: number, fy: number, alpha = 1, scale = BOT_K, accent: string | null = null): Box {
   const box = botBox(B, id, fx, fy, scale);
   B.alpha(alpha, () => {
     if (B.kind === "pixel") B.ell(fx, fy, box.w * 0.42, 1.6, "#0b1022");
-    B.sprite(box.x, box.y, B.spriteK(scale), (Z) => drawRobot(Z, id, 0, 0));
+    B.sprite(box.x, box.y, B.spriteK(scale), (Z) => drawRobot(Z, id, 0, 0, { accent }));
   });
   return box;
 }
+
+/** A crew member's robot, with its accent part in the agent's colour when it has one. */
+const crewBot = (B: Backend, c: CrewMember, fx: number, fy: number, alpha = 1): Box => bot(B, c.character, fx, fy, alpha, BOT_K, c.color);
 
 /** Selection: four gold corner marks around a robot. */
 function brackets(B: Backend, b: Box) {
@@ -283,6 +298,7 @@ function floorTag(B: Backend, cx: number, y: number, c: CrewMember, gated: boole
   const x = Math.round(cx - w / 2);
   if (selected) B.box(x - 1.5, y - 1.5, w + 3, 12, T.accent, { r: 3 });
   B.box(x, y, w, 9, T.plate, { r: 2, ink: !P });
+  tagColor(B, x, y, 9, c.color);
   B.text(x + 4, y + 1.4, t, T.plateFg, 5.4, 800);
   if (tk) {
     const tx = x + 4 + B.tw(t, 5.4, 800) + 4;
@@ -309,6 +325,7 @@ function nameTag(B: Backend, cx: number, y: number, c: CrewMember, P: boolean, s
   const x = Math.round(cx - w / 2);
   if (selected) B.box(x - 1.5, y - 1.5, w + 3, 12, T.accent, { r: 3 });
   B.box(x, y, w, 9, T.plate, { r: 2, ink: !P });
+  tagColor(B, x, y, 9, c.color);
   B.text(cx, y + 1.4, t, T.plateFg, 5.4, 800, { anchor: "middle" });
   return { x, y, w, h: 9 };
 }
@@ -508,7 +525,7 @@ function headChef(B: Backend, m: GalleyModel, f: FrameState, P: boolean, hits: H
     hits.push({ x: gx, y: gy2, w: 32, h: 10, kind: "needs", title: "More decisions waiting", sub: "Open Action items" });
   }
   if (coord) {
-    const plate = nameplate(B, cx, gy - 18, coord.name, coord.job, P, f.selected === coord.id);
+    const plate = nameplate(B, cx, gy - 18, coord.name, coord.job, P, f.selected === coord.id, coord.color);
     hits.push({ ...plate, kind: "agent", id: coord.id, title: `${coord.name} · ${coord.job}`, sub: `${coord.role} · ${coord.status}` });
     if (!coord.running) badge(B, cx, top - 16, "off", null, "not running");
     else if (coord.state === "needs") {
@@ -546,7 +563,7 @@ const breakSub = (c: CrewMember, gated: boolean) => `${c.role}${c.ticket ? ` · 
 
 /** A parked off-shift robot on a seat: ticket badge above, plate below. */
 function seatedCrew(B: Backend, m: GalleyModel, f: FrameState, P: boolean, hits: Hit[], c: CrewMember, a: Actor, controller: boolean, plateDrop = 0) {
-  const box = bot(B, c.character, a.x, a.y);
+  const box = crewBot(B, c, a.x, a.y);
   if (controller) {
     B.box(a.x - 5, a.y - 12, 10, 5, "#1b2338", { r: 1, ink: !P });
     B.rect(a.x - 3, a.y - 10, 2, 1, C.green);
@@ -559,7 +576,7 @@ function seatedCrew(B: Backend, m: GalleyModel, f: FrameState, P: boolean, hits:
     const b = badge(B, a.x, box.y - 16, gated ? "needs" : "off", c.ticket, "", { alert: gated });
     hits.push({ ...b, kind: "agent", id: c.id, title: `${c.name} · ${c.job}`, sub });
   }
-  const plate = nameplate(B, a.x, a.y + 2 + plateDrop, c.name, c.job, P, f.selected === c.id);
+  const plate = nameplate(B, a.x, a.y + 2 + plateDrop, c.name, c.job, P, f.selected === c.id, c.color);
   hits.push({ ...plate, kind: "agent", id: c.id, title: `${c.name} · ${c.job}`, sub });
   hits.push(agentHit(box, c, sub));
 }
@@ -640,7 +657,7 @@ function cafe(B: Backend, m: GalleyModel, f: FrameState, P: boolean, hits: Hit[]
 /** Off-shift crew stopped at a clear floor spot: robot plus a small tag at its feet. */
 function floorCrew(B: Backend, m: GalleyModel, f: FrameState, P: boolean, hits: Hit[]) {
   for (const { c, a } of parkedAt(m, f, ["floor"])) {
-    const box = bot(B, c.character, a.x, a.y);
+    const box = crewBot(B, c, a.x, a.y);
     if (f.selected === c.id) brackets(B, box);
     const gated = !!c.ticket && m.gates.includes(c.ticket);
     const sub = breakSub(c, gated);
@@ -874,7 +891,7 @@ function transporter(B: Backend, m: GalleyModel, f: FrameState, P: boolean, hits
     // the robot resolves from the head down (in) or dissolves from the feet up (out)
     const box = botBox(B, c.character, a.x, a.y);
     const shown = Math.max(0, Math.min(1, vis));
-    B.clip(box.x - 3, box.y - 3, box.w + 6, (box.h + 6) * shown, () => bot(B, c.character, a.x, a.y, 0.35 + 0.65 * shown));
+    B.clip(box.x - 3, box.y - 3, box.w + 6, (box.h + 6) * shown, () => crewBot(B, c, a.x, a.y, 0.35 + 0.65 * shown));
     // scan lines running through the column
     for (let i = 0; i < 3; i++) {
       const yy = top + 6 + (((k * 2.2 + i / 3) % 1) * (h - 10));
@@ -892,7 +909,7 @@ function transporter(B: Backend, m: GalleyModel, f: FrameState, P: boolean, hits
   for (const c of m.crew) {
     const a = f.actors.get(c.id);
     if (a?.beam?.kind !== "out" || f.now >= a.beam.t0) continue;
-    const box = bot(B, c.character, SPOTS.tubeQueue.x, SPOTS.tubeQueue.y);
+    const box = crewBot(B, c, SPOTS.tubeQueue.x, SPOTS.tubeQueue.y);
     hits.push(agentHit(box, c, `about to beam out · ${c.status}`));
   }
   // front glass: a faint pane with two highlights, and the frame
@@ -944,7 +961,7 @@ function line(B: Backend, m: GalleyModel, f: FrameState, P: boolean, hits: Hit[]
     const a = member ? f.actors.get(member.id) : null;
     const atPod = !!member && !!a && !a.moving && Math.abs(a.x - cx) < 1 && Math.abs(a.y - spot.y) < 1;
     // The cook stands at the counter's top edge: the cooktop sits below its feet and hides nothing.
-    const box = member && atPod ? bot(B, member.character, cx, spot.y) : null;
+    const box = member && atPod ? crewBot(B, member, cx, spot.y) : null;
     // cooktop: steel counter with two burners (lit when cooking)
     B.box(x + 3, LY + 22, POD_W - 6, 12, "#c9d3e0", { ink: true, r: 3, shade: true, hi: true });
     for (const bx of [x + 13, x + POD_W - 13]) {
@@ -963,7 +980,7 @@ function line(B: Backend, m: GalleyModel, f: FrameState, P: boolean, hits: Hit[]
         hits.push({ ...b, kind: "agent", id: member.id, title: `${member.name} · ${member.job}`, sub });
         hits.push(agentHit(box, member, sub));
       }
-      const plate = nameplate(B, cx, LY + 38, member.name, member.job, P, f.selected === member.id);
+      const plate = nameplate(B, cx, LY + 38, member.name, member.job, P, f.selected === member.id, member.color);
       hits.push({ ...plate, kind: "agent", id: member.id, title: `${member.name} · ${member.job}`, sub });
     }
   });
@@ -982,7 +999,7 @@ function actorAt(B: Backend, c: CrewMember, f: FrameState, hits: Hit[]): Box | n
   const a = f.actors.get(c.id);
   if (!a || a.x < 0 || inBeam(a, f.now)) return null;
   const bob = a.moving && !f.reduce ? (Math.floor(f.now / 160) % 2) * -1 : 0;
-  const box = bot(B, c.character, a.x, a.y + bob, a.alpha);
+  const box = crewBot(B, c, a.x, a.y + bob, a.alpha);
   if (f.selected === c.id) brackets(B, box);
   hits.push(agentHit(box, c, `${c.role}${c.ticket ? ` · ${c.ticket}` : ""} · ${c.status}`));
   if (c.place === "pass" && !a.moving) {
@@ -1001,9 +1018,12 @@ function walkers(B: Backend, m: GalleyModel, f: FrameState, hits: Hit[], P: bool
     const box = actorAt(B, c, f, hits);
     if (!box) continue;
     const t = c.name;
-    const tw = B.tw(t, 5.6, 800) + 6;
+    // A coloured tag is a little wider, and its name sits right of the colour strip.
+    const strip = c.color ? 3 : 0;
+    const tw = B.tw(t, 5.6, 800) + 6 + strip;
     B.box(a.x - tw / 2, box.y - 11, tw, 8.4, T.plate, { r: 2, ink: !P });
-    B.text(a.x, box.y - 10, t, T.plateFg, 5.6, 800, { anchor: "middle" });
+    tagColor(B, a.x - tw / 2, box.y - 11, 8.4, c.color);
+    B.text(a.x + strip / 2, box.y - 10, t, T.plateFg, 5.6, 800, { anchor: "middle" });
   }
 }
 
