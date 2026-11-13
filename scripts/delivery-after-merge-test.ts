@@ -1,6 +1,8 @@
-// After a verified merge (ticket 10.3): reconciling the main checkout, the one
-// marked handback to the coordinator, the refreshed plan, and the readiness
-// cache fix carried from 10.2's review. Against 10.1's fake world
+// After a verified merge (ticket 10.3): reconciling the main checkout (and
+// putting everything back when git refuses the fast-forward), the one marked
+// handback to the coordinator, the release it asks for before the completion
+// records, the refreshed plan, and the readiness cache fix carried from 10.2's
+// review. Against 10.1's fake world
 // (scripts/delivery-fake.ts) for everything GitHub, with real local git on
 // throwaway repositories and a temporary HOME. Nothing is pushed; the real
 // main checkout, the live kitchen and its coordinator are never touched.
@@ -70,7 +72,7 @@ function refusedReply(label: string, r: DeliveryReply, kind: string, text?: RegE
 const ORIGIN = "http://127.0.0.1:5173";
 
 /** Local git commands the fake world does not answer: reconcile's, run for real on the throwaway repository. */
-const LOCAL = new Set(["--no-optional-locks", "ls-tree", "ls-files", "symbolic-ref", "merge", "checkout", "rm", "checkout-index", "hash-object", "mktree", "commit-tree", "update-ref"]);
+const LOCAL = new Set(["--no-optional-locks", "--literal-pathspecs", "ls-tree", "ls-files", "symbolic-ref", "merge", "checkout", "rm", "checkout-index", "update-index", "hash-object", "mktree", "commit-tree", "update-ref"]);
 
 interface PlanFixture {
   dispatch: { key: string; title: string }[];
@@ -78,8 +80,16 @@ interface PlanFixture {
   blocked: { key: string; title: string; reason: string; waiting: string[] }[];
 }
 
-function runnerFor(world: World, plan: { current: PlanFixture | null }, owners: { n: number }): Runner {
+/** What a scenario can make git do: refuse the fast-forward (as a held lock would), or fail while moving files. */
+interface Hooks {
+  failMerge: boolean;
+  failUnstage: boolean;
+}
+
+function runnerFor(world: World, plan: { current: PlanFixture | null }, owners: { n: number }, hooks: Hooks): Runner {
   return async (cmd, args, opts = {}) => {
+    if (cmd === "git" && args[0] === "merge" && hooks.failMerge) return result("", 128, "fatal: Unable to create '.git/index.lock': File exists.");
+    if (cmd === "git" && args[1] === "rm" && hooks.failUnstage) return result("", 128, "fatal: Unable to create '.git/index.lock': File exists.");
     if (cmd === "node" && args[1] === "status") {
       const rows = [...world.claims.entries()].map(([key, c]) => ({ key, state: c.state, title: c.title, updated: "u1" }));
       return result(JSON.stringify({ ok: true, rows }));
@@ -111,7 +121,8 @@ async function kitchen(name: string, opts: { coordinator?: boolean; records?: bo
     current: { dispatch: [], deferred: [], blocked: [{ key: "10.2", title: "Next ticket", reason: "blocked by 10.1", waiting: ["10.1"] }] },
   };
   const owners = { n: 0 };
-  const runner = runnerFor(s.world, plan, owners);
+  const hooks: Hooks = { failMerge: false, failUnstage: false };
+  const runner = runnerFor(s.world, plan, owners, hooks);
   const typed: Typed = { texts: [], answer: true };
   const coordinator =
     opts.coordinator === false
@@ -133,7 +144,7 @@ async function kitchen(name: string, opts: { coordinator?: boolean; records?: bo
     if (!e || e.type !== "delivery.reply") throw new Error(`${op}: no reply`);
     return e.reply;
   };
-  return { ...s, hub, events, kitchenKey, runner, plan, owners, typed, service, make, call, view: () => service.view("10.1"), backups: backupsDir(kitchenKey, tmp) };
+  return { ...s, hub, events, kitchenKey, runner, plan, owners, hooks, typed, service, make, call, view: () => service.view("10.1"), backups: backupsDir(kitchenKey, tmp) };
 }
 type Kitchen = Awaited<ReturnType<typeof kitchen>>;
 
@@ -153,7 +164,12 @@ async function deliver(k: Kitchen) {
   return { merge: v.merged!.commit!, approved: i };
 }
 
-/** Prepares the completion records and delivers their records PR (ticket 10.3), through local main reconciled. */
+/** What `orchestrate release` leaves: no claim for the ticket (the fake engine then answers `owner` with none). */
+function releaseClaim(k: Kitchen) {
+  k.world.claims.delete("10.1");
+}
+
+/** Prepares the completion records (the claim is released) and delivers their records PR (ticket 10.3), through local main reconciled. */
 async function deliverRecords(k: Kitchen) {
   okReply(`${k.kitchenKey} prepare records`, await k.call("prepareRecords", { key: "10.1" }));
   const R = { key: "10.1", track: "records" };
@@ -227,6 +243,7 @@ function pureRules() {
   check("handback: opens with its marker", text.startsWith(`[tin-and-thyme:handback 10.1 ${M}]`));
   check("handback: asks for /ticket complete then orchestrate release", text.indexOf("/ticket complete 10.1") > 0 && text.indexOf("orchestrate release 10.1") > text.indexOf("/ticket complete 10.1"));
   check("handback: never a dirty main", /never leave completion edits uncommitted on main/.test(text));
+  check("handback: the records are the kitchen's records PR, after the release", /records PR from ticket\/10\.1-records once this claim is released/.test(text) && /do not edit, commit or push them yourself/.test(text));
   eq("handback marker shared with the drawer", handbackMarker("10.1", M), handbackMarkerOf("10.1", M));
   let threw = false;
   try {
@@ -457,6 +474,183 @@ async function reconcileRefusals() {
   eq("nothing typed", k5.typed.texts.length, 0);
 }
 
+// ---------------------------------------------------------------- reconcile: git refuses the fast-forward after the files were moved
+
+/** Everything a refused reconcile must leave untouched: HEAD, the status of every path, the staged diff, and the files' bytes. */
+function snapshot(repo: string, files: string[]) {
+  return JSON.stringify({
+    head: git(repo, "rev-parse", "HEAD"),
+    branch: git(repo, "symbolic-ref", "HEAD"),
+    status: porcelain(repo),
+    staged: execFileSync("git", ["diff", "--cached", "--binary"], { cwd: repo, encoding: "latin1" }),
+    index: execFileSync("git", ["ls-files", "-s", "-z"], { cwd: repo, encoding: "utf8" }),
+    files: files.map((f) => {
+      const p = join(repo, f);
+      return existsSync(p) ? [f, bytes(p).toString("base64"), statSync(p).mode & 0o777] : [f, null];
+    }),
+  });
+}
+
+async function reconcileFastForwardRefused() {
+  const FILES = ["README.md", "notes/todo.txt", "docs/staged.md", "context/tickets/10.1-demo.md", "src/feature.ts"];
+  const w = (r: string, p: string, data: string | Buffer) => {
+    mkdirSync(dirname(join(r, p)), { recursive: true });
+    writeFileSync(join(r, p), data);
+  };
+  const unrelated = (r: string) => {
+    w(r, "README.md", "hello, local edit\n");
+    w(r, "notes/todo.txt", "mine\n");
+    w(r, "docs/staged.md", "staged unrelated\n");
+    git(r, "add", "docs/staged.md");
+  };
+  /** Lists, lets git refuse, and checks nothing changed; then the same listing reconciles for real. */
+  async function refusedThenDone(k: Kitchen, label: string, hook: keyof Hooks, expectCollisions: string[][]) {
+    const r = k.repo;
+    okReply(`${label}: list`, await k.call("reconcilePlan", { key: "10.1" }));
+    const rp = k.view().after.reconcilePlan!;
+    eq(`${label}: collisions`, rp.collisions.map((c) => [c.path, c.kind, c.status, c.type]), expectCollisions);
+    const before = snapshot(r, FILES);
+    k.hooks[hook] = true;
+    const refused = await k.call("reconcile", { key: "10.1", digest: rp.digest });
+    k.hooks[hook] = false;
+    refusedReply(`${label}: the refusal is reported`, refused, "failed", /index\.lock.*every file that had been moved was put back, and the main checkout is as it was/);
+    eq(`${label}: HEAD, status, index, staged diff and every file exactly as before`, snapshot(r, FILES), before);
+    check(`${label}: main not moved`, git(r, "rev-parse", "HEAD") !== k.world.remote.get("refs/heads/main") && k.view().after.mainHasMerge === false);
+    check(`${label}: not recorded as reconciled`, k.view().after.reconciled === null && k.view().steps.some((x) => x.step === "reconcile" && !x.ok));
+    // The copies made before the move are kept, with a manifest that says what happened.
+    const dirs = listDirs(k.backups);
+    eq(`${label}: one backup folder, kept`, dirs.length, 1);
+    const manifest = JSON.parse(readFileSync(join(k.backups, dirs[0], "manifest.json"), "utf8")) as { state: string; note: string; entries: { path: string; backup: string | null; sha256: string | null }[] };
+    check(`${label}: manifest says the files were put back`, manifest.state === "put-back" && /put back/.test(manifest.note), manifest);
+    for (const e of manifest.entries)
+      if (e.backup) check(`${label}: the kept copy of ${e.path} is byte for byte`, (await import("node:crypto")).createHash("sha256").update(bytes(join(k.backups, dirs[0], e.backup))).digest("hex") === e.sha256);
+    // The same checkout lists the same way, and reconciles once git lets it.
+    okReply(`${label}: list again`, await k.call("reconcilePlan", { key: "10.1" }));
+    eq(`${label}: the listing is the one shown before`, k.view().after.reconcilePlan!.digest, rp.digest);
+    okReply(`${label}: reconcile`, await k.call("reconcile", { key: "10.1", digest: rp.digest }));
+    check(`${label}: main fast-forwarded on the second try`, git(r, "rev-parse", "HEAD") === k.world.remote.get("refs/heads/main") && listDirs(k.backups).length === 2);
+    check(`${label}: the unrelated changes survived both`, bytes(join(r, "README.md")).toString() === "hello, local edit\n" && bytes(join(r, "notes/todo.txt")).toString() === "mine\n" && git(r, "diff", "--cached", "--name-only").split("\n").includes("docs/staged.md"));
+  }
+
+  // 1. A tracked record staged and then edited again (MM), and an untracked executable binary where the merge adds a file.
+  const k = await kitchen("ff-refused");
+  await deliver(k);
+  unrelated(k.repo);
+  w(k.repo, "context/tickets/10.1-demo.md", "staged version\n");
+  git(k.repo, "add", "context/tickets/10.1-demo.md");
+  w(k.repo, "context/tickets/10.1-demo.md", "working version\n");
+  w(k.repo, "src/feature.ts", Buffer.from([0, 1, 2, 255, 254, 10, 13, 0x80, 42]));
+  chmodSync(join(k.repo, "src/feature.ts"), 0o755);
+  await refusedThenDone(k, "MM and untracked", "failMerge", [
+    ["context/tickets/10.1-demo.md", "modified", "MM", "file"],
+    ["src/feature.ts", "untracked", "??", "file"],
+  ]);
+
+  // 2. A staged deletion of the tracked record (D ), and a new file staged and edited again (AM) where the merge adds one.
+  const k2 = await kitchen("ff-refused-staged");
+  await deliver(k2);
+  unrelated(k2.repo);
+  git(k2.repo, "rm", "-q", "context/tickets/10.1-demo.md");
+  w(k2.repo, "src/feature.ts", "staged draft\n");
+  git(k2.repo, "add", "src/feature.ts");
+  w(k2.repo, "src/feature.ts", "working draft\n");
+  await refusedThenDone(k2, "D and AM", "failMerge", [
+    ["context/tickets/10.1-demo.md", "modified", "D ", "missing"],
+    ["src/feature.ts", "modified", "AM", "file"],
+  ]);
+
+  // 3. The record deleted in the working tree only ( D), and an ignored file where the merge adds one.
+  const k3 = await kitchen("ff-refused-deleted");
+  await deliver(k3);
+  unrelated(k3.repo);
+  rmSync(join(k3.repo, "context/tickets/10.1-demo.md"));
+  writeFileSync(join(k3.repo, ".git", "info", "exclude"), "src/feature.ts\n");
+  w(k3.repo, "src/feature.ts", "ignored local\n");
+  await refusedThenDone(k3, " D and ignored", "failMerge", [
+    ["context/tickets/10.1-demo.md", "modified", " D", "missing"],
+    ["src/feature.ts", "ignored", "!!", "file"],
+  ]);
+
+  // 4. Git fails half way through the move itself (the tracked record already put back to main's commit): everything is put back too.
+  const k4 = await kitchen("move-refused");
+  await deliver(k4);
+  unrelated(k4.repo);
+  w(k4.repo, "context/tickets/10.1-demo.md", "working version\n");
+  w(k4.repo, "src/feature.ts", "staged draft\n");
+  git(k4.repo, "add", "src/feature.ts");
+  await refusedThenDone(k4, "move interrupted", "failUnstage", [
+    ["context/tickets/10.1-demo.md", "modified", " M", "file"],
+    ["src/feature.ts", "modified", "A ", "file"],
+  ]);
+
+  // 5. Nothing collides and git refuses: nothing was moved, no backup folder, and it says so.
+  const k5 = await kitchen("ff-refused-clean");
+  await deliver(k5);
+  unrelated(k5.repo);
+  okReply("clean: list", await k5.call("reconcilePlan", { key: "10.1" }));
+  const before5 = snapshot(k5.repo, FILES);
+  k5.hooks.failMerge = true;
+  refusedReply("clean: the refusal is reported", await k5.call("reconcile", { key: "10.1", digest: k5.view().after.reconcilePlan!.digest }), "failed", /nothing was moved, and the main checkout is as it was/);
+  k5.hooks.failMerge = false;
+  check("clean: nothing changed and no backup folder", snapshot(k5.repo, FILES) === before5 && !existsSync(k5.backups));
+}
+
+// ---------------------------------------------------------------- reconcile: a path is a name, never a pattern
+
+async function reconcileLiteralPaths() {
+  const repo = join(tmp, "literal");
+  mkdirSync(join(repo, "docs"), { recursive: true });
+  git(tmp, "init", "-q", "-b", "main", repo);
+  const w = (p: string, text: string) => {
+    mkdirSync(dirname(join(repo, p)), { recursive: true });
+    writeFileSync(join(repo, p), text);
+  };
+  // `docs/[ab].md` as a pattern also matches docs/a.md and docs/b.md; `app/[id]/page.tsx` is an ordinary route file name.
+  w("docs/[ab].md", "one\n");
+  w("docs/a.md", "a\n");
+  w("docs/b.md", "b\n");
+  w("app/[id]/page.tsx", "export default 1;\n");
+  w("app/i/page.tsx", "export default 2;\n");
+  git(repo, "add", "-A");
+  git(repo, "commit", "-q", "-m", "base");
+  const base = git(repo, "rev-parse", "HEAD");
+  w("docs/[ab].md", "two\n");
+  w("app/[id]/page.tsx", "export default 3;\n");
+  git(repo, "add", "-A");
+  git(repo, "commit", "-q", "-m", "merged");
+  const merged = git(repo, "rev-parse", "HEAD");
+  git(repo, "update-ref", "refs/remotes/origin/main", merged);
+  git(repo, "reset", "-q", "--hard", base);
+  // Colliding edits to the two bracketed files; unrelated edits (one staged) to the files their names would match as patterns.
+  w("docs/[ab].md", "mine\n");
+  w("app/[id]/page.tsx", "export default 'mine';\n");
+  git(repo, "add", "app/[id]/page.tsx");
+  w("docs/a.md", "a, edited\n");
+  w("docs/b.md", "b, staged\n");
+  git(repo, "add", "docs/b.md");
+  w("app/i/page.tsx", "export default 'unrelated';\n");
+  const runner: Runner = async (cmd, args, opts = {}) => {
+    if (cmd !== "git") return result("", 99, "unexpected");
+    if (args.join(" ") === "remote get-url origin") return result("https://github.com/owner/project.git\n");
+    if (args[0] === "fetch") return result("");
+    return run("git", args, { cwd: opts.cwd ?? repo });
+  };
+  const rec = new Reconciler({ root: repo, repo: "owner/project", base: "main", runner });
+  const plan = await rec.plan("10.1", merged);
+  eq("literal: exactly the two bracketed files collide", plan.collisions.map((c) => [c.path, c.status]), [
+    ["app/[id]/page.tsx", "M "],
+    ["docs/[ab].md", " M"],
+  ]);
+  eq("literal: the look-alikes are unrelated changes", plan.preserved.map((x) => x.path).sort(), ["app/i/page.tsx", "docs/a.md", "docs/b.md"]);
+  const backups = join(tmp, "literal-backups");
+  const { result: res } = await rec.apply("10.1", merged, plan.digest, backups);
+  check("literal: fast-forwarded", git(repo, "rev-parse", "HEAD") === merged && res.moved === 2);
+  check("literal: merged content in place", bytes(join(repo, "docs/[ab].md")).toString() === "two\n" && bytes(join(repo, "app/[id]/page.tsx")).toString() === "export default 3;\n");
+  check("literal: the look-alike edits are untouched", bytes(join(repo, "docs/a.md")).toString() === "a, edited\n" && bytes(join(repo, "docs/b.md")).toString() === "b, staged\n" && bytes(join(repo, "app/i/page.tsx")).toString() === "export default 'unrelated';\n");
+  eq("literal: the unrelated staged edit is still staged", git(repo, "diff", "--cached", "--name-only"), "docs/b.md");
+  check("literal: the colliding edits are in the backup", bytes(join(res.backup!, "files", "docs/[ab].md")).toString() === "mine\n" && bytes(join(res.backup!, "files", "app/[id]/page.tsx")).toString() === "export default 'mine';\n");
+}
+
 // ---------------------------------------------------------------- the handback: once per marker, only once main has the merge
 
 async function handbackOnce() {
@@ -471,7 +665,6 @@ async function handbackOnce() {
     update: (key: string, change: Parameters<DeliveryStore["update"]>[1]) => void store.update(key, change),
     link: { type: async (t: string) => (k.typed.texts.push(t), true) },
     mainContains: (c: string) => rec.mainContains(c),
-    records: async () => ({ onMain: true as const }),
     now: () => new Date(),
   };
   let refusal = "";
@@ -485,12 +678,12 @@ async function handbackOnce() {
 
   okReply("list", await k.call("reconcilePlan", { key: "10.1" }));
   okReply("reconcile", await k.call("reconcile", { key: "10.1", digest: k.view().after.reconcilePlan!.digest }));
-  // The completion records come first: the handback waits until they are on local main (10.3, human decision 2026-11-13).
-  refusedReply("handback before the records are on main (gate)", await k.call("handback", { key: "10.1" }), "refused", /completion records first/);
-  check("drawer: handback disabled until the records are on main", buttons(render(k.view()), "handback").every((b) => b.includes("disabled")));
-  eq("nothing typed before the records are on main", k.typed.texts.length, 0);
-  const records = await deliverRecords(k);
-  check("drawer: handback enabled once main has the merge and the records", buttons(render(k.view()), "handback").every((b) => !b.includes("disabled")));
+  check("drawer: handback enabled once main has the merge", buttons(render(k.view()), "handback").every((b) => !b.includes("disabled")));
+  // The completion records wait for the release the handback asks for (orchestrate release proves the merge from local main).
+  check("view: the claim is still held", k.view().after.claimReleased === false, k.view().after.claimReleased);
+  refusedReply("records before the handback (gate)", await k.call("prepareRecords", { key: "10.1" }), "refused", /Hand the ticket back first/);
+  check("drawer: prepare disabled until the claim is released", buttons(render(k.view()), "prepareRecords").length > 0 && buttons(render(k.view()), "prepareRecords").every((b) => b.includes("disabled")));
+  check("no records ref before the release", git(k.repo, "for-each-ref", "refs/tin-and-thyme/") === "");
 
   // Two clicks at once: one runs, the other is busy. Exactly one line is typed.
   const [a, b] = await Promise.all([k.call("handback", { key: "10.1" }), k.call("handback", { key: "10.1" })]);
@@ -498,7 +691,7 @@ async function handbackOnce() {
   eq("typed once", k.typed.texts.length, 1);
   const marker = handbackMarker("10.1", merge);
   check("typed: the marked request", k.typed.texts[0].startsWith(`[${marker}]`) && /\/ticket complete 10\.1/.test(k.typed.texts[0]) && /orchestrate release 10\.1/.test(k.typed.texts[0]));
-  check("typed: the records are on main, not to be edited again", k.typed.texts[0].includes(`records PR #${k.view().records!.merged!.pr}, squash-merged as ${records.merge}`) && /do not edit or commit them again/.test(k.typed.texts[0]));
+  check("typed: the records are the kitchen's, after the release", /records PR from ticket\/10\.1-records once this claim is released/.test(k.typed.texts[0]) && /do not edit, commit or push them yourself/.test(k.typed.texts[0]));
   let v = k.view();
   check("view: handed back", v.after.handback?.status === "sent" && v.after.handback.marker === marker && v.after.handback.attempts === 1);
 
@@ -515,6 +708,18 @@ async function handbackOnce() {
   refusedReply("restart: refused", await k.call("handback", { key: "10.1" }, restarted), "refused", /never sent twice/);
   eq("restart: still typed once", k.typed.texts.length, 1);
   check("drawer: handed back, button disabled", /Handed back/.test(render(v)) && buttons(render(v), "handback").every((x) => x.includes("disabled")));
+
+  // Handed back is not released: the records still wait until the engine reports no claim.
+  refusedReply("records after the handback, claim still held (gate)", await k.call("prepareRecords", { key: "10.1" }), "refused", /Hand the ticket back first/);
+  check("drawer: says the claim is still held", /data-testid="claim-released" data-value="false"/.test(render(k.view())));
+  releaseClaim(k);
+  await k.service.refresh();
+  check("view: the claim is released", k.view().after.claimReleased === true);
+  check("drawer: prepare enabled once the claim is released", buttons(render(k.view()), "prepareRecords").every((b) => !b.includes("disabled")));
+  const records = await deliverRecords(k);
+  check("the records reached local main after the release", k.view().records?.after.mainHasMerge === true && git(k.repo, "rev-parse", "HEAD") === k.world.remote.get("refs/heads/main") && records.merge === k.world.remote.get("refs/heads/main"));
+  check("no local records branch was ever made", git(k.repo, "branch", "--list", "ticket/10.1-records") === "" && git(k.repo, "rev-parse", "refs/tin-and-thyme/records/10.1") === records.head);
+  eq("the records delivery typed nothing more", k.typed.texts.length, 1);
 
   // The plan: 10.2 was waiting on 10.1; once the completion reaches the store, it is newly eligible.
   k.plan.current = { dispatch: [{ key: "10.2", title: "Next ticket" }], deferred: [{ key: "10.6", title: "Other", reason: "serialize: shares a file" }], blocked: [] };
@@ -533,11 +738,10 @@ async function handbackOnce() {
 }
 
 async function handbackUnconfirmed() {
-  const k = await kitchen("unconfirmed", { records: true });
+  const k = await kitchen("unconfirmed");
   await deliver(k);
   okReply("list", await k.call("reconcilePlan", { key: "10.1" }));
   okReply("reconcile", await k.call("reconcile", { key: "10.1", digest: k.view().after.reconcilePlan!.digest }));
-  await deliverRecords(k);
   k.typed.answer = false;
   refusedReply("terminal did not confirm", await k.call("handback", { key: "10.1" }), "failed", /did not confirm/);
   check("unconfirmed recorded", k.view().after.handback?.status === "unconfirmed");
@@ -569,7 +773,6 @@ async function handbackUnconfirmed() {
       update: (key, c) => void store.update(key, c),
       link: { type: async (t) => (k2.typed.texts.push(t), true) },
       mainContains: (c) => rec.mainContains(c),
-      records: async () => ({ onMain: true as const }),
       now: () => new Date(),
     });
   } catch (e) {
@@ -588,44 +791,77 @@ async function handbackUnconfirmed() {
   check("the preview attaches without a coordinator", attached.service?.view("10.1").after.coordinator === false);
 }
 
-// ---------------------------------------------------------------- the engine: release refused until local main contains the merge
+// ---------------------------------------------------------------- the engine: release refused until local main contains the merge, and why the records come after it
 
-function engineRelease() {
-  const root = join(tmp, "engine-release");
-  mkdirSync(join(root, "context"), { recursive: true });
+/** A real orchestrator-mode repository with one claimed ticket, squash-merged on origin/main. */
+function engineRepo(name: string) {
+  const root = join(tmp, name);
+  mkdirSync(join(root, "context", "tickets"), { recursive: true });
   git(tmp, "init", "-q", "-b", "main", root);
   writeFileSync(join(root, "context", "execution-mode.md"), "# Execution Mode\n\n<!-- pathfinder:execution-mode orchestrator -->\n");
   writeFileSync(join(root, ".gitignore"), "/.pathfinder/\ncontext/current-ticket.md\n");
   writeFileSync(join(root, "README.md"), "hello\n");
+  writeFileSync(join(root, "context", "tickets", "10.1-demo.md"), "# Demo\n\n## Status\n\nReady\n\n## Blocked by\n\nNone.\n");
   git(root, "add", "-A");
   git(root, "commit", "-q", "-m", "base");
   const base = git(root, "rev-parse", "HEAD");
   git(root, "branch", "ticket/10.1-demo");
-  git(root, "worktree", "add", "-q", join(root, ".pathfinder", "worktrees", "10.1"), "ticket/10.1-demo");
   const wt = join(root, ".pathfinder", "worktrees", "10.1");
+  git(root, "worktree", "add", "-q", wt, "ticket/10.1-demo");
+  // As `/ticket start` does on the worker's branch: the ticket's own Status line changes.
+  writeFileSync(join(wt, "context", "tickets", "10.1-demo.md"), "# Demo\n\n## Status\n\nIn Progress\n\n## Blocked by\n\nNone.\n");
   writeFileSync(join(wt, "feature.ts"), "export const x = 1;\n");
   git(wt, "add", "-A");
   git(wt, "commit", "-q", "-m", "feature");
   const head = git(wt, "rev-parse", "HEAD");
-  git(root, "update-ref", "refs/pathfinder/claims/10.1", head);
+  git(root, "update-ref", "refs/pathfinder/claims/10.1", base);
   writeFileSync(join(wt, "context", "current-ticket.md"), "# Current Ticket\n\n- Worker: 10.1\n- State: done\n");
   // The squash merge on origin/main: the branch's tree on the old base, one parent.
   const squash = git(root, "commit-tree", `${head}^{tree}`, "-p", base, "-m", "Squash 10.1");
   git(root, "update-ref", "refs/remotes/origin/main", squash);
-  const release = () => {
+  const engine = (...args: string[]) => {
     try {
-      execFileSync(process.execPath, [ENGINE, "release", "10.1", "--root", root, "--json"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-      return { ok: true, message: "" };
+      return { ok: true, out: execFileSync(process.execPath, [ENGINE, ...args, "--root", root, "--json"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }) };
     } catch (e) {
-      return { ok: false, message: String((e as { stderr?: string }).stderr ?? e) };
+      return { ok: false, out: String((e as { stderr?: string }).stderr ?? e) };
     }
   };
-  const refused = release();
-  check("engine: release refused while local main lacks the merge", !refused.ok && /not proven merged/.test(refused.message), refused.message);
-  check("engine: nothing released", existsSync(wt) && git(root, "rev-parse", "--verify", "refs/heads/ticket/10.1-demo") === head);
-  git(root, "merge", "--ff-only", "-q", squash);
-  const released = release();
-  check("engine: release works once local main contains the merge", released.ok && !existsSync(wt), released.message);
+  /** The completion records as a commit on local main: the ticket's Status line set to Complete. */
+  const recordsOnMain = () => {
+    writeFileSync(join(root, "context", "tickets", "10.1-demo.md"), "# Demo\n\n## Status\n\nComplete\n\n## Blocked by\n\nNone.\n");
+    git(root, "commit", "-q", "-am", "Complete ticket 10.1: completion records");
+  };
+  const claim = () => (JSON.parse(engine("owner", "10.1").out) as { claim: { branch?: string; orphan?: boolean } | null }).claim;
+  return { root, wt, head, squash, engine, recordsOnMain, claim };
+}
+
+function engineRelease() {
+  const e = engineRepo("engine-release");
+  const refused = e.engine("release", "10.1");
+  check("engine: release refused while local main lacks the merge", !refused.ok && /not proven merged/.test(refused.out), refused.out);
+  check("engine: nothing released", existsSync(e.wt) && git(e.root, "rev-parse", "--verify", "refs/heads/ticket/10.1-demo") === e.head);
+  git(e.root, "merge", "--ff-only", "-q", e.squash);
+  const released = e.engine("release", "10.1");
+  check("engine: release works once local main contains the merge", released.ok && !existsSync(e.wt), released.out);
+  check("engine: no claim after the release", e.claim() === null);
+
+  // The kitchen's order: the records land on local main only after the release, and the ticket then reads as integrated.
+  e.recordsOnMain();
+  const row = (JSON.parse(e.engine("status").out) as { rows: { key: string; state: string }[] }).rows.find((r) => r.key === "10.1");
+  eq("engine: the board shows the ticket as integrated once the records are on main", row?.state, "integrated");
+  // The kitchen keeps the records commit under its own ref: the engine sees no claim. A local branch of that name would be one.
+  git(e.root, "update-ref", "refs/tin-and-thyme/records/10.1", "HEAD");
+  check("engine: the kitchen's records ref is not a claim", e.claim() === null);
+  git(e.root, "branch", "ticket/10.1-records", "HEAD");
+  check("engine: a local ticket/<key>-records branch would be read as an orphaned claim", e.claim()?.orphan === true && e.claim()?.branch === "ticket/10.1-records", e.claim());
+
+  // The other order: with the records on local main before the release, the engine can no longer prove the merge.
+  const o = engineRepo("engine-records-first");
+  git(o.root, "merge", "--ff-only", "-q", o.squash);
+  o.recordsOnMain();
+  const stuck = o.engine("release", "10.1");
+  check("engine: release is refused once the records are on local main first", !stuck.ok && /not proven merged/.test(stuck.out), stuck.out);
+  check("engine: the claim is kept", existsSync(o.wt) && o.claim() !== null);
 }
 
 // ---------------------------------------------------------------- readiness cache (10.2 review, LOW)
@@ -797,6 +1033,8 @@ async function main() {
   await reconcilePreserves();
   await reconcileIgnoredAndIdentical();
   await reconcileRefusals();
+  await reconcileFastForwardRefused();
+  await reconcileLiteralPaths();
   await handbackOnce();
   await handbackUnconfirmed();
   engineRelease();

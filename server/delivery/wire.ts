@@ -3,7 +3,7 @@
 //   { rpc: "delivery", id, op, params }
 //
 // `id` matches /^[A-Za-z0-9_-]{1,64}$/ and comes back on the reply. `op` is one of
-// the named operations (eight up to the merge, four after it), looked up as an
+// the named operations (eight up to the merge, five after it), looked up as an
 // own property only. `params` holds exactly the fields that op takes: a ticket
 // key, full commit/tree ids and a listing digest, never a title, a body, a flag
 // or a command. Anything else is refused as `invalid` before the delivery core

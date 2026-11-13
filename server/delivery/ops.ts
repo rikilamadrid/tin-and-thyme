@@ -290,18 +290,24 @@ export interface DeliveryConfig {
    */
   settleAfterMs?: number;
   /**
-   * Set for the completion-records track (records.ts, service.ts): the branch is
-   * `ticket/<key>-records`, there is no engine claim or worktree, and the engine's
-   * reviewed head is replaced by the mechanical records check, which must pass on
-   * every inspection (and so before every approval, push, PR and merge). Only that
-   * verified records-only diff can be approved in place of a tester PASS.
+   * Set for the completion-records track (records.ts, service.ts): the branch
+   * delivered to origin is `ticket/<key>-records`, the commit is read from the
+   * kitchen's own local ref (never a local branch), there is no engine claim or
+   * worktree, and the engine's reviewed head is replaced by the mechanical
+   * records check, which must pass on every inspection (and so before every
+   * approval, push, PR and merge). Only that verified records-only diff can be
+   * approved in place of a tester PASS. Everything else — the exact approval,
+   * the push refspec, the PR, the checks, the pinned squash merge and its
+   * verification — is the same code as for a ticket.
    */
   records?: RecordsTrack;
 }
 
 export interface RecordsTrack {
-  /** `ticket/<key>-records`. */
+  /** `ticket/<key>-records`: the branch on origin. */
   branch(key: string): string;
+  /** The local ref that holds the records commit (`refs/tin-and-thyme/records/<key>`). */
+  localRef(key: string): string;
   /** Throws a DeliveryError unless `head` is exactly the key's completion records, on main and onto `base` (merge tree `tree`). */
   check(key: string, o: { head: string; base: string; tree: string }): Promise<{ evidence: string; recordPath: string; title: string | null }>;
 }
@@ -802,9 +808,9 @@ export class Delivery {
     const claim = await this.validClaim(key);
     const branch = claim.branch!;
     if (this.cfg.records) {
-      const r = await this.git(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}^{commit}`]);
+      const r = await this.git(["rev-parse", "--verify", "--quiet", `${this.cfg.records.localRef(key)}^{commit}`]);
       const head = r.stdout.trim();
-      if (!r.ok || !isSha(head)) throw new DeliveryError("refused", `${branch} does not exist: prepare the completion records first`);
+      if (!r.ok || !isSha(head)) throw new DeliveryError("refused", `the completion records for ${key} are not prepared yet (${this.cfg.records.localRef(key)} does not exist): prepare them first`);
       return this.inspectCommon(key, { branch, worktree: "", title: null, head, reviewedHead: head, recordOnly: [], recordPath: null, evidence: null });
     }
     const worktree = join(this.cfg.root, claim.worktree!);

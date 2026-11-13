@@ -16,12 +16,15 @@
 // - After every operation the ticket's DeliveryView is broadcast
 //   (`delivery.updated`) and kept in the snapshot, so a reconnect restores it.
 //   The reply goes to the requesting socket only.
-// - After a verified merge (ticket 10.3): list the main checkout, reconcile it on
-//   the human's click for exactly that listing (reconcile.ts), prepare the
-//   completion records on ticket/<key>-records and deliver them as their own
-//   records PR (records.ts: a second Delivery with its own state, approval and
-//   steps, `track: "records"` on the wire), hand the ticket back to the
-//   coordinator once (handback.ts), and refresh the plan.
+// - After a verified merge (ticket 10.3), in this order: list the main checkout
+//   and reconcile it on the human's click for exactly that listing
+//   (reconcile.ts); hand the ticket back to the coordinator once (handback.ts),
+//   which releases the claim; then prepare the completion records and deliver
+//   them as their own records PR from ticket/<key>-records (records.ts: a second
+//   Delivery with its own state, approval and steps, `track: "records"` on the
+//   wire); and refresh the plan. The records wait for the release because
+//   `orchestrate release` proves the merge from local main, and cannot once the
+//   records commit is on it.
 
 import { readdirSync } from "node:fs";
 import {
@@ -41,17 +44,18 @@ import {
   type ReconcilePlanView,
   type StepView,
 } from "../../src/data/delivery";
-import { checkExactly, checkRecordsHead, intendedRecords, isRecordsBranch, RecordsGit, recordsBranch, writeRecordsCommit, type IntendedRecords } from "./records";
 import type { OfficeEvent } from "../../src/data/source";
 import type { RpcContext } from "../http";
+import { parseCliJson } from "../lib/json";
 import { log } from "../lib/log";
 import { diffSummary } from "./diffSummary";
 import { localEvidence } from "./evidence";
-import { defaultRunner, type Runner } from "./forge";
+import { commandFailure, defaultRunner, type Runner } from "./forge";
 import { readPlan, sendHandback, type CoordinatorLink } from "./handback";
 import { Delivery, type DeliveryConfig, type DeliveryStatus, type Outcome } from "./ops";
 import { engineOf, Readiness, type ReadinessRow } from "./readiness";
 import { Reconciler, type ReconcilePlan } from "./reconcile";
+import { checkRecordsHead, intendedRecords, isRecordsBranch, RecordsGit, recordsBranch, recordsRef, writeRecordsCommit, type IntendedRecords, type StoreTicket } from "./records";
 import { backupsDir, deliveriesDir, DeliveryError, DeliveryStore, emptyState, isTicketKey, mergeOutcome, redact, redactDeep, type Approval, type DeliveryState, type DeliveryTrack, type RecordsPrepRecord } from "./state";
 import { parseRequest, requestIdOf, type DeliveryParams } from "./wire";
 
@@ -165,10 +169,11 @@ export function createDeliveryService(o: DeliveryServiceOptions): DeliveryServic
       ...o.core,
       records: {
         branch: recordsBranch,
-        // Every inspection of the records branch (so every approval, push, PR and merge) re-checks this.
+        localRef: recordsRef,
+        // Every inspection of the records commit (so every approval, push, PR and merge) re-checks this.
         check: async (key, at) => {
           const impl = await verifiedImplementation(key);
-          const rc = await checkRecordsHead(rgit, { key, ...at, impl });
+          const rc = await checkRecordsHead(rgit, { key, ...at, impl, store: await storeTickets() });
           return { evidence: rc.evidence, recordPath: rc.intended.ticketPath, title: rc.intended.title ? `Completion records: ${rc.intended.title}` : null };
         },
       },
@@ -186,8 +191,10 @@ export function createDeliveryService(o: DeliveryServiceOptions): DeliveryServic
   /** A request past the busy check, still being validated (not shown as running). */
   const checking = new Map<string, DeliveryOp>();
   const published = new Map<string, string>();
-  /** The local ticket/<key>-records head per ticket with a verified merge (refreshed with readiness). */
+  /** The prepared records commit (the kitchen's local records ref) per ticket with a verified merge (refreshed with readiness). */
   const recordsHeads = new Map<string, string | null>();
+  /** Whether the engine's claim on a merged ticket is released (null: the engine could not be read). */
+  const claimReleased = new Map<string, boolean | null>();
 
   const readT = (t: Track, key: string): DeliveryState => {
     try {
@@ -212,7 +219,26 @@ export function createDeliveryService(o: DeliveryServiceOptions): DeliveryServic
     return { pr: s.merged.pr, mergeCommit: s.merged.commit };
   }
 
-  /** The records delivery's readiness: after the verified implementation merge is in local main, with the records branch prepared. */
+  /** Every ticket the store holds now, as the engine's board reads it (read-only): the Feature's status is derived from it. */
+  async function storeTickets(): Promise<StoreTicket[]> {
+    const r = await runner("node", [engine, "board", "--json"], { cwd: o.root, timeoutMs: 30_000 });
+    const out = parseCliJson<{ tickets?: { key?: unknown; status?: unknown }[] }>(r.stdout);
+    if (!out || !Array.isArray(out.tickets))
+      throw new DeliveryError("refused", `the ticket store could not be read (${redact((r.stderr || "no output").split("\n")[0])}), so the Feature's status cannot be derived; nothing was prepared`);
+    return out.tickets.flatMap((t) => (isTicketKey(t.key) ? [{ key: t.key, status: typeof t.status === "string" ? t.status : "unrecognised" }] : []));
+  }
+
+  /** The engine's claim on the ticket (`owner <key> --json`, read-only): null once released, else what still holds it. */
+  async function claimHeld(key: string): Promise<string | null> {
+    const r = await runner("node", [engine, "owner", key, "--json"], { cwd: o.root, timeoutMs: 20_000 });
+    const out = parseCliJson<{ claim?: { branch?: unknown; worktree?: unknown } | null }>(r.stdout);
+    if (!out || !Object.hasOwn(out, "claim")) throw new DeliveryError("failed", `cannot read the engine's claim for ${key}: ${redact((r.stderr || "no output").split("\n")[0])}`);
+    if (!out.claim) return null;
+    const { branch, worktree } = out.claim;
+    return `${typeof branch === "string" && branch ? branch : "a claim ref"}${typeof worktree === "string" && worktree ? ` in ${worktree}` : ""}`;
+  }
+
+  /** The records delivery's readiness: after the verified implementation merge is in local main, with the records commit prepared. */
   function recordsReadiness(key: string): DeliveryReadiness {
     const t = read(key);
     const head = recordsHeads.get(key) ?? null;
@@ -223,7 +249,7 @@ export function createDeliveryService(o: DeliveryServiceOptions): DeliveryServic
         : ticketT.mainHas.get(key) !== true
           ? `local ${base} does not contain the implementation merge yet: reconcile the main checkout first`
           : !head
-            ? `${branch} does not exist: prepare the completion records first`
+            ? `the completion records are not prepared yet (they are delivered as ${branch})`
             : null;
     return { engineState: null, reviewedHead: head, branch, ready: !reason, waitingOn: [], stacked: false, reason };
   }
@@ -270,6 +296,7 @@ export function createDeliveryService(o: DeliveryServiceOptions): DeliveryServic
       reconciled: s.reconciled,
       handback: ticket ? s.handback : null,
       coordinator: ticket && !!o.coordinator,
+      claimReleased: ticket && s.merged?.commit && s.verified ? (claimReleased.get(key) ?? null) : null,
       plan: ticket ? s.plan : null,
     };
     // The records delivery appears once the implementation merge is verified (or once it has state of its own).
@@ -333,7 +360,12 @@ export function createDeliveryService(o: DeliveryServiceOptions): DeliveryServic
     return out;
   }
 
-  /** Reads, for both tracks, whether local main contains the verified merge, and the local records branch head (read-only git). */
+  /**
+   * Reads, for both tracks, whether local main contains the verified merge; the
+   * prepared records commit; and, while it matters (the merge is in local main
+   * and the records are not merged), whether the engine's claim is released. All
+   * read-only.
+   */
   async function checkMain(key: string): Promise<void> {
     for (const t of [ticketT, recordsT]) {
       const s = readT(t, key);
@@ -351,12 +383,21 @@ export function createDeliveryService(o: DeliveryServiceOptions): DeliveryServic
     const s = read(key);
     if (!s.merged?.commit || !s.verified) {
       recordsHeads.delete(key);
+      claimReleased.delete(key);
       return;
     }
     try {
-      recordsHeads.set(key, await rgit.commit(`refs/heads/${recordsBranch(key)}`, recordsBranch(key)));
+      recordsHeads.set(key, await rgit.commit(recordsRef(key), recordsRef(key)));
     } catch {
       recordsHeads.set(key, null);
+    }
+    // A released claim stays released; the engine is asked only until then.
+    if (claimReleased.get(key) !== true && ticketT.mainHas.get(key) === true && !readT(recordsT, key).merged) {
+      try {
+        claimReleased.set(key, (await claimHeld(key)) === null);
+      } catch {
+        claimReleased.set(key, null);
+      }
     }
   }
 
@@ -428,15 +469,26 @@ export function createDeliveryService(o: DeliveryServiceOptions): DeliveryServic
 
   /**
    * Prepares the completion records (records.ts), on the ticket's own step lock:
-   * only after the implementation merge is verified and local main contains it,
-   * cut from local main as on origin. An existing records branch is never moved:
-   * it is accepted only when it is still exactly the records.
+   * only after the implementation merge is verified, local main contains it and
+   * the engine's claim is released, cut from local main as on origin. The commit
+   * is kept under the kitchen's records ref, never a branch. An existing one is
+   * kept when it is still exactly the records; when it no longer is (main or the
+   * store changed since), a new one is committed in its place, unless a records
+   * merge is sent and unsettled.
    */
   const prepareRecords = (key: string) =>
     delivery.runStep(key, "records", async () => {
       const impl = await verifiedImplementation(key);
       if (readT(recordsT, key).merged) throw new DeliveryError("refused", `${key}'s completion records are already merged; nothing to prepare`);
+      const held = await claimHeld(key);
+      if (held)
+        throw new DeliveryError(
+          "refused",
+          `${key}'s claim is still held (${held}): hand the ticket back and let the coordinator release it first. orchestrate release proves the merge from local ${base}, and cannot once the completion records are on it; nothing was prepared`,
+        );
       const branch = recordsBranch(key);
+      const ref = recordsRef(key);
+      const store = await storeTickets();
       const main = await rgit.commit(`refs/heads/${base}`, `local ${base}`);
       const origin = await rgit.commit(`refs/remotes/origin/${base}`, `origin/${base}`);
       if (!main || !origin) throw new DeliveryError("invalid", `cannot resolve local ${base} and origin/${base}`);
@@ -445,33 +497,43 @@ export function createDeliveryService(o: DeliveryServiceOptions): DeliveryServic
       const record = (head: string | null, parent: string, intended: IntendedRecords): RecordsPrepRecord => ({
         at: now(),
         branch,
+        ref,
         head,
         parent,
         mergeCommit: impl.mergeCommit,
         changes: intended.changes.map((c) => c.why),
         onMain: head === null,
       });
-      const existing = await rgit.commit(`refs/heads/${branch}`, branch);
+      const existing = await rgit.commit(ref, ref);
+      let superseded: string | null = null;
       if (existing) {
-        // Already prepared (or made elsewhere): kept only if it is still exactly the records on a main with the merge.
-        const parents = await rgit.parents(existing);
-        const parent = parents.length === 1 ? parents[0] : null;
-        if (!parent || !(await rgit.isAncestor(impl.mergeCommit, parent)) || !(await rgit.isAncestor(parent, origin)))
-          throw new DeliveryError("refused", `${branch} already exists at ${existing} and is not one commit on a main that contains the implementation merge; it is not moved: leave it to the human`);
-        const intended = await intendedRecords(rgit, parent, key, impl);
-        if (intended.already) throw new DeliveryError("refused", `${branch} already exists at ${existing}, but its parent already records ${key} Complete; it is not moved: leave it to the human`);
-        await checkExactly(rgit, parent, existing, intended, `the existing ${branch} at ${existing.slice(0, 12)}`);
-        const rec = record(existing, parent, intended);
-        return { data: rec, message: `${branch} is already prepared at ${existing}: ${rec.changes.join("; ")}`, change: (st: DeliveryState) => void (st.recordsPrep = rec) };
+        // Already prepared: kept when it is still exactly the records, on its parent and as it would land on origin's main now.
+        const landing = await runner("git", ["merge-tree", "--write-tree", origin, existing], { cwd: o.root });
+        if (landing.code === 1) superseded = `it conflicts with origin/${base} now`;
+        else if (!landing.ok) throw commandFailure(landing, "computing where the prepared records would land", "git");
+        else {
+          try {
+            const rc = await checkRecordsHead(rgit, { key, head: existing, base: origin, tree: landing.stdout.split("\n")[0].trim(), impl, store });
+            const rec = record(existing, rc.parent, rc.intended);
+            return { data: rec, message: `the completion records for ${branch} are already prepared at ${existing}: ${rec.changes.join("; ")}`, change: (st: DeliveryState) => void (st.recordsPrep = rec) };
+          } catch (e) {
+            if (!(e instanceof DeliveryError) || e.kind !== "refused") throw e;
+            superseded = e.reasons.length ? `it is no longer exactly the records (${e.reasons.slice(0, 3).join("; ")})` : e.message;
+          }
+        }
+        // The kitchen's own ref may be prepared again, but never under a merge that is sent and not settled.
+        if (readT(recordsT, key).pendingMerge)
+          throw new DeliveryError("blocked", `a merge of ${key}'s records PR was sent and its outcome is not confirmed; check it first. The prepared commit ${existing} was left as it is (${superseded})`);
       }
-      const intended = await intendedRecords(rgit, main, key, impl);
+      const intended = await intendedRecords(rgit, main, key, impl, store);
       if (intended.already) {
         const rec = record(null, main, intended);
         return { data: rec, message: `local ${base} already records ${key} Complete: there are no records to deliver`, change: (st: DeliveryState) => void (st.recordsPrep = rec) };
       }
-      const head = await writeRecordsCommit(rgit, { key, parent: main, intended, impl });
+      const head = await writeRecordsCommit(rgit, { key, parent: main, intended, impl, ...(existing ? { replace: existing } : {}) });
       const rec = record(head, main, intended);
-      return { data: rec, message: `committed the completion records on ${branch} at ${head}, cut from ${base} ${main}: ${rec.changes.join("; ")}`, change: (st: DeliveryState) => void (st.recordsPrep = rec) };
+      const replaced = existing ? ` It replaces the earlier commit ${existing}: ${superseded}.` : "";
+      return { data: rec, message: `committed the completion records at ${head} for ${branch}, cut from ${base} ${main}: ${rec.changes.join("; ")}.${replaced}`, change: (st: DeliveryState) => void (st.recordsPrep = rec) };
     });
 
   async function runOp(op: DeliveryOp, p: DeliveryParams, v: DeliveryView, t: Track): Promise<Result> {
@@ -580,7 +642,7 @@ export function createDeliveryService(o: DeliveryServiceOptions): DeliveryServic
         // A listing is used once: after a reconcile (or a refused one) the checkout is listed again.
         t.reconcilePlans.delete(key);
         await checkMain(key);
-        // The plan before completion (which tickets wait on this one), and again once the records are on main.
+        // The plan before completion (which tickets wait on this one), and again once the records are on main (the store then says Complete).
         if (out.ok) await planStep(key);
         return fromOutcome(out, "reconcile");
       }
@@ -596,14 +658,6 @@ export function createDeliveryService(o: DeliveryServiceOptions): DeliveryServic
             update: (k, change) => void store.update(k, change, clock()),
             link: o.coordinator ?? null,
             mainContains: (c) => reconciler.mainContains(c),
-            records: async (k) => {
-              const s = store.read(k);
-              if (s.recordsPrep?.onMain && s.recordsPrep.mergeCommit === s.merged?.commit) return { onMain: true as const };
-              const r = recordsStore.read(k);
-              if (!r.merged?.commit || !r.verified) return "the completion records are not delivered yet: prepare them and merge their records PR first";
-              if (!(await reconciler.mainContains(r.merged.commit))) return "local main does not contain the completion records' merge yet: reconcile the main checkout for them first";
-              return { pr: r.merged.pr, commit: r.merged.commit };
-            },
             now: clock,
           }),
         );

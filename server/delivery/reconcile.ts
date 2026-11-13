@@ -15,7 +15,13 @@
 // (its change lives in the backup). Every refusal (main diverged, another branch
 // checked out, a merge in progress, a folder in the way, unmerged entries) is
 // found before anything is copied, so a refusal leaves the checkout exactly as
-// it was. Every git call is a fixed argument vector through the injected runner.
+// it was. If git still refuses the fast-forward after the files were moved (a
+// lock, a file that appeared meanwhile), every moved file is put back from its
+// verified copy and the index entries are restored, and the listing is taken
+// again to confirm the checkout is as it was; the copies stay in the backup
+// either way. Every git call is a fixed argument vector through the injected
+// runner, and paths are passed as literal pathspecs (`app/[id]/page.tsx` names
+// one file, never a pattern).
 
 import { createHash } from "node:crypto";
 import { chmodSync, constants, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, renameSync, rmdirSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
@@ -101,6 +107,14 @@ export interface ReconcilerConfig {
 }
 
 const PRESERVED_LIST_LIMIT = 200;
+/** Paths are names, never patterns: without this, `docs/[ab].md` would also match `docs/a.md`. */
+const LITERAL = "--literal-pathspecs";
+
+/** One path's index entry (stage 0) before reconcile touched it. */
+interface IndexEntry {
+  mode: string;
+  blob: string;
+}
 const IN_PROGRESS = ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "BISECT_LOG"];
 
 const sha256 = (b: Buffer | string) => createHash("sha256").update(b).digest("hex");
@@ -210,9 +224,13 @@ export class Reconciler {
   /** What a fast-forward to the merged origin/main would collide with. Changes nothing in the checkout. */
   async plan(key: string, mergeCommit: string): Promise<ReconcilePlan> {
     if (!isSha(mergeCommit)) throw new DeliveryError("invalid", `not a merge commit id: ${mergeCommit}`);
+    return this.listing(key, mergeCommit, await this.fetchTarget());
+  }
+
+  /** The listing against an already fetched origin/main (`target`): local reads only. */
+  private async listing(key: string, mergeCommit: string, target: string): Promise<ReconcilePlan> {
     const root = this.cfg.root;
     const base = this.cfg.base;
-    const target = await this.fetchTarget();
     const at = this.now().toISOString();
     const out = (p: Partial<ReconcilePlan> & { head: string; refusal: string | null }): ReconcilePlan => {
       const plan: ReconcilePlan = { key, at, branch: base, target, mergeCommit, upToDate: false, collisions: [], preserved: [], preservedTotal: 0, digest: "", ...p };
@@ -292,11 +310,10 @@ export class Reconciler {
     const collisions: Collision[] = [];
     for (const [p, f] of [...found.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
       const disk = hashOnDisk(inside(root, p));
-      const merged = (await this.gitOk(["ls-tree", "-z", target, "--", p], `reading ${p} in origin/${base}`)).split("\0")[0];
-      const mergedBlob = /^\d+ blob ([0-9a-f]{40})\t/.exec(merged)?.[1] ?? null;
+      const mergedBlob = blobOf((await this.gitOk([LITERAL, "ls-tree", "-z", target, "--", p], `reading ${p} in origin/${base}`)).split("\0")[0]);
       let stagedBlob: string | null = null;
       if (f.kind === "modified" && /[MAT]/.test(f.status[0]) && f.status[1] !== " ") {
-        const idx = (await this.gitOk(["ls-files", "-s", "-z", "--", p], `reading the staged ${p}`)).split("\0")[0];
+        const idx = (await this.gitOk([LITERAL, "ls-files", "-s", "-z", "--", p], `reading the staged ${p}`)).split("\0")[0];
         stagedBlob = /^\d+ ([0-9a-f]{40}) 0\t/.exec(idx)?.[1] ?? null;
         if (stagedBlob === disk.blob) stagedBlob = null;
       }
@@ -335,6 +352,7 @@ export class Reconciler {
 
     let backup: string | null = null;
     let manifestPath: string | null = null;
+    let index = new Map<string, IndexEntry>();
     const manifest = {
       schema: MANIFEST_SCHEMA,
       key,
@@ -345,7 +363,7 @@ export class Reconciler {
       target: plan.target,
       mergeCommit,
       digest: plan.digest,
-      state: "copying" as "copying" | "copied" | "moved" | "fast-forward-failed" | "done",
+      state: "copying" as "copying" | "copied" | "moved" | "put-back" | "fast-forward-failed" | "done",
       note: "Each file under files/ is the main checkout's copy at that path, byte for byte; index/ holds staged content that differed. Nothing was deleted.",
       after: null as string | null,
       entries: plan.collisions.map((c) => ({ ...c, backup: c.type === "missing" ? null : `files/${c.path}`, index: c.stagedBlob ? `index/${c.path}` : null })),
@@ -387,36 +405,62 @@ export class Reconciler {
           if (!existsSync(saved) || blobId(readFileSync(saved)) !== c.stagedBlob) throw new DeliveryError("failed", `the staged ${c.path} could not be saved; nothing was moved, and the copies so far are in ${backup}`);
         }
       }
+      // The index as it is for these paths, so a refused fast-forward can be undone exactly.
+      index = await this.indexEntries(plan.collisions.map((c) => c.path));
       manifest.state = "copied";
-      save();
-
-      // 2. Only now move them out of the way: tracked ones back to main's commit, the rest out of the checkout.
-      const restore = plan.collisions.filter((c) => c.kind === "modified" && c.inHead).map((c) => c.path);
-      const added = plan.collisions.filter((c) => c.kind === "modified" && !c.inHead).map((c) => c.path);
-      if (restore.length) await this.gitOk(["checkout", "-q", plan.head, "--", ...restore], "putting the backed-up tracked files back to main's commit");
-      if (added.length) await this.gitOk(["rm", "--cached", "-q", "--", ...added], "unstaging the backed-up new files");
-      for (const c of plan.collisions) {
-        if (c.kind === "modified" && c.inHead) continue;
-        const full = inside(root, c.path);
-        try {
-          unlinkSync(full);
-        } catch (e) {
-          if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw new DeliveryError("failed", `${c.path} could not be moved: ${(e as Error).message}; its verified copy is in ${backup}`);
-        }
-        removeEmptyParents(root, c.path);
-      }
-      manifest.state = "moved";
       save();
     }
 
+    // 2. Only now move them out of the way: tracked ones back to main's commit, the rest out of the checkout.
     // 3. Fast-forward only, to exactly the fetched origin/main.
-    const ff = await this.git(["merge", "--ff-only", "--no-edit", plan.target], 120_000);
-    if (!ff.ok) {
-      const err = commandFailure(ff, `fast-forwarding ${base}`, "git");
-      manifest.state = "fast-forward-failed";
-      manifest.note += ` The fast-forward failed: ${redact(err.message)}.`;
+    // From the first move on, a failure puts every moved file back.
+    let moving = false;
+    try {
+      if (backup) {
+        moving = true;
+        const restore = plan.collisions.filter((c) => c.kind === "modified" && c.inHead).map((c) => c.path);
+        const added = plan.collisions.filter((c) => c.kind === "modified" && !c.inHead).map((c) => c.path);
+        if (restore.length) await this.gitOk([LITERAL, "checkout", "-q", plan.head, "--", ...restore], "putting the backed-up tracked files back to main's commit");
+        // Index only (`--cached`): the working file is moved below. `-f` because a staged file edited again (AM) is refused otherwise; both versions are in the backup.
+        if (added.length) await this.gitOk([LITERAL, "rm", "--cached", "-f", "-q", "--", ...added], "unstaging the backed-up new files");
+        for (const c of plan.collisions) {
+          if (c.kind === "modified" && c.inHead) continue;
+          const full = inside(root, c.path);
+          try {
+            unlinkSync(full);
+          } catch (e) {
+            if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw new DeliveryError("failed", `${c.path} could not be moved: ${(e as Error).message}`);
+          }
+          removeEmptyParents(root, c.path);
+        }
+        manifest.state = "moved";
+        save();
+      }
+      const ff = await this.git(["merge", "--ff-only", "--no-edit", plan.target], 120_000);
+      if (!ff.ok) throw commandFailure(ff, `fast-forwarding ${base}`, "git");
+    } catch (e) {
+      const err = e instanceof DeliveryError ? e : new DeliveryError("failed", e instanceof Error ? e.message : String(e));
+      if (!moving || !backup) throw new DeliveryError("failed", `${err.message}; nothing was moved, and the main checkout is as it was`);
+      // Git refused after files were moved: put every one back, and confirm the checkout lists exactly as before.
+      let why: string | null = null;
+      try {
+        await this.putBack(plan, backup, index);
+        const again = await this.listing(key, mergeCommit, plan.target);
+        if (again.digest !== plan.digest) why = "the main checkout does not list as it did before";
+      } catch (e2) {
+        why = redact(e2 instanceof Error ? e2.message : String(e2));
+      }
+      manifest.state = why ? "fast-forward-failed" : "put-back";
+      manifest.note += why
+        ? ` It failed: ${redact(err.message)}. The moved files could not all be put back (${why}); they are kept here.`
+        : ` It failed: ${redact(err.message)}. Every moved file was put back where it was; these copies were kept.`;
       save();
-      throw new DeliveryError("failed", `${err.message}${backup ? `; the moved files are kept in ${backup}` : ""}`);
+      throw new DeliveryError(
+        "failed",
+        why
+          ? `${err.message}; the moved files could not all be put back (${why}): they are kept, byte for byte, in ${backup}`
+          : `${err.message}; ${base} was not moved, every file that had been moved was put back, and the main checkout is as it was (the copies were kept in ${backup})`,
+      );
     }
     const after = await this.resolve("HEAD", "the main checkout's HEAD");
     if (after !== plan.target || !(await this.isAncestor(mergeCommit, after))) throw new DeliveryError("failed", `${base} is at ${after} after the fast-forward, not ${plan.target}`);
@@ -425,7 +469,59 @@ export class Reconciler {
     save();
     return { plan, result: { before: plan.head, after, target: plan.target, mergeCommit, backup, manifest: manifestPath, moved: plan.collisions.length, preserved: plan.preservedTotal, upToDate: false } };
   }
+
+  /** The index entries (stage 0) of these paths, as they are now. */
+  private async indexEntries(paths: string[]): Promise<Map<string, IndexEntry>> {
+    const out = new Map<string, IndexEntry>();
+    for (let i = 0; i < paths.length; i += 100) {
+      const listed = await this.gitOk([LITERAL, "ls-files", "-s", "-z", "--", ...paths.slice(i, i + 100)], "reading the index");
+      for (const rec of listed.split("\0")) {
+        const m = /^(\d+) ([0-9a-f]{40}) 0\t([\s\S]+)$/.exec(rec);
+        if (m && paths.includes(m[3])) out.set(m[3], { mode: m[1], blob: m[2] });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Undoes the move after a refused fast-forward: every file goes back where it
+   * was, from its verified copy, and the index entries of those paths are set
+   * back. It replaces only what the move itself left there (main's committed copy
+   * of a tracked file, or nothing); anything else is left alone and reported.
+   */
+  private async putBack(plan: ReconcilePlan, backup: string, index: Map<string, IndexEntry>): Promise<void> {
+    const root = this.cfg.root;
+    for (const c of plan.collisions) {
+      const full = inside(root, c.path);
+      const tracked = c.kind === "modified" && c.inHead;
+      const now = hashOnDisk(full);
+      // Not moved yet (the move stopped before it): already as it was.
+      if (now.type === c.type && now.sha256 === c.sha256) continue;
+      if (tracked) {
+        const committed = blobOf((await this.gitOk([LITERAL, "ls-tree", "-z", plan.head, "--", c.path], `reading ${c.path} in main's commit`)).split("\0")[0]);
+        if (now.blob !== committed) throw new DeliveryError("failed", `${c.path} changed after it was moved`);
+        if (now.type !== "missing") unlinkSync(full);
+      } else if (now.type !== "missing") throw new DeliveryError("failed", `${c.path} appeared after it was moved`);
+      if (c.type === "missing") continue;
+      const copy = inside(join(backup, "files"), c.path);
+      mkdirSync(dirname(full), { recursive: true });
+      if (c.type === "symlink") symlinkSync(readlinkSync(copy), full);
+      else {
+        copyFileSync(copy, full, constants.COPYFILE_EXCL);
+        if (c.mode !== null) chmodSync(full, c.mode);
+      }
+      if (hashOnDisk(full).sha256 !== c.sha256) throw new DeliveryError("failed", `${c.path} could not be put back byte for byte`);
+    }
+    for (const c of plan.collisions) {
+      const e = index.get(c.path);
+      if (e) await this.gitOk(["update-index", "--add", "--cacheinfo", `${e.mode},${e.blob},${c.path}`], `restoring the staged ${c.path}`);
+      else if (c.kind === "modified" && c.inHead) await this.gitOk(["update-index", "--force-remove", "--", c.path], `restoring the staged deletion of ${c.path}`);
+    }
+  }
 }
+
+/** `<mode> blob <sha>\t<path>` → the blob id; null for anything else. */
+const blobOf = (lsTreeRecord: string) => /^\d+ blob ([0-9a-f]{40})\t/.exec(lsTreeRecord)?.[1] ?? null;
 
 /** Head, target, merge and every collision as seen: the click applies exactly this. */
 export function planDigest(p: Pick<ReconcilePlan, "key" | "head" | "target" | "mergeCommit" | "upToDate" | "refusal" | "collisions">): string {

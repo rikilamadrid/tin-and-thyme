@@ -23,9 +23,9 @@ export type DeliveryStep = (typeof DELIVERY_STEPS)[number];
 
 /**
  * Which delivery a request or view is for: the ticket's implementation, or its
- * completion records on `ticket/<key>-records` (server/delivery/records.ts), which
- * has its own state, approval and steps. Only these ops exist on the records
- * track; it has no records, handback or plan of its own.
+ * completion records, delivered as `ticket/<key>-records` (server/delivery/records.ts),
+ * which has its own state, approval and steps. Only these ops exist on the
+ * records track; it has no records, handback or plan of its own.
  */
 export type DeliveryTrack = "ticket" | "records";
 export const RECORDS_TRACK_OPS: readonly DeliveryOp[] = ["inspect", "approve", "acknowledgeNoChecks", "push", "ensurePr", "status", "merge", "verify", "reconcilePlan", "reconcile"];
@@ -219,13 +219,22 @@ export interface AfterMergeView {
   handback: HandbackView | null;
   /** A coordinator session exists to hand back to (not in a preview). */
   coordinator: boolean;
+  /**
+   * The engine's claim on the ticket is released (`orchestrate release`): true,
+   * false while it is still held, null when not known (not read yet, or the
+   * engine could not be read). The completion records wait for it.
+   */
+  claimReleased: boolean | null;
   plan: PlanView | null;
 }
 
 /** The completion records prepared after the verified merge (state.ts RecordsPrepRecord). */
 export interface RecordsPrepView {
   at: string;
+  /** The branch on origin they are delivered from (`ticket/<key>-records`). */
   branch: string;
+  /** The kitchen's local ref that holds the commit (never a local branch). */
+  ref: string;
   /** The records commit; null when local main already records the ticket Complete. */
   head: string | null;
   parent: string;
@@ -363,13 +372,19 @@ export function gateOf(view: DeliveryView, op: DeliveryOp): Gate | null {
     case "prepareRecords": {
       const g = afterMerge();
       if (g) return g;
+      if (view.records?.outcome === "merged") return { kind: "refused", message: "The completion records are already merged" };
+      const p = view.recordsPrep && view.recordsPrep.mergeCommit === view.merged!.commit ? view.recordsPrep : null;
+      if (p?.onMain) return { kind: "refused", message: "Local main already records this ticket Complete: there are no records to deliver" };
       if (view.after.mainHasMerge !== true) return { kind: "refused", message: "Local main does not contain the merge yet: reconcile the main checkout first (the records are cut from the updated main)" };
-      const p = view.recordsPrep;
-      if (p && p.mergeCommit === view.merged!.commit) {
-        if (p.onMain) return { kind: "refused", message: "Local main already records this ticket Complete: there are no records to deliver" };
-        if (view.records?.outcome === "merged") return { kind: "refused", message: "The completion records are already merged" };
-        if (p.head && view.records?.readiness.reviewedHead === p.head) return { kind: "refused", message: `The completion records are prepared on ${p.branch} at ${short(p.head)}: deliver them below` };
-      }
+      if (view.after.claimReleased !== true)
+        return {
+          kind: "refused",
+          message:
+            view.after.claimReleased === false
+              ? `Hand the ticket back first: the records are prepared once the coordinator has released ${view.key}'s claim (orchestrate release proves the merge from local main, and cannot once the records are on it)`
+              : `Whether ${view.key}'s claim is released is not known yet (the engine has not answered); the records are prepared only after it is`,
+        };
+      // Preparing again is safe: a commit that is still exactly the records is kept as it is.
       return null;
     }
     case "reconcile": {
@@ -392,8 +407,6 @@ export function gateOf(view: DeliveryView, op: DeliveryOp): Gate | null {
       }
       if (!view.after.coordinator) return { kind: "unavailable", message: "This server has no coordinator session to hand back to" };
       if (view.after.mainHasMerge !== true) return { kind: "refused", message: "Local main does not contain the merge yet: reconcile the main checkout first (orchestrate release refuses until it does)" };
-      const rs = recordsSettled(view);
-      if (rs) return { kind: "refused", message: rs };
       return null;
     }
     case "verify":
@@ -438,15 +451,19 @@ export function gateOf(view: DeliveryView, op: DeliveryOp): Gate | null {
 /**
  * Null when the ticket's completion records are on local main: delivered through
  * their records PR (merged, verified, and local main contains it), or local main
- * already recorded the ticket Complete. Otherwise why the handback waits.
+ * already recorded the ticket Complete. Otherwise what is still to do, in order:
+ * the handback and release come first, then the records PR.
  */
 export function recordsSettled(view: DeliveryView): string | null {
   const p = view.recordsPrep;
   if (p?.onMain && p.mergeCommit === view.merged?.commit) return null;
   const r = view.records;
-  if (!r || r.outcome !== "merged" || !r.merged?.commit) return "Deliver the completion records first: prepare them, then merge their records PR (completion edits are never left uncommitted on main)";
+  if (!r || r.outcome !== "merged" || !r.merged?.commit) {
+    if (view.after.claimReleased !== true) return `Next: hand the ticket back; once ${view.key}'s claim is released, prepare the completion records and merge their records PR`;
+    return "Next: prepare the completion records, then merge their records PR (completion edits are never left uncommitted on main)";
+  }
   if (!r.verified) return "Verify the completion records' merge first";
-  if (r.after.mainHasMerge !== true) return "Local main does not contain the completion records yet: reconcile the main checkout for them first";
+  if (r.after.mainHasMerge !== true) return "Local main does not contain the completion records yet: reconcile the main checkout for them";
   return null;
 }
 

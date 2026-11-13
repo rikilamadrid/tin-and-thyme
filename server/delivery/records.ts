@@ -1,15 +1,18 @@
 // Completion records as their own small PR (Feature 10, Notes; human decision 2026-11-13).
 //
-// After a ticket's implementation merge is verified and local main contains it,
-// the kitchen commits the completion records on `ticket/<key>-records`, cut from
-// that updated main, and delivers it through the same steps as any ticket
-// (inspect, the human's exact approval, push, PR, checks, merge, verify,
-// reconcile). The records commit contains exactly what `/ticket complete` writes
-// (skills/ticket/actions/complete.md steps 3-5), and nothing else:
+// After a ticket's implementation merge is verified, local main contains it and
+// the engine's claim is released, the kitchen commits the completion records,
+// cut from that updated main, and delivers them as branch `ticket/<key>-records`
+// through the same steps as any ticket (inspect, the human's exact approval,
+// push, PR, checks, merge, verify, reconcile). The records commit contains
+// exactly what `/ticket complete` writes (skills/ticket/actions/complete.md
+// steps 3-5), and nothing else:
 //
 //   - the ticket's `## Status` line set to `Complete`;
 //   - the parent Feature's `## Status` line set to `Complete`, only when every
-//     ticket of that Feature is now Complete, Cancelled or Superseded;
+//     other ticket of that Feature is Complete, Cancelled or Superseded, both in
+//     the commit and in the ticket store as the engine's board reads it (the
+//     store can hold tickets main does not track yet);
 //   - one entry appended to `context/history.md`, only when the Feature
 //     completed (the durable history is per Feature: complete.md step 5).
 //
@@ -26,9 +29,26 @@
 // in-app approval in place of a tester PASS. A records delivery never produces a
 // records delivery of its own.
 //
+// Two rules come from the orchestrate engine, which this module never changes:
+//
+//   - `ticket/<key>-records` is the branch on origin (the PR's head). Locally the
+//     commit is kept under `refs/tin-and-thyme/records/<key>`, never as a local
+//     branch: the engine reads every local `ticket/<key>-*` branch as a claim on
+//     that ticket (claims.mjs), so a local records branch would show a delivered
+//     ticket as a stale, orphaned claim in every status and plan.
+//   - The records are prepared only after the claim is released. `orchestrate
+//     release` proves a squash merge from local main (merging the ticket branch
+//     into it must change nothing); once the records commit, which rewrites the
+//     ticket's Status line, is on local main, that proof fails for any branch that
+//     touched the same line, and release would need `--force`.
+//
 // Git is read through the injectable runner (execFile, fixed argument vectors).
-// Writing the commit adds objects and creates one new branch ref (create-only);
-// it never touches a working tree, the index or another ref.
+// Writing the commit adds objects and sets that one ref; it never touches a
+// working tree, the index, a branch or another ref. The ref is the kitchen's
+// own: it is created once, and moved only to replace a commit that is no longer
+// exactly the records (main or the store changed since) while nothing of the
+// records delivery is merged or pending. It is never pushed: delivery pushes
+// only `<sha>:refs/heads/ticket/<key>-records`.
 
 import type { Runner } from "./forge";
 import { commandFailure } from "./forge";
@@ -37,10 +57,20 @@ import { DeliveryError, isTicketKey } from "./state";
 
 // ---------------------------------------------------------------- names
 
-/** The one branch completion records are committed on. */
+/** The branch on origin the completion records are delivered from (the records PR's head). */
 export function recordsBranch(key: string): string {
   if (!isTicketKey(key)) throw new DeliveryError("invalid", `not a ticket key: ${String(key)}`);
   return `ticket/${key}-records`;
+}
+
+/**
+ * Where the kitchen keeps the records commit locally. Not under `refs/heads`
+ * (the engine would read a local `ticket/<key>-*` branch as a claim), and never
+ * pushed (ops.ts pushes only `<sha>:refs/heads/ticket/…`).
+ */
+export function recordsRef(key: string): string {
+  if (!isTicketKey(key)) throw new DeliveryError("invalid", `not a ticket key: ${String(key)}`);
+  return `refs/tin-and-thyme/records/${key}`;
 }
 
 /** True for `ticket/<key>-records`: a records branch never gets records of its own. */
@@ -122,7 +152,7 @@ export interface HistoryFacts {
   mergeCommit: string;
 }
 
-const clean = (s: string) => s.replace(/[\r\n`]+/g, " ").trim();
+const clean = (s: string) => s.replace(/`/g, "").replace(/\s+/g, " ").trim();
 
 /** One compact history entry, in templates/history.template.md's shape. */
 export function historyEntry(f: HistoryFacts): string {
@@ -156,6 +186,14 @@ export interface Implementation {
   pr: number;
   mergeCommit: string;
 }
+
+/** A ticket as the store holds it now (the engine's `board --json`: key and status). */
+export interface StoreTicket {
+  key: string;
+  status: string;
+}
+
+const featureNumber = (s: string) => s.replace(/^0+(?=\d)/, "");
 
 export interface RecordsChange {
   path: string;
@@ -241,11 +279,19 @@ export class RecordsGit {
       .filter((n): n is string => !!n);
   }
 
-  /** A file's content at a commit, or null when it does not exist there. */
-  async read(commit: string, path: string): Promise<string | null> {
+  /**
+   * A file's content at a commit, or null when it does not exist there. With
+   * `exact`, the text must hash back to the same blob: a file that is not valid
+   * UTF-8 (or that this reader would not write back byte for byte) is refused
+   * rather than rewritten with other bytes changed.
+   */
+  async read(commit: string, path: string, exact = false): Promise<string | null> {
     const e = (await this.entries(commit, [path])).get(path);
     if (!e || e.type !== "blob") return null;
-    return this.ok(["cat-file", "blob", e.sha], `reading ${path} at ${commit}`);
+    const text = await this.ok(["cat-file", "blob", e.sha], `reading ${path} at ${commit}`);
+    if (exact && (await this.hash(text)) !== e.sha)
+      throw new DeliveryError("refused", `${path} at ${commit.slice(0, 12)} cannot be rewritten byte for byte (it is not plain UTF-8 text); its completion record needs the human (normal review), not a records-only PR`);
+    return text;
   }
 
   /** The blob id the content would have (nothing written unless `write`). */
@@ -259,10 +305,12 @@ export class RecordsGit {
 /**
  * What `/ticket complete <key>` records, computed from one commit's files: the
  * ticket's Status, the derived Feature Status, and the history entry when the
- * Feature completes. Refuses (instead of guessing) when anything it reads is
- * missing or unrecognised.
+ * Feature completes. `store` is every ticket the store holds now: the Feature
+ * completes only when its other tickets are done both in the commit and there.
+ * Refuses (instead of guessing) when anything it reads is missing or
+ * unrecognised.
  */
-export async function intendedRecords(g: RecordsGit, from: string, key: string, impl: Implementation): Promise<IntendedRecords> {
+export async function intendedRecords(g: RecordsGit, from: string, key: string, impl: Implementation, store: readonly StoreTicket[]): Promise<IntendedRecords> {
   const refuse = (why: string): never => {
     throw new DeliveryError("refused", `cannot derive ${key}'s completion records at ${from.slice(0, 12)}: ${why}; this needs the human (normal review), not a records-only PR`);
   };
@@ -272,14 +320,14 @@ export async function intendedRecords(g: RecordsGit, from: string, key: string, 
   if (own.length !== 1) refuse(own.length ? `${own.length} ticket files are named ${key}-*.md` : `there is no ${TICKETS}/${key}-*.md`);
   const ticketPath = `${TICKETS}/${own[0]}`;
   const ticketMode = (await g.entries(from, [ticketPath])).get(ticketPath)!.mode;
-  const ticket = (await g.read(from, ticketPath))!;
+  const ticket = (await g.read(from, ticketPath, true))!;
   const status = statusOf(ticket);
   if (!status) refuse(`${ticketPath} has ${statusLine(ticket) === null ? "no ## Status section" : `an unrecognised status \`${statusLine(ticket)}\``}`);
   const featureFile = parentFeatureOf(ticket);
   if (!featureFile) refuse(`${ticketPath} names no parent Feature file under ## Parent Feature`);
-  if (featureFile!.split("-")[0].replace(/^0+(?=\d)/, "") !== feature.replace(/^0+(?=\d)/, "")) refuse(`${ticketPath}'s parent Feature ${featureFile} is not Feature ${feature}`);
+  if (featureNumber(featureFile!.split("-")[0]) !== featureNumber(feature)) refuse(`${ticketPath}'s parent Feature ${featureFile} is not Feature ${feature}`);
   const featurePath = `${FEATURES}/${featureFile}`;
-  const featureText = await g.read(from, featurePath);
+  const featureText = await g.read(from, featurePath, true);
   if (featureText === null) refuse(`${featurePath} does not exist`);
   const featureMode = (await g.entries(from, [featurePath])).get(featurePath)!.mode;
   const featureBefore = statusLine(featureText!);
@@ -304,6 +352,11 @@ export async function intendedRecords(g: RecordsGit, from: string, key: string, 
     if (!s) refuse(`${TICKETS}/${n} has no recognisable status, so the Feature's status cannot be derived`);
     if (!DONE.has(s!)) allDone = false;
   }
+  // The store can hold tickets of this Feature that this commit does not (not tracked yet), or hold them in another state.
+  for (const t of store) {
+    if (t.key === key || !isTicketKey(t.key) || featureNumber(t.key.split(".")[0]) !== featureNumber(feature)) continue;
+    if (!DONE.has(STATUSES.find((s) => s.toLowerCase() === String(t.status).toLowerCase()) ?? "")) allDone = false;
+  }
   let featureAfter = featureBefore;
   if (allDone && featureBefore!.toLowerCase() !== "complete") {
     const next = withStatus(featureText!, "Complete");
@@ -314,8 +367,8 @@ export async function intendedRecords(g: RecordsGit, from: string, key: string, 
     const date = (await g.ok(["log", "-1", "--format=%cs", impl.mergeCommit], "reading the merge date")).trim();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) refuse(`the merge commit ${impl.mergeCommit} has no readable date`);
     const entry = historyEntry({ date, featureNumber: feature, featureTitle: titleOf(featureText!) ?? featureFile!, key, pr: impl.pr, mergeCommit: impl.mergeCommit });
-    const existing = await g.read(from, HISTORY_PATH);
-    const template = existing === null ? await g.read(from, HISTORY_TEMPLATE) : null;
+    const existing = await g.read(from, HISTORY_PATH, true);
+    const template = existing === null ? await g.read(from, HISTORY_TEMPLATE, true) : null;
     const history = withHistoryEntry(existing, template, entry);
     if (history === null) refuse(`${HISTORY_PATH} does not exist and ${HISTORY_TEMPLATE} has no placeholder entry to create it from`);
     const historyMode = existing === null ? "100644" : (await g.entries(from, [HISTORY_PATH])).get(HISTORY_PATH)!.mode;
@@ -340,7 +393,7 @@ export async function checkExactly(g: RecordsGit, from: string, to: string, inte
   const got = await g.entries(to, [...want]);
   for (const c of intended.changes) {
     const e = got.get(c.path);
-    if (!e) {
+    if (!e || !changed.includes(c.path)) {
       reasons.push(`${c.path}: missing (expected ${c.why})`);
       continue;
     }
@@ -364,18 +417,18 @@ export interface RecordsCheck {
  * intended records; and what would land on `base` (the expected merge `tree`) is
  * exactly the records intended against `base`.
  */
-export async function checkRecordsHead(g: RecordsGit, o: { key: string; head: string; base: string; tree: string; impl: Implementation }): Promise<RecordsCheck> {
+export async function checkRecordsHead(g: RecordsGit, o: { key: string; head: string; base: string; tree: string; impl: Implementation; store: readonly StoreTicket[] }): Promise<RecordsCheck> {
   const parents = await g.parents(o.head);
   if (parents.length !== 1) throw new DeliveryError("refused", `${recordsBranch(o.key)} at ${o.head} is not one commit on main (${parents.length} parents)`);
   const [parent] = parents;
   if (!(await g.isAncestor(o.impl.mergeCommit, parent)))
     throw new DeliveryError("refused", `${recordsBranch(o.key)} is not cut from a main that contains the implementation merge ${o.impl.mergeCommit}; completion is never recorded before the implementation landed`);
   if (!(await g.isAncestor(parent, o.base))) throw new DeliveryError("refused", `${recordsBranch(o.key)}'s parent ${parent} is not on origin's main ${o.base}; prepare the records again from the updated main`);
-  const intended = await intendedRecords(g, parent, o.key, o.impl);
+  const intended = await intendedRecords(g, parent, o.key, o.impl, o.store);
   if (intended.already) throw new DeliveryError("refused", `main at ${parent.slice(0, 12)} already records ${o.key} Complete; ${recordsBranch(o.key)} has nothing to deliver`);
   await checkExactly(g, parent, o.head, intended, `${recordsBranch(o.key)} at ${o.head.slice(0, 12)}`);
   if (parent !== o.base) {
-    const onBase = await intendedRecords(g, o.base, o.key, o.impl);
+    const onBase = await intendedRecords(g, o.base, o.key, o.impl, o.store);
     if (onBase.already) throw new DeliveryError("refused", `origin's main ${o.base.slice(0, 12)} already records ${o.key} Complete; nothing to deliver`);
     await checkExactly(g, o.base, o.tree, onBase, `the merge of ${recordsBranch(o.key)} onto ${o.base.slice(0, 12)}`);
   }
@@ -415,10 +468,14 @@ async function rewriteTree(g: RecordsGit, tree: string | null, edits: Map<string
 }
 
 /**
- * Commits the intended records on top of `parent` and creates the records
- * branch at it, create-only: an existing branch is never moved.
+ * Commits the intended records on top of `parent` and points the kitchen's
+ * records ref at it. No branch is created. The ref is created only when it does
+ * not exist; with `replace` (the commit it holds now, which the caller found is
+ * no longer exactly the records) it is moved from exactly that commit, and from
+ * nothing else.
  */
-export async function writeRecordsCommit(g: RecordsGit, o: { key: string; parent: string; intended: IntendedRecords; impl: Implementation }): Promise<string> {
+export async function writeRecordsCommit(g: RecordsGit, o: { key: string; parent: string; intended: IntendedRecords; impl: Implementation; replace?: string }): Promise<string> {
+  if (o.replace !== undefined && !isSha(o.replace)) throw new DeliveryError("invalid", "the records commit to replace must be a full commit id");
   if (o.intended.from !== o.parent || o.intended.already || !o.intended.changes.length) throw new DeliveryError("invalid", "nothing to commit for these records");
   const edits = new Map<string, { mode: string; sha: string }>();
   for (const c of o.intended.changes) edits.set(c.path, { mode: c.mode, sha: await g.hash(c.after, true) });
@@ -434,6 +491,6 @@ export async function writeRecordsCommit(g: RecordsGit, o: { key: string; parent
   ].join("\n");
   const commit = (await g.ok(["commit-tree", tree, "-p", o.parent, "-m", message], "committing the records")).trim();
   if (!isSha(commit)) throw new DeliveryError("failed", "git commit-tree returned no commit");
-  await g.ok(["update-ref", "-m", `tin-and-thyme: completion records for ${o.key}`, `refs/heads/${recordsBranch(o.key)}`, commit, ""], `creating ${recordsBranch(o.key)}`);
+  await g.ok(["update-ref", "-m", `tin-and-thyme: completion records for ${o.key}`, recordsRef(o.key), commit, o.replace ?? ""], `${o.replace ? "moving" : "creating"} ${recordsRef(o.key)}`);
   return commit;
 }

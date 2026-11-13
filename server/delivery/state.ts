@@ -232,13 +232,17 @@ export interface PlanRecord {
 
 /**
  * The completion records prepared after a verified merge (records.ts), on the
- * ticket's own state. Either a records commit on `ticket/<key>-records`, cut
- * from local main once it contains the implementation merge, or `onMain`: local
- * main already records the ticket Complete, so there is nothing to deliver.
+ * ticket's own state. Either a records commit for `ticket/<key>-records`, cut
+ * from local main once it contains the implementation merge and the claim is
+ * released, or `onMain`: local main already records the ticket Complete, so
+ * there is nothing to deliver.
  */
 export interface RecordsPrepRecord {
   at: string;
+  /** The branch on origin the records are delivered from. */
   branch: string;
+  /** The local ref that holds the commit (`refs/tin-and-thyme/records/<key>`). */
+  ref: string;
   /** The records commit; null when `onMain`. */
   head: string | null;
   /** The main commit it was cut from (or read, when `onMain`). */

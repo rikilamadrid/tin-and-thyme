@@ -6,7 +6,8 @@
 // (src/data/delivery.ts gateOf), with the reason as its title. "No checks
 // reported" is never shown as passing.
 //
-// After a verified merge, the ticket's completion records are prepared and
+// After a verified merge: reconcile main, hand the ticket back (the coordinator
+// releases its claim), then the ticket's completion records are prepared and
 // delivered as their own records PR: the same panel, nested, for the records
 // view, with every request sent as `track: "records"`.
 
@@ -447,8 +448,9 @@ export function DeliveryPanel({ deliveryKey, board, view, client, onSignIn, init
 type ButtonFn = (op: DeliveryOp, label: string, params?: Record<string, string>, extraBlock?: string | null) => ReactNode;
 
 /**
- * After a verified merge: list the main checkout and reconcile it for exactly
- * that listing, hand the ticket back to the coordinator once, refresh the plan.
+ * After a verified merge, in order: list the main checkout and reconcile it for
+ * exactly that listing, hand the ticket back to the coordinator once, deliver
+ * the completion records (the ticket's panel only), refresh the plan.
  */
 function AfterMerge({
   view,
@@ -549,8 +551,6 @@ function AfterMerge({
         </div>
       )}
 
-      {view.track === "ticket" && <CompletionRecords view={view} button={button} records={records} />}
-
       {view.track === "ticket" && (
       <>
       <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -566,6 +566,13 @@ function AfterMerge({
           <div className="font-mono text-[12px] text-muted">{hb.marker}</div>
         </div>
       )}
+      <Row label="Claim">
+        <span data-testid="claim-released" data-value={String(am.claimReleased)}>
+          {am.claimReleased === true ? "released" : am.claimReleased === false ? "still held (the coordinator releases it after the handback)" : "—"}
+        </span>
+      </Row>
+
+      <CompletionRecords view={view} button={button} records={records} />
 
       <div className="mt-3 flex flex-wrap items-center gap-2">
         {button("plan", "Refresh the plan")}
@@ -605,9 +612,9 @@ function AfterMerge({
 }
 
 /**
- * The completion records: prepared on ticket/<key>-records from the updated
- * main, then delivered as their own records PR (the nested panel). The handback
- * waits until they are on local main.
+ * The completion records: prepared from the updated main once the claim is
+ * released, then delivered as their own records PR from ticket/<key>-records
+ * (the nested panel).
  */
 function CompletionRecords({ view, button, records }: { view: DeliveryView; button: ButtonFn; records: ReactNode }) {
   const p = view.recordsPrep;
@@ -616,8 +623,8 @@ function CompletionRecords({ view, button, records }: { view: DeliveryView; butt
     <div className="mt-3" data-testid="completion-records" data-settled={settled ? "no" : "yes"}>
       <h5 className="text-[13px] font-semibold">Completion records</h5>
       <p className="text-[12px] text-muted">
-        The ticket's Status, the derived Feature Status and, when the Feature completes, one history entry — committed on their own branch from the updated main and delivered as a records PR, never left
-        on main uncommitted.
+        The ticket's Status, the derived Feature Status and, when the Feature completes, one history entry — committed from the updated main once the claim is released, and delivered as a records PR
+        from ticket/{view.key}-records, never left on main uncommitted.
       </p>
       <div className="mt-1 flex flex-wrap items-center gap-2">{button("prepareRecords", p?.head ? "Prepare again" : "Prepare completion records")}</div>
       {p && (
@@ -626,8 +633,9 @@ function CompletionRecords({ view, button, records }: { view: DeliveryView; butt
             <span>Local main already records {view.key} Complete: there are no records to deliver.</span>
           ) : (
             <>
-              <Row label="Branch">{p.branch}</Row>
+              <Row label="Branch (origin)">{p.branch}</Row>
               <Row label="Records head">{p.head}</Row>
+              <Row label="Kept locally as">{p.ref} (not a local branch)</Row>
               <Row label="Cut from">{p.parent}</Row>
               <ul className="list-disc pl-4 text-[12px]">
                 {p.changes.map((c) => (
