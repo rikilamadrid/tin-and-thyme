@@ -35,10 +35,11 @@ import { join } from "node:path";
 import { checkIntegration, formatCheck, releaseClaim } from "../integration.mjs";
 import { computeBoard, formatBoard } from "../board.mjs";
 import { buildBrief, formatBrief, translateBrief } from "../brief.mjs";
-import { approvalScope, blockedNote, claimedNote, gateOpenedNote, gateResolvedNote, unblockedNote } from "../comments.mjs";
+import { approvalScope, blockedNote, claimedNote, gateClosedNote, gateOpenedNote, gateResolvedNote, unblockedNote } from "../comments.mjs";
 import { computePlan, formatPlan } from "../plan.mjs";
-import { updateStateFile } from "../statefile.mjs";
+import { stateUpdateRefusal, updateStateFile } from "../statefile.mjs";
 import { postNote, setGateLabel } from "../tracker.mjs";
+import { GATE_ID_FIELD, isGateOccurrence, occurrenceForOpen } from "../gates.mjs";
 import { renderProfile } from "../profile.mjs";
 import { loadPolicy, runPolicy } from "../policies/registry.mjs";
 import { profileFor } from "../route.mjs";
@@ -98,12 +99,18 @@ const USAGE = `orchestrate
   gate <key> open --question <text> [--now <iso>]
   gate <key> resolve [--answer <text>] [--now <iso>]
       Open: add the gate label and a note stating the question, and set the
-      worker to human-gate. Resolve: remove the label, note the decision, and
-      set the worker back to working. Idempotent notes.
+      worker to human-gate under a new gate occurrence (Gate-Id). Resolve:
+      remove the label, note the decision for that occurrence, and set the
+      worker back to working. A retry reuses the occurrence; notes are
+      idempotent per occurrence.
 
   state <key> --set working|review|human-gate|done|failed [--gate <text>]
         [--last <text>] [--next <text>] [--now <iso>]
       Update the claimed worker's state file lines, and nothing else in it.
+      --set human-gate also opens the gate's occurrence and posts its note,
+      as gate open does and under its refusals, without the label. Any other
+      --set while a gate with an occurrence is open closes that occurrence
+      with a note that records no decision.
 
   board ... [--comment-blocked <key>] [--comment-unblocked <key> --by <key>]
       Also post why a ticket waits, or that a completion unblocked it.
@@ -183,7 +190,7 @@ async function main(argv) {
       if (!isKey(positional[0])) return fail(2, `state needs a ticket key such as 53.2\n\n${USAGE}`);
       if (!flags.set) return fail(2, "state needs --set");
       return state({
-        root,
+        ...common,
         key: positional[0],
         set: flags.set,
         gate: flags.gate ?? null,
@@ -441,18 +448,11 @@ function gate({ root, store: storeOverride, gh, key, action, question: rawQuesti
   if (action === "open") {
     question = oneLine(question);
     if (question === "") return fail(2, "gate open needs a non-empty --question");
-    if (found.state === "human-gate" && found.gate && found.gate !== question) {
-      return fail(1, `${key} is already at a human gate: ${found.gate}. Resolve it before opening another.`);
-    }
-    if (found.state === "done" || found.state === "failed") {
-      return fail(1, `${key} is ${found.state}; a gate stops a worker that is working or in review, and this one is not`);
-    }
-    const updated = updateStateFile(worktree, { set: { State: "human-gate", Gate: question, Updated: now } });
-    if (!updated.ok) return fail(updated.usage ? 2 : 1, updated.message);
-    const label = setGateLabel({ store, ticket, present: true, gh });
-    if (!label.ok) return fail(1, label.message);
-    const posted = postNote({ root, store, ticket, note: gateOpenedNote({ key, question, now }), gh, worktree });
-    if (!posted.ok) return fail(1, posted.message);
+    const refused = openRefusal(key, found, question);
+    if (refused) return fail(1, refused);
+    const retry = `orchestrate gate ${key} open --question "<the same question>"`;
+    const opened = openGate({ store, gh, ticket, key, found, question, now, worktree, label: true, retry });
+    if (!opened.ok) return fail(opened.code, opened.message);
     process.stdout.write(`gate opened on ${key}: ${oneLine(question)}\n`);
     return 0;
   }
@@ -464,37 +464,127 @@ function gate({ root, store: storeOverride, gh, key, action, question: rawQuesti
     return fail(1, `${key} has no open human gate to resolve (state: ${found.state ?? "none"})`);
   }
   const recordedQuestion = found.gate;
+  // The occurrence recorded when the gate opened. A gate opened without one —
+  // by hand, or by an engine that predates occurrences — resolves without one.
+  const occurrence = isGateOccurrence(found.gateId) ? found.gateId : null;
   // Keep the local gate until both tracker writes succeed. If either fails,
-  // the recorded question lets the same command retry the idempotent writes.
+  // the recorded question and occurrence let the same command retry the
+  // idempotent writes.
   const label = setGateLabel({ store, ticket, present: false, gh });
   if (!label.ok) return fail(1, label.message);
-  const posted = postNote({ root, store, ticket, note: gateResolvedNote({ key, question: recordedQuestion, answer, now }), gh, worktree });
+  const posted = postNote({ root, store, ticket, note: gateResolvedNote({ key, question: recordedQuestion, answer, now, occurrence }), gh, worktree });
   if (!posted.ok) return fail(1, posted.message);
   {
     const set = { State: "working", Updated: now };
     if (answer) set.Last = `gate resolved: ${oneLine(answer)}`;
-    const updated = updateStateFile(worktree, { set, unset: ["Gate"] });
+    const updated = updateStateFile(worktree, { set, unset: ["Gate", GATE_ID_FIELD] });
     if (!updated.ok) return fail(updated.usage ? 2 : 1, updated.message);
   }
   process.stdout.write(`gate resolved on ${key}\n`);
   return 0;
 }
 
-function state({ root, key, set, gate: gateText, last, next, now }) {
+function state({ root, store: storeOverride, gh, key, set, gate: gateText, last, next, now }) {
   const found = claimFor(root, key);
   if (!found || found.orphan) return fail(1, `${key} has no registered claim whose state could be set`);
   const fields = { State: set, Updated: now };
   const unset = [];
   if (gateText && set !== "human-gate") return fail(2, "--gate is only for --set human-gate");
   if (gateText) fields.Gate = oneLine(gateText);
-  else if (set !== "human-gate") unset.push("Gate");
+  else if (set !== "human-gate") unset.push("Gate", GATE_ID_FIELD);
   if (last) fields.Last = last;
   if (next) fields.Next = next;
   if (set === "human-gate" && !gateText && !found.gate) return fail(2, "a human-gate state needs --gate <question>");
-  const updated = updateStateFile(join(root, ...found.worktree.split("/")), { set: fields, unset });
+  const worktree = join(root, ...found.worktree.split("/"));
+
+  if (set === "human-gate") {
+    // A gate opened this way is still a gate: it gets an occurrence and its
+    // opened note, exactly as `gate open` writes them, so no path opens a gate
+    // the store does not record.
+    const question = oneLine(gateText ?? found.gate);
+    if (question === "") return fail(2, "a human-gate state needs a non-empty --gate <question>");
+    const refused = openRefusal(key, found, question);
+    if (refused) return fail(1, refused);
+    const store = resolveStore(root, { override: storeOverride });
+    const read = readTickets(root, store, { gh });
+    if (!read.ok) return fail(1, read.message);
+    const ticket = read.tickets.find((entry) => entry.key === key);
+    if (!ticket) return fail(1, `no ticket ${key} in ${describeStore(store)}`);
+    // Retry by this same path: `gate open` would also add the label this path
+    // leaves alone.
+    const retry = `orchestrate state ${key} --set human-gate --gate "<the same question>"`;
+    const opened = openGate({ store, gh, ticket, key, found, question, now, worktree, label: false, extra: fields, retry });
+    if (!opened.ok) return fail(opened.code, opened.message);
+    process.stdout.write(`${key}: state ${set}\n`);
+    return 0;
+  }
+
+  // A change the state file would refuse writes nothing anywhere: checked
+  // before the closing note, so a refused change cannot close a gate it never
+  // left, and the human's later answer still reaches that occurrence.
+  const refusal = stateUpdateRefusal(worktree, { set: fields, unset });
+  if (refusal) return fail(refusal.usage ? 2 : 1, refusal.message);
+
+  // Leaving an open gate ends its occurrence, so the store records that end
+  // under the same occurrence before the state file forgets it. If the note
+  // fails, the gate stays open and the same command retries it. A gate with no
+  // occurrence (set by hand, or by an earlier engine) has none to close.
+  if (found.state === "human-gate" && found.gate && isGateOccurrence(found.gateId)) {
+    const store = resolveStore(root, { override: storeOverride });
+    const read = readTickets(root, store, { gh });
+    if (!read.ok) return fail(1, read.message);
+    const ticket = read.tickets.find((entry) => entry.key === key);
+    if (!ticket) return fail(1, `no ticket ${key} in ${describeStore(store)}`);
+    const note = gateClosedNote({ key, question: found.gate, state: set, now, occurrence: found.gateId });
+    const posted = postNote({ root, store, ticket, note, gh, worktree });
+    if (!posted.ok) {
+      return fail(1, `${key} is still at its gate: the note closing it failed: ${posted.message}. Retry with: orchestrate state ${key} --set ${set}`);
+    }
+  }
+
+  const updated = updateStateFile(worktree, { set: fields, unset });
   if (!updated.ok) return fail(updated.usage ? 2 : 1, updated.message);
   process.stdout.write(`${key}: state ${set}\n`);
   return 0;
+}
+
+/**
+ * Why `key` cannot open a gate on `question`, or null when it can. One rule for
+ * every path that opens a gate, so none can strand an occurrence: one gate at a
+ * time, and only on a worker that is still working or in review.
+ */
+function openRefusal(key, found, question) {
+  if (found.state === "human-gate" && found.gate && found.gate !== question) {
+    return `${key} is already at a human gate: ${found.gate}. Resolve it before opening another.`;
+  }
+  if (found.state === "done" || found.state === "failed") {
+    return `${key} is ${found.state}; a gate stops a worker that is working or in review, and this one is not`;
+  }
+  return null;
+}
+
+/**
+ * Open a gate on a claimed worker: its occurrence, recorded in the state file
+ * before anything reaches the store, then the label (when asked) and the
+ * opened note. A retry finds the occurrence already recorded and re-writes the
+ * same, idempotent marker. See `gates.mjs`.
+ *
+ * @returns {{ok: true, occurrence: string} | {ok: false, code: number, message: string}}
+ */
+function openGate({ store, gh, ticket, key, found, question, now, worktree, label, extra = {}, retry }) {
+  const { occurrence } = occurrenceForOpen({ claim: found, question });
+  const set = { ...extra, State: "human-gate", Gate: question, [GATE_ID_FIELD]: occurrence, Updated: now };
+  const updated = updateStateFile(worktree, { set });
+  if (!updated.ok) return { ok: false, code: updated.usage ? 2 : 1, message: updated.message };
+  if (label) {
+    const labelled = setGateLabel({ store, ticket, present: true, gh });
+    if (!labelled.ok) return { ok: false, code: 1, message: labelled.message };
+  }
+  const posted = postNote({ store, ticket, note: gateOpenedNote({ key, question, now, occurrence }), gh, worktree });
+  if (!posted.ok) {
+    return { ok: false, code: 1, message: `${key} is at its gate, but the opened note failed: ${posted.message}. Retry with: ${retry}` };
+  }
+  return { ok: true, occurrence };
 }
 
 function listOf(value) {

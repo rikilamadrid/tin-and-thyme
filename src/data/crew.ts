@@ -4,11 +4,18 @@
 // session up; the drawer and the roster always show the real workflow role and
 // the real ticket ID next to it. Shared by the server (which assigns a
 // character once per session, so it never changes) and the UI (which draws it).
+//
+// Feature 09 adds variant characters (CREW_VARIANTS below) so parallel sessions of one role
+// family never share a name. Their ids, families and the allocation rules live in
+// ./crewContract.ts (docs/crew-contract.md); this file holds only their names and jobs.
 
+import type { VariantCharacterId } from "./crewContract";
+
+/** The base characters, each with its own sprite in src/galley/robots.ts. */
 export type CharacterId = "basil" | "pepper" | "roux" | "ember" | "sprig" | "crumb" | "mochi" | "dash" | "pinch" | "unit";
 
-export interface Character {
-  id: CharacterId;
+export interface Character<I extends string = CharacterId> {
+  id: I;
   name: string;
   job: string;
   /** One-line silhouette description, for tooltips and the settings preview. */
@@ -28,6 +35,49 @@ export const CHARACTERS: Record<CharacterId, Character> = {
   unit: { id: "unit", name: "Crew bot", job: "Crew", look: "neutral box bot" },
 };
 
+/**
+ * Variant characters (Feature 09). Data only: 09.2 draws each from its `base` sprite with the
+ * named accessory and palette accent, so a variant reads as the same kind of bot, never a copy.
+ * Names are unique across CHARACTERS and CREW_VARIANTS (checked by scripts/crew-contract-test.ts).
+ */
+export interface VariantCharacter extends Character<VariantCharacterId> {
+  /** The base character whose silhouette the variant shares. */
+  base: CharacterId;
+  /** The distinguishing accessory, for the art and the settings preview. */
+  accessory: string;
+  /**
+   * Palette accent (PICO-8 colours, like the role colours). Unique among the variants that share a
+   * `base`, never the needs-you pinks, and never the plain unknown grey #c2c3c7 (checked by
+   * crewContractProblems).
+   */
+  accent: string;
+}
+
+export const CREW_VARIANTS: Record<VariantCharacterId, VariantCharacter> = {
+  // tester family (base Dash)
+  dot: { id: "dot", name: "Dot", job: "Checker", look: "hover drone · twin scanner eyes · antenna", base: "dash", accessory: "twin scanner eyes + antenna", accent: "#29adff" },
+  blip: { id: "blip", name: "Blip", job: "Plate Inspector", look: "hover drone · magnifier lens · clipboard", base: "dash", accessory: "magnifier lens + clipboard", accent: "#ffec27" },
+  zest: { id: "zest", name: "Zest", job: "Expo Runner", look: "hover drone · visor band · order spike", base: "dash", accessory: "visor band + order spike", accent: "#ffa300" },
+  // adversary family (base Pinch)
+  tang: { id: "tang", name: "Tang", job: "Food Critic", look: "low crab bot · monocle · notepad claw", base: "pinch", accessory: "monocle + notepad claw", accent: "#29adff" },
+  nib: { id: "nib", name: "Nib", job: "Spice Taster", look: "low crab bot · pepper-mill claw · tall eyestalks", base: "pinch", accessory: "pepper-mill claw + tall eyestalks", accent: "#00e436" },
+  brine: { id: "brine", name: "Brine", job: "Pickler", look: "low crab bot · jar shell · dropper", base: "pinch", accessory: "jar shell + dropper", accent: "#83769c" },
+  // helper family (base Crew bot)
+  whisk: { id: "whisk", name: "Whisk", job: "Runner", look: "neutral box bot · whisk antenna · wheels", base: "unit", accessory: "whisk antenna + wheels", accent: "#29adff" },
+  ladle: { id: "ladle", name: "Ladle", job: "Prep Hand", look: "neutral box bot · ladle arm · apron", base: "unit", accessory: "ladle arm + apron", accent: "#00e436" },
+  scoop: { id: "scoop", name: "Scoop", job: "Kitchen Porter", look: "neutral box bot · scoop hands · crate", base: "unit", accessory: "scoop hands + crate", accent: "#ffec27" },
+  tongs: { id: "tongs", name: "Tongs", job: "Fetcher", look: "neutral box bot · tong arms · satchel", base: "unit", accessory: "tong arms + satchel", accent: "#ffa300" },
+  // planner and integrator (one each: neither runs in parallel)
+  sage: { id: "sage", name: "Sage", job: "Menu Planner", look: "neutral box bot · menu board · pencil", base: "unit", accessory: "menu board + pencil", accent: "#83769c" },
+  clove: { id: "clove", name: "Clove", job: "Plating Lead", look: "neutral box bot · cloche · tweezers", base: "unit", accessory: "cloche + tweezers", accent: "#ab5236" },
+  // unknown roles
+  bolt: { id: "bolt", name: "Bolt", job: "Crew", look: "neutral box bot · question-mark panel", base: "unit", accessory: "question-mark panel", accent: "#ffccaa" },
+  cog: { id: "cog", name: "Cog", job: "Crew", look: "neutral box bot · gear badge", base: "unit", accessory: "gear badge", accent: "#fff1e8" },
+};
+
+/** Every crew character: the base ones and their variants. */
+export const CREW_CHARACTERS: Record<CharacterId | VariantCharacterId, Character<CharacterId | VariantCharacterId>> = { ...CHARACTERS, ...CREW_VARIANTS };
+
 /** Developer sessions take a cook in this order, so concurrent developers never share one. */
 export const COOKS: CharacterId[] = ["pepper", "roux", "ember", "sprig", "crumb", "mochi"];
 
@@ -45,6 +95,9 @@ export function characterForRole(role: string): CharacterId | "cook" {
  * Picks a character for a new session. `taken` holds the characters already in
  * the room this run; a cook is never reused while another is free, and a second
  * copy of a single-character role gets a number ("Dash 2").
+ *
+ * @deprecated Feature 09 replaces this with `allocateCharacter` in ./crewContract.ts (no numbered
+ * names, family pools, persistent crew). Kept until 09.3 moves the server and the galley over.
  */
 export function assignCharacter(role: string, taken: CharacterId[]): { id: CharacterId; name: string; job: string } {
   const want = characterForRole(role);
