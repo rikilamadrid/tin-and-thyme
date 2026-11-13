@@ -43,6 +43,7 @@ import { gateRevision, isGateOccurrence, readGateHistory, type GateHistory } fro
 import { subagentMeta, subagentPrompt, subagentReport, subagentTerminalRevision, subagentToolIds, transcriptRevision } from "./transcripts";
 import type { ActionAnswer, ActionRequest, DeliveryStage } from "../src/data/types";
 import { requestShelf } from "../src/data/requests";
+import { RoleContractObserver } from "./roleContracts";
 import { deliveryStageOf } from "../src/data/delivery";
 
 export const COORDINATOR_ID = "coordinator";
@@ -317,6 +318,7 @@ export class PathfinderRun {
   private integratedAtStart: Set<string> | null = null;
   private startedAt = Date.now();
   private coordinatorObservedRunning = false;
+  private roleContracts = new RoleContractObserver();
 
   constructor(
     private hub: Hub,
@@ -611,7 +613,7 @@ export class PathfinderRun {
   private addWorker(agentId: string, prompt: string, finished = false, unknown = false): Worker | null {
     const b = parseBrief(prompt);
     if (!b) return null;
-    const role = b.session === "adversary" ? "adversary" : b.role;
+    const role = b.role; // The recorded role is authoritative even when a stage has a different name.
     // One id per session, from its own subagent id: the same session keeps it across restarts and reconnects.
     const hqId = `w-${b.key.replace(".", "-")}-${b.session}-${agentId.replace(/[^a-z0-9]/gi, "").slice(0, 10) || ++this.seq}`;
     // The character is chosen once per session and kept in ~/.controlroom, so restarts give the same one.
@@ -885,8 +887,15 @@ export class PathfinderRun {
     };
     const lead = hub.cfg(COORDINATOR_ID);
     setUse(COORDINATOR_ID, this.transcript, false, { model: lead?.model || null, effort: null });
+    const setContract = (id: string, worktree: string | null, role: string, session: string | null, agentType: string | null, file: string | null) => {
+      const contract = this.roleContracts.observe(this.root, worktree, role, session, agentType, file);
+      if (JSON.stringify(contract) !== JSON.stringify(hub.status(id)?.roleContract ?? null)) hub.setStatus(id, { roleContract: contract });
+    };
+    setContract(COORDINATOR_ID, null, "orchestrator", null, "main Claude session", this.transcript);
     for (const w of this.workers.values()) {
       setUse(w.hqId, w.transcript, undefined, this.configuredFor(w));
+      const meta = w.transcript ? subagentMeta(w.transcript) : null;
+      setContract(w.hqId, w.worktree, w.role, w.session, meta?.agentType || null, w.transcript);
       // Only a running worker can use a fresh context: a finished session never alerts.
       this.checkContext(w.hqId, w.live ? (hub.status(w.hqId)?.context ?? null) : null, w.live);
       const fresh = this.handoffs.readiness(this.handoffWorker(w));

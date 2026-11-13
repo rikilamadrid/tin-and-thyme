@@ -9,6 +9,7 @@ import { usableAccent } from "../../galley/robots";
 import { Field, SectionTitle } from "../kit";
 import { CommitInput } from "./controls";
 import { RemoveAgentDialog } from "./RemoveAgentDialog";
+import { RoleContractPanel } from "../RoleContractPanel";
 
 export function CliSelect({ value, onChange }: { value: AgentCli; onChange: (v: AgentCli) => void }) {
   return (
@@ -25,6 +26,7 @@ export const ROLE_SUGGESTIONS = ["Developer", "QA", "Designer", "Docs", "DevOps"
 
 export function TeamSettings() {
   const team = useOffice((s) => s.snap?.config.team);
+  const pathfinder = useOffice((s) => s.snap?.workflow?.kind === "pathfinder");
   const [open, setOpen] = useState<string | null>(null);
   const [removing, setRemoving] = useState<AgentConfig | null>(null);
   if (!team) return null;
@@ -33,7 +35,7 @@ export function TeamSettings() {
       <section>
         <SectionTitle>Team · {team.length} agents</SectionTitle>
         <p className="mb-3 text-[14px] text-muted">
-          Changes to model, mode or folder apply the next time the agent starts. One lead plans and assigns work. Every other agent gets its own desk, sandbox and (optionally) environment. The office grows as you add agents.
+          {pathfinder ? "Pathfinder owns session roles and dispatch. Contracts come from the connected repository; loading is shown only when session evidence supports it." : "Changes to model, mode or folder apply the next time the agent starts. One lead plans and assigns work. Every other agent gets its own desk, sandbox and (optionally) environment. The office grows as you add agents."}
         </p>
         <div className="flex flex-col gap-2">
           {team.map((a) => (
@@ -41,13 +43,15 @@ export function TeamSettings() {
           ))}
         </div>
       </section>
-      <AddAgent />
+      {!pathfinder && <AddAgent />}
       {removing && <RemoveAgentDialog agent={removing} onClose={() => setRemoving(null)} />}
     </div>
   );
 }
 
 function AgentRow({ agent, expanded, onToggle, onRemove }: { agent: AgentConfig; expanded: boolean; onToggle: () => void; onRemove: () => void }) {
+  const contract = useOffice((s) => s.snap?.agents.find((status) => status.agentId === agent.id)?.roleContract);
+  const pathfinder = useOffice((s) => s.snap?.workflow?.kind === "pathfinder");
   // The same robot as the galley, the roster and the drawer: matched by this agent's id, never by role.
   const character = useOffice((st) => (st.snap ? crewIdentity(st.snap, agent).character : "unit"));
   const set = (patch: Parameters<typeof officeActions.updateAgent>[1]) => officeActions.updateAgent(agent.id, patch);
@@ -57,6 +61,12 @@ function AgentRow({ agent, expanded, onToggle, onRemove }: { agent: AgentConfig;
     : agentColor(agent)
       ? "Shows on the robot's accent, its name tag and its roster card."
       : "This colour can't be shown (the alert pinks are kept for needs-you), so the robot keeps its own accent. Pick another to change it.";
+  if (pathfinder) return (
+    <div className="border-[3px] border-line bg-card p-3">
+      <div className="mb-2 flex items-center gap-3"><RobotPortrait character={character} size={40} /><b>{agent.name} · {agent.crew?.role ?? agent.role}</b></div>
+      <RoleContractPanel contract={contract} />
+    </div>
+  );
   return (
     <div className="border-[3px] border-line bg-card">
       <div className="grid grid-cols-[40px_1fr_1fr_150px_130px_auto] items-end gap-2.5 p-2.5">

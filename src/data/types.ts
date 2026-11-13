@@ -148,6 +148,8 @@ export interface SessionInfo {
 }
 
 export interface AgentStatus {
+  /** Read-only Pathfinder role source and this session's observed load evidence. */
+  roleContract?: import("./roleContract").RoleContract;
   agentId: string;
   state: AgentState;
   currentTaskId: string | null;
