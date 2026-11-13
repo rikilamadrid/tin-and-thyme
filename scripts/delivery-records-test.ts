@@ -23,12 +23,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createElement } from "react";
 import { renderToString } from "react-dom/server";
-import { gateOf, isReadyToDeliver, recordsSettled, type DeliveryBoard, type DeliveryClient, type DeliveryReply, type DeliveryView } from "../src/data/delivery";
+import { DELIVERY_OPS, gateOf, isReadyToDeliver, RECORDS_TRACK_OPS, recordsSettled, type DeliveryBoard, type DeliveryClient, type DeliveryReply, type DeliveryView } from "../src/data/delivery";
 import type { OfficeEvent } from "../src/data/source";
 import { DeliveryPanel } from "../src/ui/delivery/DeliveryPanel";
 import { run } from "../server/lib/exec";
 import type { Runner } from "../server/delivery/forge";
 import { handbackText } from "../server/delivery/handback";
+import { ownHandler } from "../server/http";
+import { attachDelivery, PREVIEW_COMMANDS_NONE } from "../server/delivery/preview";
 import {
   checkRecordsHead,
   historyEntry,
@@ -213,6 +215,12 @@ function pureRules() {
     ["a branch from the browser", "prepareRecords", { key: "10.1", branch: "ticket/10.1-records" }],
   ] as const)
     check(`wire refuses ${label}`, !parseRequest({ rpc: "delivery", id: "w", op, params }).ok);
+
+  // Delivery, the records operations included, is reached only as the `delivery` request: no operation is a plain command, in the kitchen's preview either.
+  const attached = attachDelivery({ hub: { snap: {}, emit: () => {} }, root: tmp, github: "owner/project", kitchenKey: "preview-records" });
+  eq("the preview's only request handler is delivery", Object.keys(attached.rpc), ["delivery"]);
+  for (const op of DELIVERY_OPS) check(`no plain command named ${op}`, ownHandler(PREVIEW_COMMANDS_NONE, op) === undefined && ownHandler(attached.rpc, op) === undefined);
+  check("the records track has no prepareRecords, handback or plan", !RECORDS_TRACK_OPS.includes("prepareRecords") && !RECORDS_TRACK_OPS.includes("handback") && !RECORDS_TRACK_OPS.includes("plan"));
 
   // The handback says who writes the records, and when.
   const text = handbackText("10.1", 7, "b".repeat(40));
