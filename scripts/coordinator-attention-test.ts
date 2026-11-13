@@ -12,7 +12,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const tmp = realpathSync(mkdtempSync(join(tmpdir(), "tt-attention-")));
+// The real path, spelled as git spells it (macOS /var is /private/var; a Windows short name is expanded).
+const tmp = realpathSync.native(mkdtempSync(join(tmpdir(), "tt-attention-")));
 // Every ~/.controlroom write lands here.
 Object.assign(process.env, { HOME: tmp, USERPROFILE: tmp });
 
@@ -795,7 +796,10 @@ w.run.deliveryOf = () => null;
 // projects with real claims. The engine writes the state files and the gate notes; the kitchen only reads them.
 
 const ENGINE_BIN = join(dirname(fileURLToPath(import.meta.url)), "..", "skills", "orchestrate", "engine", "bin", "orchestrate.mjs");
-const GIT_ENV = { ...process.env, GIT_AUTHOR_NAME: "test", GIT_AUTHOR_EMAIL: "test@example.invalid", GIT_COMMITTER_NAME: "test", GIT_COMMITTER_EMAIL: "test@example.invalid", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
+// Git with no configuration but this: an empty global file (the same on every OS), and a fixed identity.
+const EMPTY_GITCONFIG = join(tmp, "empty.gitconfig");
+writeFileSync(EMPTY_GITCONFIG, "");
+const GIT_ENV = { ...process.env, GIT_AUTHOR_NAME: "test", GIT_AUTHOR_EMAIL: "test@example.invalid", GIT_COMMITTER_NAME: "test", GIT_COMMITTER_EMAIL: "test@example.invalid", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: EMPTY_GITCONFIG };
 type EngineRepo = { root: string; coord: string; engine: string; real: true };
 
 const engineRun = (repo: EngineRepo, ...args: string[]) => spawnSync(process.execPath, [ENGINE_BIN, ...args, "--root", repo.root], { cwd: repo.root, env: GIT_ENV, encoding: "utf8" });
@@ -840,8 +844,9 @@ const record = (repo: EngineRepo, key: string) => [readFileSync(statePath(repo, 
 /** A worker sets its gate by hand, as its brief says: `State: human-gate` and `Gate: <question>`, and no Gate-Id. */
 function handGate(repo: EngineRepo, key: string, question: string) {
   const text = readFileSync(statePath(repo, key), "utf8");
-  if (!/^- State: working$/m.test(text)) throw new Error(`${key} isn't working: ${text}`);
-  writeFileSync(statePath(repo, key), text.replace(/^- State: working$/m, `- State: human-gate\n- Gate: ${question}`));
+  const line = /^- State: working(\r?)$/m.exec(text);
+  if (!line) throw new Error(`${key} isn't working: ${text}`);
+  writeFileSync(statePath(repo, key), text.replace(line[0], `- State: human-gate${line[1]}\n- Gate: ${question}${line[1]}`));
 }
 /** A kitchen on an engine project. Only the refreshes a test asks for run, so each step reads the record once, in order. */
 function kitchen(repo: EngineRepo, slug: string, saved?: unknown): World {
