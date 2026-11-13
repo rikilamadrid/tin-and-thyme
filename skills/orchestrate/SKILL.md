@@ -96,6 +96,7 @@ engine/brief.mjs             the worker brief and each harness's translation
 engine/plan.mjs              the dispatch plan: claim now, wait, blocked, stale
 engine/comments.mjs          every note the orchestrator writes, one spelling each
 engine/tracker.mjs           notes and the gate label, idempotent by marker
+engine/gates.mjs             gate occurrences: Gate-Id, and parsing gate markers
 engine/statefile.mjs         updates to a worker's state file lines
 ```
 

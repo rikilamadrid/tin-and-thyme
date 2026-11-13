@@ -88,3 +88,4 @@ not whenever its turn ends while background workers it dispatched are still runn
   - Fix: match briefs by agent id or prompt, never FIFO. Drop a brief when its worker is added through
     either path. Never give a brief to a helper.
   - The live kitchen keeps the wrong in-memory roster until it restarts into a build with the fix.
+- Stacked-branch exception (human, 2026-11-12): 06.2 builds on the independently reviewed 06.1 commit before 06.1 merges. It is recorded in 06.2's Notes, and no completion state is falsified.
