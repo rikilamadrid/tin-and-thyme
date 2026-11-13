@@ -6,6 +6,9 @@ import type { Inbox } from "./inbox";
 
 interface HookPayload {
   prompt?: string;
+  session_id?: string;
+  source?: string;
+  last_assistant_message?: string;
   tool_name?: string;
   message?: string;
   notification_type?: string;
@@ -30,7 +33,7 @@ export function handleHook(hub: Hub, inbox: Inbox, agentId: string, event: strin
   const st = hub.status(agentId);
   const name = hub.name(agentId);
   if (!st) return { ok: false };
-  inbox.noteHook(agentId, event, body.prompt);
+  inbox.noteHook(agentId, event, body.prompt, body);
 
   switch (event) {
     case "SessionStart":
@@ -83,7 +86,7 @@ export function handleHook(hub: Hub, inbox: Inbox, agentId: string, event: strin
       turnOpen.set(agentId, false);
       hub.setStatus(agentId, { state: "idle", note: "Finished — ready for the next instruction" });
       hub.activity("agent.answered", agentId, `${name} finished a turn`);
-      inbox.finishTurn(agentId);
+      inbox.finishTurn(agentId, body.last_assistant_message, body.session_id);
       break;
     }
     case "SessionEnd":

@@ -126,6 +126,7 @@ export interface OfficeDataSource {
   ackContextAlert?(agentId: string): void;
   /** Ask an idle agent to write a short summary of its work. */
   summariseAgent?(agentId: string): void;
+  freshContext?(agentId: string): void;
   /** Checkpoint this worker and ask Pathfinder for a fresh session. */
   checkpointFresh?(agentId: string): void;
   /** Retry a failed handoff without creating a second worker. */

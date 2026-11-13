@@ -8,6 +8,7 @@ import { DrawerHeader } from "./Drawer";
 import { PortBanner, PortsRow } from "./Ports";
 import { TerminalView } from "./TerminalView";
 import { AgentSummary } from "./AgentSummary";
+import { AgentFreshContext } from "./AgentFreshContext";
 
 
 export function AgentDrawer({ id, initialTab }: { id: string; initialTab?: AgentTab }) {
@@ -52,6 +53,7 @@ export function AgentDrawer({ id, initialTab }: { id: string; initialTab?: Agent
       <CrewHeader id={id} />
       <SessionBar agent={agent} status={status} />
       <AgentSummary agent={agent} status={status} connected={connected} onRequest={() => officeActions.summariseAgent(id)} />
+      <AgentFreshContext agent={agent} status={status} connected={connected} onRequest={() => officeActions.freshContext(id)} />
       {access ? (
         <AccessCard request={access} agent={agent} />
       ) : (
