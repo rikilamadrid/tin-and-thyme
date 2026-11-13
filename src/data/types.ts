@@ -429,6 +429,21 @@ export interface OfficeSnapshot {
   workflow?: WorkflowInfo;
   /** In-app delivery (Feature 10): restored from here on every (re)connect. */
   delivery?: DeliveryBoard;
+  /** Set only by a preview server (docs/delivery-bootstrap.md): the reviewed build it serves. */
+  preview?: PreviewInfo;
+}
+
+/** A preview's build identity: delivery only, no agent sessions. */
+export interface PreviewInfo {
+  /** The commit the build was made from (40 hex). */
+  sha: string;
+  /** That commit's tree (40 hex). */
+  tree: string;
+  /** ISO time the build finished. */
+  builtAt: string;
+  /** The repository it serves: its folder name and kitchen key. */
+  repo: string;
+  repoKey: string;
 }
 
 export interface WorkflowInfo {

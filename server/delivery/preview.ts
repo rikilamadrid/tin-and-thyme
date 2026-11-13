@@ -1,6 +1,6 @@
 // The seam between in-app delivery and 10.4's preview server
-// (server/preview/server.ts, not in this branch). When the reviewed stack is
-// combined, the preview attaches delivery with these few lines, and nothing else:
+// (server/preview/server.ts). Combined in ticket 10.5, the preview attaches
+// delivery with these few lines, and nothing else:
 //
 //   import { attachDelivery, PREVIEW_COMMANDS_NONE } from "../delivery/preview";
 //   export const PREVIEW_COMMANDS = PREVIEW_COMMANDS_NONE;          // stays empty
@@ -9,7 +9,7 @@
 //   delivery.start();                       // after startHttp
 //   … in quit(): delivery.stop();
 //
-// and with three follow-ups from 10.4's review:
+// and with three follow-ups from 10.4's review (applied in 10.5):
 // - L3: the build-identity git calls (server/preview/identity.ts) run with
 //   PREVIEW_GIT_ENV, so a check never refreshes the index or prompts;
 // - L3 docs: docs/delivery-bootstrap.md no longer says the preview "writes
