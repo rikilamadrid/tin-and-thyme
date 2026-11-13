@@ -4,6 +4,7 @@ import { RobotPortrait } from "../../galley/RobotPortrait";
 import { officeActions, useOffice } from "../../store/office";
 import { ContextGauge, StatusBadge, TicketBadge } from "../hud/CrewPanel";
 import { effortLabel, modelLabel } from "../hud/telemetry";
+import { RoleContractPanel } from "../RoleContractPanel";
 
 /** The Pass: who this session is in the galley, next to the real workflow facts. */
 export function CrewHeader({ id }: { id: string }) {
@@ -68,6 +69,7 @@ export function CrewHeader({ id }: { id: string }) {
           </div>
         ))}
       </dl>
+      {snap?.workflow?.kind === "pathfinder" && <div className="mt-3"><RoleContractPanel contract={snap.agents.find((status) => status.agentId === id)?.roleContract} /></div>}
       {c.session && <FreshPanel id={id} ticket={c.ticket} />}
     </div>
   );
