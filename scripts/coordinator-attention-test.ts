@@ -587,6 +587,59 @@ for (const mode of ["start", "transcript", "hook", "both"] as const) {
   eq(`R6 ${mode}: a repeated completed hook cannot show working`, w.hub.status(workers(w).get(id)!.hqId)?.state, "idle");
 }
 
+// Review 7: a complete resumed turn may be polled before its delayed hook, or receive no hooks.
+for (const ending of ["handback", "end-turn"] as const) for (const order of ["poll-first", "hook-first", "no-hooks"] as const) {
+  const label = `R7 ${ending}/${order}`;
+  const w = boot(makeRepo(`repo-r7-${ending}-${order}`), `tt-r7-${ending}-${order}`);
+  (w.run as unknown as { queueRefresh(ms: number): void }).queueRefresh = () => {};
+  const id = "resumed-review";
+  coordinatorTurn(w, true);
+  stopTurn(w);
+  writeSub(w, id, { prompt: brief("06.1", "review", "tester"), report: "PASS: previous review", toolUseId: "old-launch", finished: true });
+  await refresh(w);
+  const file = join(subDir(w), `agent-${id}.jsonl`);
+  const oldEnd = JSON.stringify(workers(w).get(id)?.ended);
+  // Appended bookkeeping changes bytes, but contains no new turn or terminal evidence.
+  appendFileSync(file, JSON.stringify({ type: "progress", data: "bookkeeping" }) + "\n");
+  await refresh(w);
+  eq(`${label}: bookkeeping preserves old history`, [workers(w).get(id)?.live, JSON.stringify(workers(w).get(id)?.ended)], [false, oldEnd]);
+  appendFileSync(file, JSON.stringify({ type: "user", message: { role: "user", content: "Review the new repair" } }) + "\n");
+  appendFileSync(file, JSON.stringify({ type: "assistant", message: ending === "handback"
+    ? { content: [{ type: "tool_use", name: "SubagentHandback", id: "new-report", input: { message: "FINDINGS: current regression" } }] }
+    : { stop_reason: "end_turn", content: [{ type: "text", text: "FINDINGS: current regression" }] } }) + "\n");
+  const reportHook = () => hook(w, "PostToolUse", { agent_id: id, tool_name: "SubagentHandback", tool_use_id: "new-report", tool_response: {} });
+  if (order === "hook-first") reportHook();
+  await refresh(w);
+  const expected = [false, "FINDINGS", "current regression", "idle", []];
+  const snapshot = () => [workers(w).get(id)?.live, workers(w).get(id)?.ended?.verdict, workers(w).get(id)?.ended?.result, w.hub.status(workers(w).get(id)!.hqId)?.state, w.run.liveKeys()];
+  eq(`${label}: first poll keeps the current terminal outcome`, snapshot(), expected);
+  // end_turn has no report tool hook; a delayed prior tool hook is modelled only for actual tool reports.
+  if (order === "poll-first" && ending === "handback") reportHook();
+  await refresh(w);
+  await refresh(w);
+  eq(`${label}: delayed hook and repeated polls cannot revive completion`, snapshot(), expected);
+  check(`${label}: coordinator is not waiting for the finished worker`, coordinator(w).state !== "waiting");
+  const currentEnd = JSON.stringify(workers(w).get(id)?.ended);
+  appendFileSync(file, JSON.stringify({ type: "progress", data: "later bookkeeping" }) + "\n");
+  utimesSync(file, new Date(), new Date(Date.now() + 5000));
+  await refresh(w);
+  eq(`${label}: unrelated bytes and timestamp preserve current history`, JSON.stringify(workers(w).get(id)?.ended), currentEnd);
+  if (ending === "handback") {
+    hook(w, "PreToolUse", { agent_id: id, tool_name: "SubagentHandback", tool_use_id: "new-report", tool_input: {} });
+    reportHook();
+  }
+  subStop(w, id, "FINDINGS: current regression");
+  await refresh(w);
+  eq(`${label}: delayed stop and replay preserve the settled history`, [snapshot(), JSON.stringify(workers(w).get(id)?.ended)], [expected, currentEnd]);
+  // Repeated identical text in a genuinely new turn is still new terminal evidence (no unique UUID needed).
+  appendFileSync(file, JSON.stringify({ type: "user", message: { content: "Review again" } }) + "\n");
+  appendFileSync(file, JSON.stringify({ type: "assistant", message: { stop_reason: "end_turn", content: [{ type: "text", text: "FINDINGS: current regression" }] } }) + "\n");
+  await refresh(w);
+  eq(`${label}: another completed turn preserves its own verdict`, snapshot(), expected);
+  check(`${label}: repeated report text settles the new turn`, JSON.stringify(workers(w).get(id)?.ended) !== currentEnd);
+  w.run.stop();
+}
+
 // ================================================================ Action items: truthful, answerable, exactly once
 
 {

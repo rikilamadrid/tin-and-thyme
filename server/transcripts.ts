@@ -6,7 +6,7 @@
 // Tin & Thyme reads them so a restart rebuilds the same roster, and so the
 // roster can show real context usage. Nothing here writes.
 
-import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -16,17 +16,21 @@ export function transcriptDir(cwd: string): string {
   return join(homedir(), ".claude", "projects", cwd.replace(/[^a-zA-Z0-9]/g, "-"));
 }
 
-function tail(file: string, bytes: number): string {
+function tailSnapshot(file: string, bytes: number): { text: string; end: number } {
   const fd = openSync(file, "r");
   try {
-    const size = statSync(file).size;
+    const size = fstatSync(fd).size;
     const len = Math.min(size, bytes);
     const buf = Buffer.alloc(len);
     readSync(fd, buf, 0, len, size - len);
-    return buf.toString("utf8");
+    return { text: buf.toString("utf8"), end: size };
   } finally {
     closeSync(fd);
   }
+}
+
+function tail(file: string, bytes: number): string {
+  return tailSnapshot(file, bytes).text;
 }
 
 function head(file: string, bytes: number): string {
@@ -169,23 +173,38 @@ export interface SubagentRecord {
   /** A changed file is evidence of activity only after this kitchen has observed an earlier version. */
   revision: string;
   transcriptEnded: boolean;
+  terminalRevision: string | null;
+}
+
+/** Identity of the latest terminal record, stable across appended bookkeeping and file timestamp changes.
+ * Its byte position distinguishes identical reports in separate turns, even without transcript UUIDs.
+ */
+export function subagentTerminalRevision(file: string): string | null {
+  try {
+    const snapshot = tailSnapshot(file, 512 * 1024);
+    let end = snapshot.end;
+    for (const line of snapshot.text.split("\n").reverse()) {
+      const recordEnd = end;
+      end -= Buffer.byteLength(line) + 1;
+      let r: Record<string, any>;
+      try { r = JSON.parse(line); } catch { continue; }
+      if (r.type === "api-request") return null;
+      if (r.type === "user") {
+        const c = r.message?.content;
+        if (typeof c === "string" || (Array.isArray(c) && c.some((p: any) => p.type !== "tool_result"))) return null;
+      }
+      if (r.type !== "assistant") continue;
+      const ended = r.message?.stop_reason === "end_turn" || r.isApiErrorMessage === true ||
+        (Array.isArray(r.message?.content) && r.message.content.some((p: any) => p.type === "tool_use" && p.name === "SubagentHandback"));
+      return ended ? `${recordEnd}:${createHash("sha256").update(line).digest("hex")}` : null;
+    }
+  } catch { /* unreadable evidence cannot establish an ending */ }
+  return null;
 }
 
 /** Explicit completion in the latest turn, even when no Stop hook or finished metadata was written. */
 export function subagentEnded(file: string): boolean {
-  try {
-    for (const r of lines(tail(file, 512 * 1024)).reverse()) {
-      if (r.type === "api-request") return false;
-      if (r.type === "user") {
-        const c = r.message?.content;
-        if (typeof c === "string" || (Array.isArray(c) && c.some((p: any) => p.type !== "tool_result"))) return false;
-      }
-      if (r.type !== "assistant") continue;
-      return r.message?.stop_reason === "end_turn" || r.isApiErrorMessage === true ||
-        (Array.isArray(r.message?.content) && r.message.content.some((p: any) => p.type === "tool_use" && p.name === "SubagentHandback"));
-    }
-  } catch { /* unreadable evidence cannot establish an ending */ }
-  return false;
+  return subagentTerminalRevision(file) !== null;
 }
 
 /** What Claude Code records next to a subagent's transcript (`agent-<id>.meta.json`); null until it exists. */
@@ -276,11 +295,12 @@ export function subagents(sessionFile: string): SubagentRecord[] {
     const file = join(dir, f);
     // No meta yet: still starting.
     const meta = subagentMeta(file);
+    const terminalRevision = subagentTerminalRevision(file);
     out.push({
       agentId, file, prompt: firstPrompt(file), finished: meta?.finished ?? false, startedAt: firstTimestamp(file),
       description: meta?.description ?? "", agentType: meta?.agentType ?? "", toolUseId: meta?.toolUseId ?? null, parentAgentId: meta?.parentAgentId ?? null,
       metaUpdatedAt: meta ? mtime(join(dir, `agent-${agentId}.meta.json`)) : 0,
-      revision: transcriptRevision(file), transcriptEnded: subagentEnded(file),
+      revision: transcriptRevision(file), transcriptEnded: terminalRevision !== null, terminalRevision,
     });
   }
   return out.sort((a, b) => a.startedAt.localeCompare(b.startedAt));

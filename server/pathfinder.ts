@@ -40,7 +40,7 @@ import { log } from "./lib/log";
 import { Attribution, readReport, type Evidence, type Identity } from "./attribution";
 import { coordinatorAttention, gateOwner, sameQuestion, sessionEnding, ticketView, type GateCandidate } from "./workflowState";
 import { gateRevision, isGateOccurrence, readGateHistory, type GateHistory } from "./gateRecord";
-import { subagentMeta, subagentPrompt, subagentReport, subagentToolIds, transcriptRevision } from "./transcripts";
+import { subagentMeta, subagentPrompt, subagentReport, subagentTerminalRevision, subagentToolIds, transcriptRevision } from "./transcripts";
 import type { ActionAnswer, ActionRequest, DeliveryStage } from "../src/data/types";
 import { requestShelf } from "../src/data/requests";
 
@@ -85,6 +85,8 @@ interface Worker {
   livenessUnknown?: boolean;
   transcriptRevision?: string;
   resumeRevision?: string;
+  /** Last settled terminal evidence, independent of subsequent bookkeeping bytes. */
+  terminalRevision?: string | null;
   seenToolIds: Set<string>;
   tools: number;
   character: CharacterId;
@@ -618,7 +620,7 @@ export class PathfinderRun {
     const transcript = this.subagentTranscript(agentId);
     const ended = finished ? this.restoredEnding(agentId, b.key, b.session, transcript) : null;
     const w: Worker = { agentId, hqId, key: b.key, session: b.session, role, worktree: b.worktree, live: !finished && !unknown, livenessUnknown: unknown && !finished, tools: 0, character: c.id, transcript, ended, gateSeen: null,
-      transcriptRevision: transcript ? transcriptRevision(transcript) : "", seenToolIds: transcript ? subagentToolIds(transcript) : new Set() };
+      transcriptRevision: transcript ? transcriptRevision(transcript) : "", terminalRevision: finished && transcript ? subagentTerminalRevision(transcript) : null, seenToolIds: transcript ? subagentToolIds(transcript) : new Set() };
     this.workers.set(agentId, w);
     const cfg = newAgent(hqId, c.name, role, ROLE_COLOR[role] ?? "#c2c3c7", false);
     cfg.mode = "local";
@@ -761,6 +763,7 @@ export class PathfinderRun {
     const ended = this.settleAs(w.agentId, w.key, ending, w.session, this.reportedIn(w, ending));
     if (w.transcript) {
       w.transcriptRevision = transcriptRevision(w.transcript);
+      w.terminalRevision = subagentTerminalRevision(w.transcript);
       for (const id of subagentToolIds(w.transcript)) w.seenToolIds.add(id);
     }
     w.gateSeen = null;
@@ -839,7 +842,11 @@ export class PathfinderRun {
         if (!known.live && advanced && !rec.transcriptEnded && coordAlive) this.resumeWorker(known);
         const finishedNow = (rec.finished && !(known.resumedAt && rec.metaUpdatedAt < known.resumedAt + 1000)) ||
           (rec.transcriptEnded && rec.revision !== known.resumeRevision);
-        if ((known.live || known.livenessUnknown) && finishedNow) this.endWorker(known, `Session ended after ${known.tools} tool calls (transcript)`);
+        // A whole resumed turn may finish between polls, with neither start nor stop delivered. Settle its
+        // own new terminal record now, consuming its tool IDs before delayed report hooks can revive it.
+        // File advancement alone is insufficient: bookkeeping must not rewrite historical outcomes.
+        const newEnding = advanced && rec.terminalRevision !== null && rec.terminalRevision !== known.terminalRevision;
+        if (((known.live || known.livenessUnknown) && finishedNow) || (!known.live && newEnding)) this.endWorker(known, `Session ended after ${known.tools} tool calls (transcript)`);
         known.transcriptRevision = rec.revision;
       }
       const all: WorkflowHelper[] = recs
