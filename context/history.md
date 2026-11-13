@@ -4,6 +4,13 @@ Compact record of completed work.
 
 ## Completed
 
+### 2026-11-13 — Feature 03: Agent Context Tools
+
+- Outcome: Agent-written summaries with Copy and a guarded handoff → clear → orientation flow for idle interactive agents; Pathfinder workflow workers keep their existing checkpoint flow. Human accepted delivery with the native-verification limitations below.
+- Verification: Independent reviews and automated checks passed for 03.1 (`cc0f577`) and 03.2 (`a6ce346`); 03.2 passed 16 fresh-context scenarios, 11 summary regressions, five independent probes, typecheck and developer build. Merged-tree equality verified. GitHub CI did not run.
+- Commit/PR: PR #23 (`91a4686`) and PR #25 (`ad29f29`).
+- Follow-up: Native Claude handoff → clear → READY was blocked by account limits and remains unverified. Codex /new compatibility, native hook/Stop timing, agent-authored status accuracy, and actual summary clipboard paste remain unverified. Automated guards require a fresh saved handoff before reset and stop visibly on unconfirmed clearing; they do not establish native compatibility or rollback a reset already performed. Live kitchen activation remains separate.
+
 ### 2026-11-13 — Feature 01: Kitchen Polish
 
 - Outcome: Taller kitchen with more station spacing; saved native-agent colours update robot accents, tags, roster chips and portraits together.
