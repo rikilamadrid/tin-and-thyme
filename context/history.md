@@ -4,6 +4,13 @@ Compact record of completed work.
 
 ## Completed
 
+### 2026-11-13 — Feature 07: Pathfinder Role Wiring
+
+- Outcome: Read-only resolved role/source/contract and evidence of actual receipt in Pathfinder Settings and crew details; existing canonical skill-based loading and native-team editing preserved. Its only ticket, 07.1, is Complete.
+- Verification: Independent implementation and final-head PASS; 19 role scenarios, 432 attention checks, 11 summary scenarios, 10 independent negative probes, typecheck/build. Actual isolated Claude Code 2.1.323 coordinator/developer/fresh-tester sessions received full roles AND required skills/actions (10 paired reads); all three reported their own markers and Settings matched observed sessions. Final-parser replay covers the later duplicate-ID guard. GitHub CI did not run.
+- Commit/PR: PR #29 (`7bab5ba`); merged tree equals reviewed `bee374e`. Verbatim [implementation review](reviews/07.1-review-d95ad57.md) and [final-head addendum](reviews/07.1-final-head-bee374e.md).
+- Follow-up: Missing-source UI was observed; fresh missing-role/fallback launches and native named-definition enforcement remain unverified. Historical receipt is bounded by the observer's first 8 MiB/conservative reads and does not prove retention or universal compliance. Separate 06.1 Medium bare-PASS outcome parsing remains unresolved, with a bounded repair decision pending. Claude handoff → clear → READY, Codex `/new`, clipboard and live kitchen behavior remain unverified; existing saved-handoff/unconfirmed-reset guards remain required. This does not complete representative parallel-worker/gate/persistent-crew preview acceptance. No live activation or credential changes.
+
 ### 2026-11-13 — Feature 10: In-App Ticket Delivery
 
 - Outcome: Exact-head delivery approval, merge verification, labelled preview, safe local-main reconciliation, idempotent coordinator handback, constrained completion-records PRs and refreshed board/dispatch state. All five Feature 10 tickets are Complete.
