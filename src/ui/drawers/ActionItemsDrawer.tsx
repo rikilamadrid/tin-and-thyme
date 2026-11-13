@@ -5,6 +5,7 @@ import { officeActions, selectAttention, useOffice } from "../../store/office";
 import { ui } from "../../store/ui";
 import { ago, Dot, SectionTitle, useNow } from "../kit";
 import { DrawerHeader } from "./Drawer";
+import { ReadyToDeliverList } from "../delivery/DeliveryEntries";
 
 /** Everything waiting on the user: agents' action items first, then the other things that need them. */
 export function ActionItemsDrawer() {
@@ -60,6 +61,8 @@ export function ActionItemsDrawer() {
             </ul>
           </>
         )}
+
+        <ReadyToDeliverList />
 
         {others > 0 && (
           <>

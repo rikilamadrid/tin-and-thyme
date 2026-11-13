@@ -9,6 +9,7 @@ import { EnvironmentDrawer } from "./EnvironmentDrawer";
 import { PrDrawer } from "./PrDrawer";
 import { ActionItemsDrawer } from "./ActionItemsDrawer";
 import { TerminalDrawer } from "./TerminalDrawer";
+import { DeliveryDrawer } from "./DeliveryDrawer";
 
 export function DrawerHeader({ children }: { children: ReactNode }) {
   return (
@@ -99,7 +100,7 @@ export function DrawerHost() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [drawer, docked]);
-  const key = drawer ? (drawer.kind === "agent" ? `agent:${drawer.id}` : drawer.kind === "env" ? `env:${drawer.name}` : drawer.kind) : null;
+  const key = drawer ? (drawer.kind === "agent" ? `agent:${drawer.id}` : drawer.kind === "env" ? `env:${drawer.name}` : drawer.kind === "delivery" ? `delivery:${drawer.key}` : drawer.kind) : null;
 
   // The task board needs room for its columns: it opens as a large centered modal, not a side drawer.
   if (drawer?.kind === "boards")
@@ -146,6 +147,7 @@ export function DrawerHost() {
           {drawer.kind === "actions" && <ActionItemsDrawer />}
           {drawer.kind === "env" && <EnvironmentDrawer name={drawer.name} />}
           {drawer.kind === "terminal" && <TerminalDrawer />}
+          {drawer.kind === "delivery" && <DeliveryDrawer deliveryKey={drawer.key} />}
         </motion.aside>
       )}
     </AnimatePresence>

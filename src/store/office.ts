@@ -132,6 +132,12 @@ function reduce(snap: OfficeSnapshot, e: OfficeEvent): OfficeSnapshot {
       return { ...snap, mcp: e.mcp };
     case "access.updated":
       return { ...snap, accessRequests: upsert(snap.accessRequests ?? [], e.request, (r) => r.id === e.request.id) };
+    case "delivery.updated": {
+      const board = snap.delivery ?? { available: true, reason: null, byKey: {} };
+      return { ...snap, delivery: { ...board, byKey: { ...board.byKey, [e.view.key]: e.view } } };
+    }
+    case "delivery.reply":
+      return snap;
   }
 }
 

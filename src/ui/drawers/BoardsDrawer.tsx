@@ -4,6 +4,7 @@ import type { BoardStatus, Task, TaskStatus } from "../../data/types";
 import { officeActions, useOffice } from "../../store/office";
 import { ui, useUi } from "../../store/ui";
 import { Dot } from "../kit";
+import { DeliverButton } from "../delivery/DeliveryEntries";
 import { DrawerHeader } from "./Drawer";
 
 const COLUMNS: { id: TaskStatus; label: string; color: string }[] = [
@@ -119,6 +120,7 @@ function TaskCard({ task }: { task: Task }) {
           <span className="text-muted">Unassigned</span>
         )}
       </div>
+      <DeliverButton taskId={task.id} />
       {blockedBy.length > 0 && task.status === "todo" && <div className="text-[12px] text-[#ff7a9c]">Waits on {blockedBy.join(", ")}</div>}
       {task.status === "todo" && (
         <select

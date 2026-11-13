@@ -1,7 +1,9 @@
 // The real data source: a WebSocket to the local HQ server.
-// Server → browser: OfficeEvent JSON. Browser → server: { cmd, args }.
+// Server → browser: OfficeEvent JSON. Browser → server: { cmd, args }, and delivery
+// requests { rpc: "delivery", id, op, params } answered by a `delivery.reply` (deliveryClient.ts).
 
 import type { OfficeDataSource, OfficeEvent } from "../source";
+import { createDeliveryClient } from "./deliveryClient";
 
 export function createWsSource(token: string): OfficeDataSource {
   let ws: WebSocket | null = null;
@@ -12,8 +14,17 @@ export function createWsSource(token: string): OfficeDataSource {
     if (ws?.readyState === WebSocket.OPEN) ws.send(msg);
     else if (queue.length < 200) queue.push(msg);
   };
+  // Delivery requests are never queued: sent now, or refused.
+  const delivery = createDeliveryClient({
+    send: (frame) => {
+      if (ws?.readyState !== WebSocket.OPEN) return false;
+      ws.send(frame);
+      return true;
+    },
+  });
 
   const source: OfficeDataSource = {
+    delivery,
     connect(onEvent, onStatus) {
       // Each connect() owns its socket and retry loop, so a stale one can't reconnect.
       let active = true;
@@ -39,13 +50,18 @@ export function createWsSource(token: string): OfficeDataSource {
         sock.onmessage = (m) => {
           if (!active) return;
           try {
-            onEvent(JSON.parse(String(m.data)) as OfficeEvent);
+            const e = JSON.parse(String(m.data)) as OfficeEvent;
+            if (e.type === "delivery.reply") return delivery.onReply(e.id, e.reply);
+            onEvent(e);
           } catch {
             /* ignore malformed frames */
           }
         };
         sock.onclose = () => {
-          if (ws === sock) ws = null;
+          if (ws === sock) {
+            ws = null;
+            delivery.connectionLost();
+          }
           if (!active) return;
           // Never opened, several times in a row: the token was rejected (HQ restarted).
           onStatus?.(!opened && retry > 2 ? "unauthorized" : "reconnecting");

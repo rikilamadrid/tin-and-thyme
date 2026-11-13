@@ -1,3 +1,4 @@
+import type { DeliveryBoard } from "./delivery";
 import type { CharacterId } from "./crew";
 import type { StackConfig } from "./stack";
 // Domain types shared by the data source, the store, the office and the HUD.
@@ -441,6 +442,23 @@ export interface OfficeSnapshot {
   actionItems?: ActionItem[];
   /** Set when a workflow adapter owns the roster and the board. */
   workflow?: WorkflowInfo;
+  /** In-app delivery (Feature 10): restored from here on every (re)connect. */
+  delivery?: DeliveryBoard;
+  /** Set only by a preview server (docs/delivery-bootstrap.md): the reviewed build it serves. */
+  preview?: PreviewInfo;
+}
+
+/** A preview's build identity: delivery only, no agent sessions. */
+export interface PreviewInfo {
+  /** The commit the build was made from (40 hex). */
+  sha: string;
+  /** That commit's tree (40 hex). */
+  tree: string;
+  /** ISO time the build finished. */
+  builtAt: string;
+  /** The repository it serves: its folder name and kitchen key. */
+  repo: string;
+  repoKey: string;
 }
 
 export interface WorkflowInfo {

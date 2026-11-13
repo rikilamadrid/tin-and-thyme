@@ -1,3 +1,4 @@
+import type { DeliveryClient, DeliveryReply, DeliveryView } from "./delivery";
 import type { StackConfig } from "./stack";
 import type {
   AccessDecision,
@@ -48,7 +49,11 @@ export type OfficeEvent =
   | { type: "access.updated"; request: AccessRequest }
   | { type: "mcp.updated"; mcp: McpState }
   | { type: "action.updated"; item: ActionItem }
-  | { type: "workflow.updated"; workflow: WorkflowInfo };
+  | { type: "workflow.updated"; workflow: WorkflowInfo }
+  /** One ticket's delivery state changed (broadcast after every delivery operation). */
+  | { type: "delivery.updated"; view: DeliveryView }
+  /** The answer to one delivery request, sent to the requesting socket only. */
+  | { type: "delivery.reply"; id: string | null; reply: DeliveryReply };
 
 export type SimSpeed = 1 | 2 | 4;
 
@@ -151,4 +156,6 @@ export interface OfficeDataSource {
   completeWelcome(input: WelcomeInput): void;
 
   dev?: DevControls;
+  /** In-app delivery requests (real kitchen only; the mock and fixtures have none). */
+  delivery?: DeliveryClient;
 }

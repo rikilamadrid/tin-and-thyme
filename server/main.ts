@@ -4,6 +4,10 @@
 //
 // Users start it through `tin-and-thyme open` (bin/tin-and-thyme.mjs), which picks the port, passes
 // --kitchen and reuses a running kitchen. --dev: the UI is served by Vite (pnpm dev:hq).
+//
+//   node dist-server/main.mjs --preview --port <n> --reviewed <sha> [--repo <path>] [--no-open]
+//
+// serves a reviewed build beside the running kitchen, delivery only (server/preview/server.ts).
 
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -27,7 +31,10 @@ import { Sessions } from "./sessions";
 import { runSetupChecks } from "./setup";
 import { loadConfig, loadPlan } from "./store";
 import { COORDINATOR_ID, detectPathfinder, PathfinderRun } from "./pathfinder";
+import { attachDelivery } from "./delivery/preview";
+import { unavailableBoard, unavailableRpc } from "./delivery/service";
 import { adoptLegacyState, APP, canonicalRoot, claimStateDir, clearRecord, kitchenKey, writeRecord } from "./kitchen";
+import { runPreview } from "./preview/server";
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -36,6 +43,11 @@ function arg(name: string): string | undefined {
 const flag = (name: string) => process.argv.includes(`--${name}`);
 
 async function main() {
+  // A preview of a reviewed build: delivery only, beside the running kitchen (docs/delivery-bootstrap.md).
+  if (flag("preview")) {
+    const entry = fileURLToPath(import.meta.url);
+    return runPreview({ buildRoot: dirname(dirname(entry)), entry, port: arg("port"), repo: arg("repo"), reviewed: arg("reviewed"), open: !flag("no-open") });
+  }
   ensurePtyHelperExecutable();
   const dev = flag("dev");
   const port = Number(arg("port") ?? process.env.HQ_PORT ?? 7420);
@@ -125,6 +137,12 @@ async function main() {
     pfRun.start();
   }
 
+  // In-app delivery (Feature 10): Pathfinder projects with a GitHub origin. Its state is kept in
+  // ~/.controlroom/<kitchen>/deliveries/, and it runs only on a request from this kitchen's browser page.
+  const delivery = pf ? attachDelivery({ hub, root: repo.root, github: repo.github, kitchenKey: slug }) : null;
+  const noDelivery = "Delivery works in Pathfinder projects only.";
+  if (!delivery) hub.snap.delivery = unavailableBoard(noDelivery);
+
   const root = dirname(dirname(fileURLToPath(import.meta.url)));
   const distDir = join(root, "dist");
   const uiPort = Number(process.env.HQ_UI_PORT ?? 5173);
@@ -141,11 +159,13 @@ async function main() {
     distDir: dev ? null : distDir,
     allowedOrigins: [uiOrigin, `http://127.0.0.1:${uiPort}`, `http://localhost:${port}`, `http://127.0.0.1:${port}`],
     commands,
+    rpc: delivery?.rpc ?? { delivery: unavailableRpc(noDelivery) },
     hookRouter: pfRun ? { agentId: COORDINATOR_ID, handle: (e, b) => pfRun!.onHook(e, b) } : undefined,
     health: pf ? { app: APP, key: slug, instance } : undefined,
   });
   sessions.startPolling();
   sbx.startApprovalPolling();
+  delivery?.start();
   const github = new GitHubSync(hub, planner, pf ? null : repo.github);
   if (!pf) github.start();
 
@@ -165,6 +185,7 @@ async function main() {
     log.info(sessions.backend.persistent ? "stopping HQ — agent sessions keep running in tmux" : "stopping HQ and its agents — sandboxes and folders are kept");
     sessions.shutdown();
     sbx.stopApprovalPolling();
+    delivery?.stop();
     github.stop();
     if (kitchen) clearRecord(slug, instance);
     process.exit(0);
