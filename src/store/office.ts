@@ -214,6 +214,7 @@ export const officeActions = {
   resolveActionItem: (id: string, decision: "done" | "dismissed", note?: string, revision?: string) => source.resolveActionItem(id, decision, note, revision),
   setContextAlert: (pct: number) => source.setContextAlert?.(pct),
   ackContextAlert: (id: string) => source.ackContextAlert?.(id),
+  summariseAgent: (id: string) => source.summariseAgent?.(id),
   checkpointFresh: (id: string) => source.checkpointFresh?.(id),
   retryHandoff: (key: string) => source.retryHandoff?.(key),
   refreshMcp: () => source.refreshMcp(),

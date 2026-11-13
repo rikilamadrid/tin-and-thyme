@@ -4,6 +4,13 @@ Compact record of completed work.
 
 ## Completed
 
+### 2026-11-13 — Feature 01: Kitchen Polish
+
+- Outcome: Taller kitchen with more station spacing; saved native-agent colours update robot accents, tags, roster chips and portraits together.
+- Verification: Independent PASS for 01.1 (`61cd56e`) and 01.2 (`458ea27`); local typecheck/build and relevant checks passed on integration candidates, with merged-tree equality verified. GitHub reported no CI checks. 01.2 persistence was exercised in a fresh process; no complete live server restart was tested.
+- Commit/PR: PR #8 (`7e5a02f`) and PR #20 (`a393e23`).
+- Follow-up: Pathfinder character colour overrides still require the existing product decision. Activation of the merged build is separate; :7420 was not restarted.
+
 ### 2026-11-13 — Feature 05: Run Policy Repair
 
 - Outcome: `A configurable run policy (command guardrails, not a security boundary) for orchestration sessions, set with "tin-and-thyme policy"; local-only stays the default and github-dev is not activated. The project overview and the Feature 08 credential-separation record are in the repository.`

@@ -3,6 +3,7 @@
 // agent's Stop hook when its turn ends (Claude Code then continues with it).
 
 import type { Hub } from "./hub";
+import { randomUUID } from "node:crypto";
 import { log } from "./lib/log";
 
 export interface InboxItem {
@@ -25,6 +26,7 @@ export class Inbox {
   private lastHook = new Map<string, number>();
   private lastSubmit = new Map<string, number>();
   private typing = new Set<string>();
+  private requests = new Map<string, { marker: string; submitted: boolean; finish(error?: Error): void }>();
   private timer: NodeJS.Timeout;
 
   constructor(private hub: Hub, private keys: Keyboard) {
@@ -36,6 +38,40 @@ export class Inbox {
 
   stop() {
     clearInterval(this.timer);
+    for (const request of this.requests.values()) request.finish(new Error("The server stopped before the request finished."));
+  }
+
+  /** A single marked prompt, acknowledged by UserPromptSubmit then Stop. Never retries. */
+  requestTurn(agentId: string, prompt: (marker: string) => string, timeoutMs = 120_000): Promise<string> {
+    if (!this.canType(agentId) || this.pending(agentId))
+      return Promise.reject(new Error("The agent's prompt is not ready or has queued messages. Wait until it is idle and try again."));
+    const marker = `tt-request-${randomUUID()}`;
+    this.typing.add(agentId); // ordinary inbox delivery must not share this prompt
+    return new Promise<string>((resolve, reject) => {
+      const finish = (error?: Error) => {
+        if (this.requests.get(agentId)?.marker !== marker) return;
+        clearTimeout(timer);
+        this.requests.delete(agentId);
+        this.typing.delete(agentId);
+        if (error) reject(error);
+        else resolve(marker);
+      };
+      const timer = setTimeout(() => finish(new Error("Timed out waiting for the agent to finish. No second prompt was sent.")), timeoutMs);
+      this.requests.set(agentId, { marker, submitted: false, finish });
+      // Do not await typing: even a stuck terminal operation must respect the timeout.
+      Promise.resolve().then(() => this.requests.get(agentId)?.marker === marker
+        ? this.keys.type(agentId, `[${marker}] ${prompt(marker)}`.replace(/\s*\n\s*/g, " "))
+        : true).then(
+        (ok) => { if (!ok) finish(new Error("Could not submit the prompt. No second prompt was sent.")); },
+        () => finish(new Error("Could not submit the prompt. No second prompt was sent.")),
+      );
+    });
+  }
+
+  /** Called only for an actual Stop; notifications and screen polling cannot complete a request. */
+  finishTurn(agentId: string) {
+    const request = this.requests.get(agentId);
+    if (request?.submitted) request.finish();
   }
 
   push(agentId: string, item: InboxItem) {
@@ -55,11 +91,17 @@ export class Inbox {
   }
 
   /** Every hook event goes through here (before the state change it causes). */
-  noteHook(agentId: string, event: string) {
+  noteHook(agentId: string, event: string, prompt?: string) {
     this.lastHook.set(agentId, Date.now());
     if (event === "SessionStart") this.sessionUp.add(agentId);
     if (event === "SessionEnd") this.sessionUp.delete(agentId);
     if (event === "UserPromptSubmit") this.lastSubmit.set(agentId, Date.now());
+    const request = this.requests.get(agentId);
+    if (request && event === "UserPromptSubmit") {
+      if (prompt?.startsWith(`[${request.marker}]`)) request.submitted = true;
+      else request.finish(new Error("Another prompt replaced the marked request. Nothing was resent."));
+    }
+    if (event === "SessionStart" || event === "SessionEnd") request?.finish(new Error("The agent's session changed before the request finished."));
     if (event === "Stop" || event === "SessionStart" || event === "Notification") setTimeout(() => void this.tryType(agentId), QUIET_MS + 100);
   }
 
@@ -71,15 +113,18 @@ export class Inbox {
   /** The session stopped or restarted: Claude Code's prompt is gone until the next SessionStart. */
   sessionDown(agentId: string) {
     this.sessionUp.delete(agentId);
+    this.requests.get(agentId)?.finish(new Error("The agent stopped before the request finished."));
   }
 
   forget(agentId: string) {
     this.queues.delete(agentId);
-    this.sessionUp.delete(agentId);
+    this.sessionDown(agentId);
   }
 
   /** Called from the Stop hook: everything queued, as the reason Claude continues with. */
   takeForStop(agentId: string): string | null {
+    // Let the marked turn stop before delivering new messages in a separate turn.
+    if (this.requests.has(agentId)) return null;
     const q = this.queues.get(agentId);
     if (!q?.length) return null;
     this.queues.set(agentId, []);

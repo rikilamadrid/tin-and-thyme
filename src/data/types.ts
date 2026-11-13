@@ -154,6 +154,8 @@ export interface AgentStatus {
   stateSince: string; // ISO time
   note: string | null; // e.g. "Asking: max PDF size 10 MB or 20 MB?"
   session: SessionInfo;
+  /** The last agent-written summary, retained while a new request runs or fails. */
+  summary?: { state: "requesting" | "ready" | "error"; text?: string; at?: string; error?: string };
   /** Context window use read from the session's own transcript; absent/null when unavailable. */
   context?: { used: number; limit: number } | null;
   /**
