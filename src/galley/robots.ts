@@ -8,7 +8,7 @@
 // themselves are never edited.
 
 import { CREW_VARIANTS, type CharacterId } from "../data/crew";
-import type { CrewCharacterId, VariantCharacterId } from "../data/crewContract";
+import { RESERVED_ACCENTS, type CrewCharacterId, type VariantCharacterId } from "../data/crewContract";
 import { INK, shade, type Backend } from "./backend";
 
 export const C = {
@@ -261,6 +261,58 @@ const VARIANTS: Record<VariantCharacterId, RobotDef> = {
 /** Every crew character's sprite: the base designs and the variants. */
 export const ROBOTS: Record<CrewCharacterId, RobotDef> = { ...BASE, ...VARIANTS };
 
+// ---------------------------------------------------------------- Agent colour (Feature 01)
+
+/**
+ * The one accent part of each base design that takes an agent's colour: the base parts and details
+ * it is made of (by index), every one of them `colour` in the approved design. Nothing else in a
+ * design is ever recoloured. The variants are not listed: each keeps the accent it was designed
+ * with (CREW_VARIANTS).
+ */
+export const ACCENT_PARTS: Record<CharacterId, { name: string; colour: string; parts?: number[]; details?: number[] }> = {
+  basil: { name: "toque band", colour: C.steel, details: [3] },
+  pepper: { name: "headband and its knot", colour: C.red, details: [0, 1, 2] },
+  roux: { name: "pot band", colour: "#2f5a9e", details: [6] },
+  ember: { name: "oven mitt", colour: C.orange, parts: [2] },
+  sprig: { name: "dome collar", colour: C.steel, details: [4] },
+  crumb: { name: "apron", colour: "#f7c6d4", details: [5] },
+  mochi: { name: "cap and its brim", colour: C.yellow, parts: [5], details: [0] },
+  dash: { name: "running lights", colour: C.teal, details: [5, 6] },
+  pinch: { name: "belly band", colour: "#b8452f", details: [7] },
+  unit: { name: "chest panel", colour: "#6f7c94", details: [5] },
+};
+
+/**
+ * A colour that may be drawn as an accent, lower-cased, or null: it must be `#rrggbb` and never a
+ * needs-you pink (RESERVED_ACCENTS, which holds the scene's ALERT). Null means "the design's own".
+ */
+export function usableAccent(colour: string | null | undefined): string | null {
+  const c = colour?.trim().toLowerCase() ?? "";
+  return /^#[0-9a-f]{6}$/.test(c) && !RESERVED_ACCENTS.includes(c) ? c : null;
+}
+
+const recoloured = new Map<string, RobotDef>();
+
+/** The def to draw: the design, or (base characters only) the design with its accent part in `accent`. */
+function defFor(id: CrewCharacterId, accent: string | null | undefined): RobotDef {
+  const design = ROBOTS[id];
+  const colour = Object.hasOwn(ACCENT_PARTS, id) ? usableAccent(accent) : null;
+  if (!colour) return design;
+  const slot = ACCENT_PARTS[id as CharacterId];
+  if (colour === slot.colour) return design;
+  const key = `${id} ${colour}`;
+  let def = recoloured.get(key);
+  if (!def) {
+    def = {
+      ...design,
+      parts: design.parts.map((p, i): Part => (slot.parts?.includes(i) ? [p[0], p[1], p[2], p[3], p[4], colour, p[6]] : p)),
+      details: design.details.map((d, i): Detail => (slot.details?.includes(i) ? [d[0], d[1], d[2], d[3], colour] : d)),
+    };
+    recoloured.set(key, def);
+  }
+  return def;
+}
+
 function part(B: Backend, p: Part, x: number, y: number, o: { ink?: boolean; inkOnly?: boolean; shade?: boolean; hi?: boolean }) {
   const [k, px, py, w, h, c, po = {}] = p;
   if (k === "b") B.box(x + px, y + py, w, h, c, { r: po.r ?? 0, ...o });
@@ -286,11 +338,16 @@ function celFlair(B: Backend, id: CrewCharacterId, x: number, y: number) {
 export interface RobotOpts {
   /** Draw a soft floor shadow (cel). */
   shadow?: boolean;
+  /**
+   * The agent's colour for the design's one accent part (ACCENT_PARTS). Left out, unusable or
+   * reserved (usableAccent), the robot is drawn exactly as designed; a variant always is.
+   */
+  accent?: string | null;
 }
 
 /** Draws a robot with its top-left at (x, y). */
 export function drawRobot(B: Backend, id: CrewCharacterId, x: number, y: number, o: RobotOpts = {}) {
-  const R0 = ROBOTS[id];
+  const R0 = defFor(id, o.accent);
   const cel = B.kind === "cel";
   const draw = () => {
     if (!cel) R0.parts.forEach((p) => part(B, p, x, y, { ink: true, inkOnly: true }));
