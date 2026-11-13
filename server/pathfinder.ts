@@ -965,6 +965,8 @@ export class PathfinderRun {
     const toolId = toolActivity && typeof body.tool_use_id === "string" ? body.tool_use_id : null;
     const freshTool = !!toolId && !w.seenToolIds.has(toolId);
     if (toolId) w.seenToolIds.add(toolId);
+    // A replay cannot change an ended turn's status, tool count or gate evidence either.
+    if (!w.live && !w.livenessUnknown && toolActivity && !freshTool) return { ok: true };
     if (!w.live && (event === "SubagentStart" || freshTool || (w.livenessUnknown && toolActivity))) this.resumeWorker(w);
     // A hook event from the session itself shows it is running now: note which gate occurrence is open on its ticket.
     if (event !== "SubagentStop") w.gateSeen = this.openOccurrence(w.key);

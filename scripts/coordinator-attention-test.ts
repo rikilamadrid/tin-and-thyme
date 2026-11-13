@@ -85,7 +85,7 @@ function boot(repo: { root: string; coord: string; engine: string; real?: boolea
   hub.setSession(COORDINATOR_ID, { state: "running" });
   const typed: string[] = [];
   const link = { up: true, delayMs: 0 };
-  const inbox = { noteHook() {}, takeForStop: () => null } as never;
+  const inbox = { noteHook() {}, finishTurn() {}, takeForStop: () => null } as never;
   const sessions = {
     typeInto: async (_id: string, text: string) => {
       if (link.delayMs) await new Promise((r) => setTimeout(r, link.delayMs));
@@ -549,9 +549,11 @@ for (const mode of ["start", "transcript", "hook", "both"] as const) {
   utimesSync(file, new Date(), new Date(Date.now() + 5000));
   await refresh(w);
   eq(`R6 ${mode}: timestamp-only change keeps history ended`, [workers(w).get(id)?.live, JSON.stringify(workers(w).get(id)?.ended)], [false, oldEnd]);
+  hook(w, "PreToolUse", { agent_id: id, tool_name: "SubagentHandback", tool_use_id: "toolu_x", tool_input: {} });
   hook(w, "PostToolUse", { agent_id: id, tool_name: "SubagentHandback", tool_use_id: "toolu_x", tool_response: {} });
   await refresh(w);
   eq(`R6 ${mode}: old tool-hook replay does not revive history`, [workers(w).get(id)?.live, JSON.stringify(workers(w).get(id)?.ended)], [false, oldEnd]);
+  eq(`R6 ${mode}: replayed hooks leave the old status idle`, w.hub.status(workers(w).get(id)!.hqId)?.state, "idle");
   if (mode === "start") subStart(w, id);
   if (mode !== "hook") {
     appendFileSync(file, JSON.stringify({ type: "user", message: { role: "user", content: "Review the new repair" } }) + "\n");
@@ -578,9 +580,11 @@ for (const mode of ["start", "transcript", "hook", "both"] as const) {
   await refresh(w);
   eq(`R6 ${mode}: a new report already on disk is preserved`, [workers(w).get(id)?.live, workers(w).get(id)?.ended?.verdict, workers(w).get(id)?.ended?.result], [false, "PASS", "current review verified"]);
   const currentEnd = JSON.stringify(workers(w).get(id)?.ended);
+  hook(w, "PreToolUse", { agent_id: id, tool_name: "SubagentHandback", tool_use_id: "current-report", tool_input: {} });
   hook(w, "PostToolUse", { agent_id: id, tool_name: "SubagentHandback", tool_use_id: "current-report", tool_response: {} });
   await refresh(w);
   eq(`R6 ${mode}: repeating the completed turn's hook preserves its history`, [workers(w).get(id)?.live, JSON.stringify(workers(w).get(id)?.ended)], [false, currentEnd]);
+  eq(`R6 ${mode}: a repeated completed hook cannot show working`, w.hub.status(workers(w).get(id)!.hqId)?.state, "idle");
 }
 
 // ================================================================ Action items: truthful, answerable, exactly once
