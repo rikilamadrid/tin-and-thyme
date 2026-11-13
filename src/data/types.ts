@@ -153,6 +153,13 @@ export interface AgentStatus {
   session: SessionInfo;
   /** The last agent-written summary, retained while a new request runs or fails. */
   summary?: { state: "requesting" | "ready" | "error"; text?: string; at?: string; error?: string };
+  /** Three-step context refresh for interactive agents; workflow workers use fresh/handoffs. */
+  contextRefresh?: {
+    state: "running" | "ready" | "error";
+    steps: Record<"handoff" | "clear" | "orient", { state: "pending" | "running" | "ok" | "failed"; detail?: string }>;
+    error?: string;
+    at?: string;
+  };
   /** Context window use read from the session's own transcript; absent/null when unavailable. */
   context?: { used: number; limit: number } | null;
   /**
