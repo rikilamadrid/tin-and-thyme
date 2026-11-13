@@ -535,6 +535,54 @@ w.run.deliveryOf = () => null;
   check("R5: restart never waits on old worker artifacts", coordinator(restarted).state !== "waiting");
 }
 
+// Review 6: resumed turns must not reuse a prior PASS, and fresh evidence recovers a missed start.
+for (const mode of ["start", "transcript", "hook", "both"] as const) {
+  const w = boot(makeRepo(`repo-r6-${mode}`), `tt-r6-${mode}`);
+  const id = `r6-${mode}`;
+  const file = join(subDir(w), `agent-${id}.jsonl`);
+  coordinatorTurn(w, true);
+  stopTurn(w);
+  writeSub(w, id, { prompt: brief("06.1", "review", "tester"), report: "PASS: old review", toolUseId: "old-launch", finished: true });
+  await refresh(w);
+  eq(`R6 ${mode}: prior turn keeps its real PASS`, [workers(w).get(id)?.live, workers(w).get(id)?.ended?.result], [false, "old review"]);
+  const oldEnd = JSON.stringify(workers(w).get(id)?.ended);
+  utimesSync(file, new Date(), new Date(Date.now() + 5000));
+  await refresh(w);
+  eq(`R6 ${mode}: timestamp-only change keeps history ended`, [workers(w).get(id)?.live, JSON.stringify(workers(w).get(id)?.ended)], [false, oldEnd]);
+  hook(w, "PostToolUse", { agent_id: id, tool_name: "SubagentHandback", tool_use_id: "toolu_x", tool_response: {} });
+  await refresh(w);
+  eq(`R6 ${mode}: old tool-hook replay does not revive history`, [workers(w).get(id)?.live, JSON.stringify(workers(w).get(id)?.ended)], [false, oldEnd]);
+  if (mode === "start") subStart(w, id);
+  if (mode !== "hook") {
+    appendFileSync(file, JSON.stringify({ type: "user", message: { role: "user", content: "Review the new repair" } }) + "\n");
+    appendFileSync(file, JSON.stringify({ type: "assistant", message: { role: "assistant", stop_reason: "tool_use", content: [{ type: "tool_use", name: "Bash", id: "new-tool", input: { command: "pnpm typecheck" } }] } }) + "\n");
+  }
+  if (mode === "start" || mode === "both" || mode === "hook") {
+    hook(w, "PostToolUse", { agent_id: id, tool_name: "Bash", tool_use_id: "new-tool", tool_response: {} });
+  }
+  await refresh(w);
+  eq(`R6 ${mode}: fresh activity recovers only this worker with no prior outcome`, [crewTicket(w, id), workers(w).get(id)?.live, workers(w).get(id)?.ended, w.run.liveKeys(), coordinator(w).state], [{ ticket: "06.1", session: "review" }, true, null, ["06.1"], "waiting"]);
+  if (mode === "hook") {
+    // The start and the new user prompt were both missed; a new tool call still starts current work.
+    appendFileSync(file, JSON.stringify({ type: "assistant", message: { role: "assistant", stop_reason: "tool_use", content: [{ type: "tool_use", name: "Bash", id: "new-tool", input: {} }] } }) + "\n");
+    await refresh(w);
+  }
+  w.hub.setSession(COORDINATOR_ID, { state: "stopped" });
+  await refresh(w);
+  eq(`R6 ${mode}: progressed resume interrupted without inheriting PASS`, [workers(w).get(id)?.live, workers(w).get(id)?.ended?.outcome, workers(w).get(id)?.ended?.verdict ?? null, workers(w).get(id)?.ended?.result], [false, "interrupted", null, null]);
+  // A current report may reach disk before its own hook. Recovery must not treat it as the old turn.
+  w.hub.setSession(COORDINATOR_ID, { state: "running" });
+  appendFileSync(file, JSON.stringify({ type: "user", message: { role: "user", content: "Finish the current review" } }) + "\n");
+  appendFileSync(file, JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", name: "SubagentHandback", id: "current-report", input: { message: "PASS: current review verified" } }] } }) + "\n");
+  hook(w, "PostToolUse", { agent_id: id, tool_name: "SubagentHandback", tool_use_id: "current-report", tool_response: {} });
+  await refresh(w);
+  eq(`R6 ${mode}: a new report already on disk is preserved`, [workers(w).get(id)?.live, workers(w).get(id)?.ended?.verdict, workers(w).get(id)?.ended?.result], [false, "PASS", "current review verified"]);
+  const currentEnd = JSON.stringify(workers(w).get(id)?.ended);
+  hook(w, "PostToolUse", { agent_id: id, tool_name: "SubagentHandback", tool_use_id: "current-report", tool_response: {} });
+  await refresh(w);
+  eq(`R6 ${mode}: repeating the completed turn's hook preserves its history`, [workers(w).get(id)?.live, JSON.stringify(workers(w).get(id)?.ended)], [false, currentEnd]);
+}
+
 // ================================================================ Action items: truthful, answerable, exactly once
 
 {

@@ -221,8 +221,8 @@ export function subagentPrompt(transcript: string): string | null {
 }
 
 /**
- * The report a subagent finished with, from its own transcript: its last SubagentHandback message, else the
- * text of its last assistant message. Null when there is none (or the transcript can't be read).
+ * The report in the latest model response of the current turn. A new prompt, model request or tool-only
+ * response cannot borrow a report from an earlier response (including an earlier turn of a resumed session).
  */
 export function subagentReport(transcript: string): string | null {
   if (!existsSync(transcript)) return null;
@@ -234,14 +234,31 @@ export function subagentReport(transcript: string): string | null {
   }
   for (let i = recs.length - 1; i >= 0; i--) {
     const r = recs[i];
+    if (r.type === "api-request") return null;
+    if (r.type === "user") {
+      const c = r.message?.content;
+      if (typeof c === "string" || (Array.isArray(c) && c.some((p: any) => p.type !== "tool_result"))) return null;
+    }
     if (r.type !== "assistant" || !Array.isArray(r.message?.content)) continue;
     for (const p of r.message.content) {
       if (p?.type === "tool_use" && p.name === "SubagentHandback" && typeof p.input?.message === "string") return p.input.message;
     }
     const text = r.message.content.filter((p: any) => p?.type === "text" && typeof p.text === "string").map((p: any) => p.text).join("\n").trim();
-    if (text) return text;
+    return text || null;
   }
   return null;
+}
+
+/** Tool identifiers already in a session's history, used to reject late/replayed hooks as resume evidence. */
+export function subagentToolIds(transcript: string): Set<string> {
+  const ids = new Set<string>();
+  try {
+    for (const r of lines(readFileSync(transcript, "utf8"))) {
+      if (r.type !== "assistant" || !Array.isArray(r.message?.content)) continue;
+      for (const p of r.message.content) if (p?.type === "tool_use" && typeof p.id === "string") ids.add(p.id);
+    }
+  } catch { /* no recorded tools yet */ }
+  return ids;
 }
 
 /** Background subagents of one session, oldest first. */
