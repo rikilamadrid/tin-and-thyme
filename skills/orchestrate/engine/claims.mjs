@@ -31,7 +31,7 @@ export const CLAIM_STATES = Object.freeze(["working", "review", "human-gate", "d
 /**
  * @returns {Claim[]}
  * @typedef {{key: string, worktree: string|null, branch: string|null,
- *            orphan: boolean, state: string|null, gate: string|null,
+ *            orphan: boolean, state: string|null, gate: string|null, gateId?: string|null,
  *            updated: string|null, next: string|null, last: string|null,
  *            worker: string|null, stateFile: boolean}} Claim
  */
@@ -56,6 +56,7 @@ export function readClaims(root) {
       worker: state.worker ?? key,
       state: state.state,
       gate: state.gate,
+      gateId: state.gateId,
       updated: state.updated,
       next: state.next,
       last: state.last,
@@ -133,6 +134,7 @@ export function readStateFile(path) {
     worker: null,
     state: null,
     gate: null,
+    gateId: null,
     updated: null,
     next: null,
     last: null,
@@ -169,6 +171,9 @@ export function readStateFile(path) {
     worker: field("Worker"),
     state: state && CLAIM_STATES.includes(state) ? state : state ? `invalid:${state}` : null,
     gate: field("Gate"),
+    // The open gate's occurrence (`gates.mjs`). Absent for a gate opened by
+    // hand or by an engine that predates occurrences.
+    gateId: field("Gate-Id"),
     updated: field("Updated"),
     next: field("Next"),
     last: field("Last"),

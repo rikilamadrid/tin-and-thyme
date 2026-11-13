@@ -62,12 +62,21 @@ export function claimedNote({ key, worker, branch, worktree, now, profile }) {
   };
 }
 
+/**
+ * The facts a gate marker names: its ticket, its question's digest, and — for
+ * a gate opened with one — its occurrence (see `gates.mjs`). A gate with no
+ * occurrence keeps the three-fact marker an earlier engine wrote.
+ */
+function gateFacts(key, question, occurrence) {
+  return [key, digest(normaliseQuestion(question)), ...(occurrence ? [occurrence] : [])];
+}
+
 /** A worker stopped for a human decision. */
-export function gateOpenedNote({ key, question, now }) {
+export function gateOpenedNote({ key, question, now, occurrence = null }) {
   return {
-    marker: marker("gate-opened", key, digest(normaliseQuestion(question))),
+    marker: marker("gate-opened", ...gateFacts(key, question, occurrence)),
     body: [
-      marker("gate-opened", key, digest(normaliseQuestion(question))),
+      marker("gate-opened", ...gateFacts(key, question, occurrence)),
       `**Human gate opened** on ${day(now)}. Worker \`${key}\` has stopped and is waiting for this decision:`,
       "",
       ...String(question)
@@ -80,13 +89,28 @@ export function gateOpenedNote({ key, question, now }) {
 }
 
 /** The human answered, and the worker resumes. */
-export function gateResolvedNote({ key, question, answer, now }) {
+export function gateResolvedNote({ key, question, answer, now, occurrence = null }) {
   return {
-    marker: marker("gate-resolved", key, digest(normaliseQuestion(question))),
+    marker: marker("gate-resolved", ...gateFacts(key, question, occurrence)),
     body: [
-      marker("gate-resolved", key, digest(normaliseQuestion(question))),
+      marker("gate-resolved", ...gateFacts(key, question, occurrence)),
       `**Human gate resolved** on ${day(now)}. Worker \`${key}\` resumes.`,
       ...(answer ? ["", "Decision:", "", ...String(answer).split(/\r?\n/).map((line) => `> ${line}`)] : []),
+    ].join("\n"),
+  };
+}
+
+/**
+ * A gate occurrence ended by a state change rather than an answer. It carries
+ * the resolved marker of that occurrence, so the occurrence is closed in the
+ * store, and records no decision because none was given.
+ */
+export function gateClosedNote({ key, question, state, now, occurrence }) {
+  return {
+    marker: marker("gate-resolved", ...gateFacts(key, question, occurrence)),
+    body: [
+      marker("gate-resolved", ...gateFacts(key, question, occurrence)),
+      `**Human gate closed** on ${day(now)} by a state change: worker \`${key}\` was set to \`${state}\`. No decision was recorded.`,
     ].join("\n"),
   };
 }
