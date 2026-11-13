@@ -9,6 +9,7 @@
 import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 
 /** ~/.claude/projects/<cwd with every non-alphanumeric character as "-"> */
 export function transcriptDir(cwd: string): string {
@@ -134,6 +135,13 @@ export function mtime(file: string): number {
   }
 }
 
+export function transcriptRevision(file: string): string {
+  try {
+    const stat = statSync(file);
+    return `${stat.size}:${createHash("sha256").update(tail(file, 16 * 1024)).digest("hex")}`;
+  } catch { return ""; }
+}
+
 function firstTimestamp(file: string): string {
   try {
     for (const r of lines(head(file, 64 * 1024))) if (r.timestamp) return String(r.timestamp);
@@ -158,6 +166,26 @@ export interface SubagentRecord {
   parentAgentId: string | null;
   /** When meta.json last changed (ms), 0 without one: a resumed session's earlier `finished` predates its resume. */
   metaUpdatedAt: number;
+  /** A changed file is evidence of activity only after this kitchen has observed an earlier version. */
+  revision: string;
+  transcriptEnded: boolean;
+}
+
+/** Explicit completion in the latest turn, even when no Stop hook or finished metadata was written. */
+export function subagentEnded(file: string): boolean {
+  try {
+    for (const r of lines(tail(file, 512 * 1024)).reverse()) {
+      if (r.type === "api-request") return false;
+      if (r.type === "user") {
+        const c = r.message?.content;
+        if (typeof c === "string" || (Array.isArray(c) && c.some((p: any) => p.type !== "tool_result"))) return false;
+      }
+      if (r.type !== "assistant") continue;
+      return r.message?.stop_reason === "end_turn" || r.isApiErrorMessage === true ||
+        (Array.isArray(r.message?.content) && r.message.content.some((p: any) => p.type === "tool_use" && p.name === "SubagentHandback"));
+    }
+  } catch { /* unreadable evidence cannot establish an ending */ }
+  return false;
 }
 
 /** What Claude Code records next to a subagent's transcript (`agent-<id>.meta.json`); null until it exists. */
@@ -235,6 +263,7 @@ export function subagents(sessionFile: string): SubagentRecord[] {
       agentId, file, prompt: firstPrompt(file), finished: meta?.finished ?? false, startedAt: firstTimestamp(file),
       description: meta?.description ?? "", agentType: meta?.agentType ?? "", toolUseId: meta?.toolUseId ?? null, parentAgentId: meta?.parentAgentId ?? null,
       metaUpdatedAt: meta ? mtime(join(dir, `agent-${agentId}.meta.json`)) : 0,
+      revision: transcriptRevision(file), transcriptEnded: subagentEnded(file),
     });
   }
   return out.sort((a, b) => a.startedAt.localeCompare(b.startedAt));

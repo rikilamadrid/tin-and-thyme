@@ -138,7 +138,7 @@ import type { TicketView } from "./ticketStage";
 export type AgentState = "idle" | "working" | "needs-input" | "waiting" | "in-review" | "review-passed";
 
 /** The agent's process: its tmux session running `sbx run` (Sandbox) or `claude` (Local). */
-export type SessionState = "stopped" | "starting" | "running" | "failed";
+export type SessionState = "stopped" | "starting" | "running" | "failed" | "unknown";
 
 export interface SessionInfo {
   state: SessionState;

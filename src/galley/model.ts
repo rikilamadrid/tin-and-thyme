@@ -199,7 +199,7 @@ export function buildGalley(snap: OfficeSnapshot, podOf?: Map<string, number>): 
       place = "gone";
       state = "off";
       const o = agent.ended?.outcome;
-      status = o === "handed-off" ? "handed off" : o === "gate" ? "stopped at a human gate" : o === "failed" ? "failed" : o === "interrupted" ? "interrupted" : "finished";
+      status = agent.session.state === "unknown" ? "session liveness unknown" : o === "handed-off" ? "handed off" : o === "gate" ? "stopped at a human gate" : o === "failed" ? "failed" : o === "interrupted" ? "interrupted" : "finished";
     } else {
       place = "lounge";
       state = "off";
@@ -207,7 +207,7 @@ export function buildGalley(snap: OfficeSnapshot, podOf?: Map<string, number>): 
     }
     crew.push({
       id: config.id, character: id.character, name: id.name, job: id.job, role: id.role, session: config.crew?.session ?? null, ticket,
-      worktree: config.crew?.worktree ?? agent.session.workspace, state, status, running, finished: !running && workflowSession,
+      worktree: config.crew?.worktree ?? agent.session.workspace, state, status, running, finished: !running && workflowSession && agent.session.state !== "unknown",
       context: agent.context ?? null, telemetry: agent.telemetry ?? null, ended: agent.ended ?? null, place, isLead, config, agent,
     });
   }

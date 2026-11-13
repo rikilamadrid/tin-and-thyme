@@ -12,8 +12,10 @@
 //     PreToolUse(Agent) carries the Pathfinder brief (ticket, session, role,
 //     worktree), SubagentStart/SubagentStop carry agent_id, and every worker
 //     tool call carries its agent_id. A claim or worktree alone is never
-//     treated as a running agent: liveness is "SubagentStart seen, no
-//     SubagentStop yet", and only those keys are passed to `status --live`.
+//     treated as a running agent: liveness needs its own hook or observed
+//     transcript activity, and ends at a stop, explicit transcript ending or
+//     coordinator process exit. Unfinished files alone leave liveness unknown.
+//     Only observed live keys are passed to `status --live`.
 //
 // Pathfinder owns every state change. This module reads the engine and the
 // worker state files and writes nothing into the project.
@@ -38,7 +40,7 @@ import { log } from "./lib/log";
 import { Attribution, readReport, type Evidence, type Identity } from "./attribution";
 import { coordinatorAttention, gateOwner, sameQuestion, sessionEnding, ticketView, type GateCandidate } from "./workflowState";
 import { gateRevision, isGateOccurrence, readGateHistory, type GateHistory } from "./gateRecord";
-import { subagentMeta, subagentPrompt, subagentReport } from "./transcripts";
+import { subagentMeta, subagentPrompt, subagentReport, transcriptRevision } from "./transcripts";
 import type { ActionAnswer, ActionRequest, DeliveryStage } from "../src/data/types";
 import { requestShelf } from "../src/data/requests";
 
@@ -79,6 +81,10 @@ interface Worker {
   role: string;
   worktree: string | null;
   live: boolean;
+  /** Identity is known, but neither activity nor an ending has been observed in this kitchen. */
+  livenessUnknown?: boolean;
+  transcriptRevision?: string;
+  resumeRevision?: string;
   tools: number;
   character: CharacterId;
   transcript: string | null;
@@ -305,6 +311,7 @@ export class PathfinderRun {
   /** Ticket keys already integrated when this run was first read: only later ones are deliveries. */
   private integratedAtStart: Set<string> | null = null;
   private startedAt = Date.now();
+  private coordinatorObservedRunning = false;
 
   constructor(
     private hub: Hub,
@@ -577,12 +584,12 @@ export class PathfinderRun {
   }
 
   /** An identified subagent joins: a worker gets its own ticket and stage, a helper only its launcher. */
-  private adopt(agentId: string, identity: Identity | null, finished = false): Worker | null {
+  private adopt(agentId: string, identity: Identity | null, finished = false, unknown = false): Worker | null {
     if (!identity) return null;
-    const unknown = this.unknownAgents.get(agentId);
+    const pending = this.unknownAgents.get(agentId);
     this.unknownAgents.delete(agentId);
-    if (identity.kind === "worker") return this.workers.get(agentId) ?? this.addWorker(agentId, identity.prompt, finished || !!unknown?.finished);
-    if (!this.helperInfo.has(agentId)) this.helperInfo.set(agentId, { parent: identity.parent ?? "unknown", label: identity.label, type: identity.type, finished: finished || !!unknown?.finished });
+    if (identity.kind === "worker") return this.workers.get(agentId) ?? this.addWorker(agentId, identity.prompt, finished || !!pending?.finished, unknown && !pending);
+    if (!this.helperInfo.has(agentId)) this.helperInfo.set(agentId, { parent: identity.parent ?? "unknown", label: identity.label, type: identity.type, finished: finished || !!pending?.finished });
     return null;
   }
 
@@ -596,7 +603,7 @@ export class PathfinderRun {
   }
 
   /** A worker session joins the room. `finished` restores one that already ended (from its transcript). */
-  private addWorker(agentId: string, prompt: string, finished = false): Worker | null {
+  private addWorker(agentId: string, prompt: string, finished = false, unknown = false): Worker | null {
     const b = parseBrief(prompt);
     if (!b) return null;
     const role = b.session === "adversary" ? "adversary" : b.role;
@@ -609,7 +616,7 @@ export class PathfinderRun {
     if (!saved) this.crewBook({ ...this.crewBook(), [agentId]: c });
     const transcript = this.subagentTranscript(agentId);
     const ended = finished ? this.restoredEnding(agentId, b.key, b.session, transcript) : null;
-    const w: Worker = { agentId, hqId, key: b.key, session: b.session, role, worktree: b.worktree, live: !finished, tools: 0, character: c.id, transcript, ended, gateSeen: null };
+    const w: Worker = { agentId, hqId, key: b.key, session: b.session, role, worktree: b.worktree, live: !finished && !unknown, livenessUnknown: unknown && !finished, tools: 0, character: c.id, transcript, ended, gateSeen: null };
     this.workers.set(agentId, w);
     const cfg = newAgent(hqId, c.name, role, ROLE_COLOR[role] ?? "#c2c3c7", false);
     cfg.mode = "local";
@@ -619,17 +626,17 @@ export class PathfinderRun {
     const hub = this.hub;
     hub.snap.config.team.push(cfg);
     const st: AgentStatus = {
-      agentId: hqId, state: finished ? "idle" : "working", currentTaskId: b.key, stateSince: new Date().toISOString(),
-      note: finished ? "Session finished — report handed to the coordinator" : `Started ${b.session} session`,
-      session: { state: finished ? "stopped" : "running", detail: `Background subagent ${agentId} of the coordinator`, workspace: b.worktree, sandbox: null },
+      agentId: hqId, state: w.live ? "working" : "idle", currentTaskId: b.key, stateSince: new Date().toISOString(),
+      note: w.livenessUnknown ? "Session liveness unknown — awaiting new activity or completion evidence" : finished ? "Session ended — restoring its outcome" : `Started ${b.session} session`,
+      session: { state: w.livenessUnknown ? "unknown" : finished ? "stopped" : "running", detail: `Background subagent ${agentId} of the coordinator`, workspace: b.worktree, sandbox: null },
       ...this.usage(w.transcript, undefined, this.configuredFor(w)),
       ended,
     };
     hub.snap.agents.push(st);
     hub.configChanged();
     hub.emit({ type: "agent.updated", agent: structuredClone(st) });
-    if (!finished) hub.activity("task.started", hqId, `${cfg.name} (${role}, ${b.session} ${b.key}) started in ${b.worktree ?? "its worktree"}`);
-    if (!finished) this.handoffs.onWorkerStarted(b.key, hqId);
+    if (w.live) hub.activity("task.started", hqId, `${cfg.name} (${role}, ${b.session} ${b.key}) started in ${b.worktree ?? "its worktree"}`);
+    if (w.live) this.handoffs.onWorkerStarted(b.key, hqId);
     hub.terminal(hqId, `\x1b[1mPathfinder ${b.session} session for ${b.key}\x1b[0m — ${b.title}\r\nsubagent ${agentId}\r\nworktree ${b.worktree}\r\n${finished ? "\r\n\x1b[1m■ session finished\x1b[0m (restored from its transcript)\r\n" : ""}\r\n`);
     this.applyAttention();
     this.queueRefresh(500);
@@ -651,9 +658,11 @@ export class PathfinderRun {
   /** A finished session is running again (resumed with the same subagent id): it keeps only its own identity. */
   private resumeWorker(w: Worker) {
     w.live = true;
+    w.livenessUnknown = false;
     w.ended = null;
     w.gateSeen = null;
     w.resumedAt = Date.now();
+    w.resumeRevision = w.transcript ? transcriptRevision(w.transcript) : "";
     this.hub.setSession(w.hqId, { state: "running", detail: `Background subagent ${w.agentId} of the coordinator (resumed)` });
     this.hub.setStatus(w.hqId, { state: "working", note: `Resumed ${w.session} session`, ended: null, currentTaskId: w.key });
     this.hub.activity("task.started", w.hqId, `${this.hub.name(w.hqId)} (${w.role}, ${w.session} ${w.key}) resumed`);
@@ -736,11 +745,15 @@ export class PathfinderRun {
   }
 
   /** A session stopped: its own report decides how it ended, else its ticket's recorded state. */
-  private endWorker(w: Worker, why: string, report: string | null = null) {
+  private endWorker(w: Worker, why: string, report: string | null = null, lostCoordinator = false) {
     const hub = this.hub;
     w.live = false;
-    const own = readReport(report) ? report : w.transcript ? subagentReport(w.transcript) : null;
-    const ending = sessionEnding(w.session, own ?? report, this.recorded(w.key));
+    w.livenessUnknown = false;
+    const oldTurn = lostCoordinator && w.resumeRevision !== undefined && w.transcript && transcriptRevision(w.transcript) === w.resumeRevision;
+    const own = oldTurn ? null : readReport(report) ? report : w.transcript ? subagentReport(w.transcript) : null;
+    // Losing the parent proves interruption, not completion of whatever later stage the ticket now records.
+    const rec = lostCoordinator ? { state: null, last: null, gate: null } : this.recorded(w.key);
+    const ending = sessionEnding(w.session, own ?? report, rec);
     const ended = this.settleAs(w.agentId, w.key, ending, w.session, this.reportedIn(w, ending));
     w.gateSeen = null;
     const note =
@@ -767,7 +780,7 @@ export class PathfinderRun {
   private settleRestored() {
     const all = [...this.workers.values()];
     for (const w of all) {
-      if (w.live || w.ended) continue;
+      if (w.live || w.ended || w.livenessUnknown) continue;
       const later = all.some((x) => x !== w && x.key === w.key && x.transcript && w.transcript && this.startOf(x) > this.startOf(w));
       const rec = this.recorded(w.key);
       const report = w.transcript ? subagentReport(w.transcript) : null;
@@ -792,6 +805,7 @@ export class PathfinderRun {
     if (!this.transcript) this.recallTranscript();
     const hub = this.hub;
     const coordAlive = hub.status(COORDINATOR_ID)?.session.state === "running";
+    if (coordAlive) this.coordinatorObservedRunning = true;
     if (this.transcript) {
       // Delegated helpers: the coordinator's running subagents that aren't Pathfinder workers.
       // Running ones work at the subagent stations; finished ones (the latest few) are their launcher's history.
@@ -802,15 +816,21 @@ export class PathfinderRun {
       for (const rec of [...recs].sort((a, b) => Number(!!a.parentAgentId) - Number(!!b.parentAgentId))) {
         const known = this.workers.get(rec.agentId);
         if (!known) {
-          // An unfinished subagent is live only while its coordinator runs; give the reattach a few seconds first.
-          if (!rec.finished && !coordAlive && Date.now() - this.startedAt < 15_000) continue;
-          this.adopt(rec.agentId, this.attribution.identify(rec.agentId, this.evidence(rec.agentId, rec.file)), rec.finished || !coordAlive);
+          // An unfinished file proves identity, not liveness. The coordinator may be a different process after
+          // a restart. Wait for this worker's own hook or observed transcript advancement before counting it.
+          const finished = rec.finished || rec.transcriptEnded;
+          const restored = this.adopt(rec.agentId, this.attribution.identify(rec.agentId, this.evidence(rec.agentId, rec.file)), finished, !finished);
+          if (restored) restored.transcriptRevision = rec.revision;
           continue;
         }
         // A resumed session's earlier `finished` predates its resume: only a clearly newer one ends it (its
         // SubagentStop hook ends it in any case).
-        const finishedNow = rec.finished && !(known.resumedAt && rec.metaUpdatedAt < known.resumedAt + 1000);
-        if (known.live && finishedNow) this.endWorker(known, `Session ended after ${known.tools} tool calls (transcript)`);
+        const finishedNow = (rec.finished && !(known.resumedAt && rec.metaUpdatedAt < known.resumedAt + 1000)) ||
+          (rec.transcriptEnded && rec.revision !== known.resumeRevision);
+        const advanced = !!known.transcriptRevision && rec.revision !== known.transcriptRevision;
+        if ((known.live || known.livenessUnknown) && finishedNow) this.endWorker(known, `Session ended after ${known.tools} tool calls (transcript)`);
+        else if (known.livenessUnknown && advanced && coordAlive) this.resumeWorker(known);
+        known.transcriptRevision = rec.revision;
       }
       const all: WorkflowHelper[] = recs
         .filter((r) => !this.workers.has(r.agentId))
@@ -830,6 +850,11 @@ export class PathfinderRun {
         this.emitWorkflow();
       }
       this.settleRestored();
+    }
+    // Reconcile workers already seen through hooks too, including those with no transcript. A stopped parent
+    // process cannot keep its background workers alive. Allow the initial session reattachment to finish.
+    if (!coordAlive && (this.coordinatorObservedRunning || Date.now() - this.startedAt >= 15_000)) {
+      for (const w of this.workers.values()) if (w.live) this.endWorker(w, "Coordinator process stopped; no worker stop hook was received", null, true);
     }
     // Context in use, from each session's own transcript.
     // Context, model and effort, each from that session's own transcript (never another agent's).
@@ -926,7 +951,7 @@ export class PathfinderRun {
       return { ok: true };
     }
     const hub = this.hub;
-    if (event === "SubagentStart" && !w.live) this.resumeWorker(w); // the same subagent id starting again is that session resuming: never another session's identity
+    if (!w.live && (event === "SubagentStart" || (w.livenessUnknown && event !== "SubagentStop"))) this.resumeWorker(w);
     // A hook event from the session itself shows it is running now: note which gate occurrence is open on its ticket.
     if (event !== "SubagentStop") w.gateSeen = this.openOccurrence(w.key);
     switch (event) {
@@ -950,7 +975,7 @@ export class PathfinderRun {
       }
       case "SubagentStop": {
         const last = typeof body.last_assistant_message === "string" ? body.last_assistant_message : null;
-        if (w.live) this.endWorker(w, `Session ended after ${w.tools} tool calls`, last);
+        if (w.live || w.livenessUnknown) this.endWorker(w, `Session ended after ${w.tools} tool calls`, last);
         break;
       }
     }

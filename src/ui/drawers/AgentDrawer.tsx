@@ -224,7 +224,7 @@ function AccessCard({ request, agent }: { request: AccessRequest; agent: AgentCo
   );
 }
 
-const SESSION_COLOR = { running: "#00e436", starting: "#29adff", stopped: "#83769c", failed: "#ff004d" } as const;
+const SESSION_COLOR = { running: "#00e436", starting: "#29adff", stopped: "#83769c", failed: "#ff004d", unknown: "#83769c" } as const;
 
 /** Session state + Start/Stop + the agent's folder. */
 function SessionBar({ agent, status }: { agent: AgentConfig; status: AgentStatus }) {
@@ -265,10 +265,10 @@ function NotRunning({ agent, status }: { agent: AgentConfig; status: AgentStatus
       <div className="max-w-[380px]">
         {agent.crew?.session ? (
           <>
-            <p className="mb-2 font-term text-[22px]">This {agent.crew.session} session has finished</p>
+            <p className="mb-2 font-term text-[22px]">{s.state === "unknown" ? `This ${agent.crew.session} session's liveness is unknown` : `This ${agent.crew.session} session has finished`}</p>
             {s.detail && <p className="mb-3 font-term text-[16px] text-[#9aa6d1]">{s.detail}</p>}
             <p className="text-[13px] text-[#9aa6d1]">
-              Its report went back to the coordinator. Pathfinder decides the next session for {agent.crew.ticket ?? "this ticket"}; Tin &amp; Thyme does not restart workers.
+              {s.state === "unknown" ? "Its transcript identifies the worker, but no new activity or completion has been observed. It is not counted as a running worker." : `Pathfinder decides the next session for ${agent.crew.ticket ?? "this ticket"}; Tin & Thyme does not restart workers.`}
             </p>
           </>
         ) : s.state === "starting" ? (

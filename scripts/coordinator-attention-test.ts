@@ -7,7 +7,7 @@
 //   npx tsx scripts/coordinator-attention-test.ts
 
 import { spawnSync } from "node:child_process";
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -459,8 +459,80 @@ w.run.deliveryOf = () => null;
   const w3 = boot(repo, "tt-a", [...w.rows, row("07.1", "working")]);
   (w3.run as unknown as { startedAt: number }).startedAt = 0; // past the reattach grace
   await refresh(w3);
-  eq("restart: a live worker is rebuilt live", workers(w3).get("alive")?.live, true);
+  eq("restart: an unfinished transcript alone leaves liveness unknown", [workers(w3).get("alive")?.live, workers(w3).get("alive")?.ended], [false, null]);
+  toolEvent(w3, "alive");
+  await refresh(w3);
+  eq("restart: a worker hook establishes live activity", workers(w3).get("alive")?.live, true);
   eq("restart: the transcript poll follows the same rule (waiting on workers)", coordinator(w3).state, "waiting");
+}
+
+// Review 5: minimized shapes from a0a704b754b9fea13 (02.1, final tool result) and
+// af57c6f1742445342 (01.1, final api-request). Neither had finished metadata or a stop hook.
+// No personal transcript contents are retained. These record shapes prove no ending or live process.
+{
+  const repo = makeRepo("repo-liveness");
+  const w = boot(repo, "tt-liveness");
+  coordinatorTurn(w, true);
+  preAgent(w, "unrelated_pending", brief("09.1", "review", "tester"));
+  for (const [id, key, last] of [
+    ["a0a704b754b9fea13", "02.1", { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "old_call", content: "done" }] } }],
+    ["af57c6f1742445342", "01.1", { type: "api-request" }],
+  ] as const) {
+    writeSub(w, id, { prompt: brief(key), toolUseId: `tu_${id}` });
+    appendFileSync(join(subDir(w), `agent-${id}.jsonl`), JSON.stringify(last) + "\n");
+  }
+  stopTurn(w);
+  await refresh(w);
+  for (const [id, key] of [["a0a704b754b9fea13", "02.1"], ["af57c6f1742445342", "01.1"]]) {
+    const wk = workers(w).get(id)!;
+    eq(`R5 ${key}: own identity, no invented live session or outcome`, [crewTicket(w, id), wk.live, wk.ended], [{ ticket: key, session: "implementation" }, false, null]);
+    eq(`R5 ${key}: visible liveness is unknown`, w.hub.status(wk.hqId)?.session.state, "unknown");
+    check(`R5 ${key}: no false success in galley`, buildGalley(w.hub.snap).crew.find((c) => c.id === wk.hqId)?.status === "session liveness unknown");
+  }
+  eq("R5: unknown workers never reach status --live", w.run.liveKeys(), []);
+  check("R5: coordinator never waits on unobserved workers", coordinator(w).state !== "waiting");
+  eq("R5: the unrelated review brief remains pending", pendingLaunches(w), ["unrelated_pending"]);
+  await refresh(w);
+  eq("R5: repeated reads do not become activity", w.run.liveKeys(), []);
+  const touched = join(subDir(w), "agent-a0a704b754b9fea13.jsonl");
+  utimesSync(touched, new Date(), new Date(Date.now() + 5000));
+  await refresh(w);
+  eq("R5: changing a file timestamp is not worker activity", w.run.liveKeys(), []);
+  w.hub.setSession(COORDINATOR_ID, { state: "stopped" });
+  await refresh(w);
+  eq("R5: stopping the coordinator does not invent outcomes for unknown workers", [...workers(w).values()].map((x) => [x.live, x.ended]), [[false, null], [false, null]]);
+  w.hub.setSession(COORDINATOR_ID, { state: "running" });
+  toolEvent(w, "a0a704b754b9fea13");
+  await refresh(w);
+  eq("R5: fresh worker hook establishes liveness", w.run.liveKeys(), ["02.1"]);
+  // No timeout: a quiet long tool call remains live while its known coordinator process runs.
+  (w.run as unknown as { startedAt: number }).startedAt = 0;
+  await refresh(w);
+  eq("R5: a long tool call remains live without new transcript bytes", workers(w).get("a0a704b754b9fea13")?.live, true);
+  appendFileSync(join(subDir(w), "agent-af57c6f1742445342.jsonl"), JSON.stringify({ type: "assistant", message: { stop_reason: "tool_use", content: [{ type: "tool_use", name: "Bash" }] } }) + "\n");
+  await refresh(w);
+  eq("R5: observed transcript advancement establishes liveness", workers(w).get("af57c6f1742445342")?.live, true);
+  appendFileSync(join(subDir(w), "agent-af57c6f1742445342.jsonl"), JSON.stringify({ type: "assistant", message: { stop_reason: "end_turn", content: [{ type: "text", text: "PASS: verified" }] } }) + "\n");
+  await refresh(w);
+  eq("R5: terminal transcript ends a worker with no stop hook or finished metadata", [workers(w).get("af57c6f1742445342")?.live, workers(w).get("af57c6f1742445342")?.ended?.verdict], [false, "PASS"]);
+  subStart(w, "af57c6f1742445342");
+  await refresh(w);
+  eq("R5: an old terminal transcript cannot stop a resumed worker", workers(w).get("af57c6f1742445342")?.live, true);
+  postAgent(w, "tu_no_file", brief("03.1"), "hook_only");
+  stateFile(w, "03.1", { State: "done", Last: "DONE: some later session" });
+  // An already observed running coordinator stopping is decisive even inside the attach grace.
+  (w.run as unknown as { startedAt: number }).startedAt = Date.now();
+  w.hub.setSession(COORDINATOR_ID, { state: "stopped" });
+  await refresh(w);
+  eq("R5: hook-only worker stops without borrowing a later ticket handoff", [workers(w).get("hook_only")?.live, workers(w).get("hook_only")?.ended?.outcome], [false, "interrupted"]);
+  eq("R5: resumed worker cannot hand off from its previous turn's report", workers(w).get("af57c6f1742445342")?.ended?.outcome, "interrupted");
+  eq("R5: known workers leave --live when the coordinator process stops", w.run.liveKeys(), []);
+  eq("R5: the unfinished worker has no fabricated success", workers(w).get("a0a704b754b9fea13")?.ended?.outcome, "interrupted");
+  const restarted = boot(repo, "tt-liveness");
+  stopTurn(restarted);
+  await refresh(restarted);
+  eq("R5: restart does not resurrect the old unfinished worker", workers(restarted).get("a0a704b754b9fea13")?.live, false);
+  check("R5: restart never waits on old worker artifacts", coordinator(restarted).state !== "waiting");
 }
 
 // ================================================================ Action items: truthful, answerable, exactly once
@@ -644,7 +716,7 @@ w.run.deliveryOf = () => null;
     unidentified(w, "02.1", q, "M1 restart: before the restart, Updated rewritten");
     const w2 = boot(repo, "tt-m1-restart", w.rows);
     await refresh(w2);
-    eq("M1 restart: the resume is rebuilt live", workers(w2).get("ar1")?.live, true);
+    eq("M1 restart: the resume has no observed activity yet", workers(w2).get("ar1")?.live, false);
     unidentified(w2, "02.1", q, "M1 restart: after the restart, the resume isn't credited");
     // The answer path still works for it: typed into the coordinator, naming no session.
     const it = (w2.hub.snap.actionItems ?? []).find((i) => i.id === "gate-02.1")!;
