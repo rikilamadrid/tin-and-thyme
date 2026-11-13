@@ -3,8 +3,9 @@ import { nextAgentName } from "../../data/names";
 import { CLI_LABEL, type AgentCli, type AgentConfig, type AgentMode } from "../../data/types";
 import { officeActions, useOffice } from "../../store/office";
 import { agentPalette } from "../../theme/tokens";
-import { crewIdentity } from "../../galley/model";
+import { agentColor, crewIdentity } from "../../galley/model";
 import { RobotPortrait } from "../../galley/RobotPortrait";
+import { usableAccent } from "../../galley/robots";
 import { Field, SectionTitle } from "../kit";
 import { CommitInput } from "./controls";
 import { RemoveAgentDialog } from "./RemoveAgentDialog";
@@ -50,10 +51,16 @@ function AgentRow({ agent, expanded, onToggle, onRemove }: { agent: AgentConfig;
   // The same robot as the galley, the roster and the drawer: matched by this agent's id, never by role.
   const character = useOffice((st) => (st.snap ? crewIdentity(st.snap, agent).character : "unit"));
   const set = (patch: Parameters<typeof officeActions.updateAgent>[1]) => officeActions.updateAgent(agent.id, patch);
+  // Native teams only: a Pathfinder session's robot keeps its character's designed accent.
+  const colourHint = agent.crew
+    ? undefined
+    : agentColor(agent)
+      ? "Shows on the robot's accent, its name tag and its roster card."
+      : "This colour can't be shown (the alert pinks are kept for needs-you), so the robot keeps its own accent. Pick another to change it.";
   return (
     <div className="border-[3px] border-line bg-card">
       <div className="grid grid-cols-[40px_1fr_1fr_150px_130px_auto] items-end gap-2.5 p-2.5">
-        <RobotPortrait character={character} size={40} />
+        <RobotPortrait character={character} size={40} accent={agentColor(agent)} />
         <Field label="Name">
           <CommitInput className="field" value={agent.name} onCommit={(v) => v.trim() && set({ name: v.trim() })} />
         </Field>
@@ -94,17 +101,23 @@ function AgentRow({ agent, expanded, onToggle, onRemove }: { agent: AgentConfig;
       )}
       {expanded && (
         <div className="grid grid-cols-2 gap-3 border-t-[3px] border-line bg-cream p-3">
-          <Field label="Colour">
+          <Field label="Colour" hint={colourHint}>
             <div className="flex flex-wrap gap-1.5">
-              {agentPalette.map((c) => (
-                <button
-                  key={c}
-                  className="h-6 w-6 border-[3px] border-line"
-                  style={{ background: c, outline: c === agent.color ? "3px solid #eef6ff" : undefined, outlineOffset: 1 }}
-                  aria-label={`Colour ${c}`}
-                  onClick={() => set({ color: c })}
-                />
-              ))}
+              {agentPalette.map((c) => {
+                // The needs-you pinks are never an agent colour: the swatch stays visible but can't be picked.
+                const reserved = !usableAccent(c);
+                return (
+                  <button
+                    key={c}
+                    className={`h-6 w-6 border-[3px] border-line ${reserved ? "cursor-not-allowed opacity-40" : ""}`}
+                    style={{ background: c, outline: c === agent.color ? "3px solid #eef6ff" : undefined, outlineOffset: 1 }}
+                    aria-label={reserved ? `Colour ${c}, kept for needs-you alerts` : `Colour ${c}`}
+                    title={reserved ? "Kept for needs-you alerts" : undefined}
+                    disabled={reserved}
+                    onClick={() => set({ color: c })}
+                  />
+                );
+              })}
             </div>
           </Field>
           <Field label="Start with model" hint="Optional. Leave empty to use the CLI's default — you can always switch with /model in the terminal. Set it to keep a choice across restarts (e.g. Opus for the lead).">

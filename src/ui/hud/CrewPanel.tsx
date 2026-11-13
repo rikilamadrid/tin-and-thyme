@@ -141,9 +141,13 @@ function CrewCard({ c, selected }: { c: CrewMember; selected: boolean }) {
       aria-label={`${c.name}, ${c.job}. Pathfinder role ${c.role}.${c.ticket ? ` Ticket ${c.ticket}.` : ""} ${c.status}.`}
     >
       {alert && <i className="absolute bottom-0 left-0 top-0 w-[4px] rounded-l-[6px] bg-[#ff4f7b]" />}
-      <RobotPortrait character={c.character} size={48} dim={!c.running} />
+      <RobotPortrait character={c.character} size={48} dim={!c.running} accent={c.color} />
       <div className="min-w-0">
-        <div className="truncate text-[15px] font-extrabold leading-[18px]">{c.name}</div>
+        <div className="flex items-center gap-1.5 text-[15px] font-extrabold leading-[18px]">
+          {/* The agent's colour (Settings → Team): the same one as its robot's accent and its kitchen name tag. */}
+          {c.color && <i className="block h-[10px] w-[10px] shrink-0 rounded-[2px]" style={{ background: c.color }} aria-hidden />}
+          <span className="truncate">{c.name}</span>
+        </div>
         <div className="truncate text-[11px] font-bold leading-[14px] text-[#a8b8d8]">{c.job}</div>
         <div className="truncate text-[11px] font-extrabold leading-[14px] text-[#ffc93a]" title="Pathfinder role">
           {c.role}
@@ -213,7 +217,7 @@ function HistoryRow({ c, helpers }: { c: CrewMember; helpers: WorkflowHelper[] }
   return (
     <li className="border-t border-[#26335c] pt-1.5 first:border-t-0 first:pt-0">
       <button type="button" className="flex w-full cursor-pointer items-center gap-1.5 bg-transparent p-0 text-left text-[#eef6ff] hover:underline" onClick={() => ui.openAgent(c.id)} aria-label={`${c.name}, ${c.role}, ${c.session ?? ""} session: ${how}`}>
-        <RobotPortrait character={c.character} size={20} dim />
+        <RobotPortrait character={c.character} size={20} dim accent={c.color} />
         <b className="text-[12px]">{c.name}</b>
         <span className="truncate text-[11px] text-[#a8b8d8]">
           {c.role} · {stageWords(c.session)}
@@ -284,7 +288,7 @@ function TicketCardView({ t, helpers, selected }: { t: TicketCard; helpers: Work
           onClick={() => ui.openAgent(c.id)}
           aria-label={`${c.name}, ${c.job}. Pathfinder role ${c.role}, ${stageWords(c.session)}. ${c.status}.`}
         >
-          <RobotPortrait character={c.character} size={36} />
+          <RobotPortrait character={c.character} size={36} accent={c.color} />
           <div className="min-w-0">
             <div className="truncate text-[13px] font-extrabold leading-[16px]">
               {c.name} <span className="text-[11px] font-bold text-[#a8b8d8]">· {c.job}</span>

@@ -13,7 +13,7 @@
 
 import { assignCharacter, CHARACTERS, characterForRole, type CharacterId } from "../data/crew";
 import type { AgentConfig, AgentStatus, OfficeSnapshot, SessionEnd, SessionTelemetry, Task, WorkflowHelper } from "../data/types";
-import type { IconKind } from "./robots";
+import { usableAccent, type IconKind } from "./robots";
 import { selectAttention } from "../store/office";
 
 export type CrewState = "needs" | "work" | "review" | "idle" | "off";
@@ -27,6 +27,8 @@ export interface CrewMember {
   job: string;
   /** The real workflow role. */
   role: string;
+  /** The agent's colour where it shows (robot accent, name tag, roster chip, portrait); null = the design's own. See agentColor. */
+  color: string | null;
   session: string | null;
   ticket: string | null;
   worktree: string | null;
@@ -154,6 +156,13 @@ export function crewIdentity(snap: OfficeSnapshot, config: AgentConfig): { chara
   return { character: "unit", name: config.name, job: "Crew", role: config.role };
 }
 
+/**
+ * The colour an agent is shown in, from its one input, `AgentConfig.color`; null draws the design's
+ * own accent. Native teams only: a Pathfinder session (`config.crew`) keeps its character's designed
+ * accent. A reserved needs-you pink or a malformed value is never shown (usableAccent).
+ */
+export const agentColor = (config: AgentConfig): string | null => (config.crew ? null : usableAccent(config.color));
+
 function column(t: Task): number {
   const s = effState(t);
   if (s) {
@@ -200,7 +209,7 @@ export function buildGalley(snap: OfficeSnapshot, podOf?: Map<string, number>): 
       status = "not running";
     }
     crew.push({
-      id: config.id, character: id.character, name: id.name, job: id.job, role: id.role, session: config.crew?.session ?? null, ticket,
+      id: config.id, character: id.character, name: id.name, job: id.job, role: id.role, color: agentColor(config), session: config.crew?.session ?? null, ticket,
       worktree: config.crew?.worktree ?? agent.session.workspace, state, status, running, finished: !running && workflowSession,
       context: agent.context ?? null, telemetry: agent.telemetry ?? null, ended: agent.ended ?? null, place, isLead, config, agent,
     });
