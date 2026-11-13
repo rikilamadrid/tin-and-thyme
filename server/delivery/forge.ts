@@ -14,8 +14,8 @@ import { DeliveryError, redact } from "./state";
 
 export type Program = "git" | "gh" | "node";
 
-/** Runs one program with a fixed argument vector. Tests inject a fake. */
-export type Runner = (cmd: Program, args: string[], opts?: { cwd?: string; timeoutMs?: number }) => Promise<RunResult>;
+/** Runs one program with a fixed argument vector. Tests inject a fake. `input` is written to its stdin (records.ts: hash-object, mktree). */
+export type Runner = (cmd: Program, args: string[], opts?: { cwd?: string; timeoutMs?: number; input?: string }) => Promise<RunResult>;
 
 /**
  * What delivery's `git` and `gh` calls add to the server's environment, so a

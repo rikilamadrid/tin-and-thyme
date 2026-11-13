@@ -82,7 +82,7 @@ export class DeliveryError extends Error {
 
 // ---------------------------------------------------------------- shapes
 
-export const STEPS = ["inspect", "approve", "push", "ensurePr", "status", "merge", "verify", "reconcile", "handback", "plan"] as const;
+export const STEPS = ["inspect", "approve", "push", "ensurePr", "status", "merge", "verify", "reconcile", "records", "handback", "plan"] as const;
 export type StepName = (typeof STEPS)[number];
 
 export interface StepResult {
@@ -230,6 +230,29 @@ export interface PlanRecord {
   newly: string[];
 }
 
+/**
+ * The completion records prepared after a verified merge (records.ts), on the
+ * ticket's own state. Either a records commit on `ticket/<key>-records`, cut
+ * from local main once it contains the implementation merge, or `onMain`: local
+ * main already records the ticket Complete, so there is nothing to deliver.
+ */
+export interface RecordsPrepRecord {
+  at: string;
+  branch: string;
+  /** The records commit; null when `onMain`. */
+  head: string | null;
+  /** The main commit it was cut from (or read, when `onMain`). */
+  parent: string;
+  /** The implementation merge it follows. */
+  mergeCommit: string;
+  /** What it changes, one line per file. */
+  changes: string[];
+  onMain: boolean;
+}
+
+/** Which delivery a state file belongs to: the ticket's implementation, or its completion records (`<key>.records.json`). */
+export type DeliveryTrack = "ticket" | "records";
+
 export interface DeliveryState {
   schema: "tin-and-thyme.delivery/1";
   key: string;
@@ -259,6 +282,8 @@ export interface DeliveryState {
   reconciled: ReconcileRecord | null;
   handback: HandbackRecord | null;
   plan: PlanRecord | null;
+  /** The completion records prepared for this ticket (the ticket's own state only). */
+  recordsPrep: RecordsPrepRecord | null;
   steps: Partial<Record<StepName, StepResult>>;
   /** Every step result, newest last, capped. */
   history: StepResult[];
@@ -287,6 +312,7 @@ export function emptyState(key: string): DeliveryState {
     reconciled: null,
     handback: null,
     plan: null,
+    recordsPrep: null,
     steps: {},
     history: [],
     updated: new Date(0).toISOString(),
@@ -324,12 +350,25 @@ function holderAlive(pid: unknown): boolean {
 
 const LOCK_SETTLE_MS = 60_000;
 
+/**
+ * One delivery identity's state files. The ticket track keeps `<key>.json` and
+ * `<key>.lock`; the records track keeps `<key>.records.json` and
+ * `<key>.records.lock` in the same folder, so it has its own state and step lock
+ * while `merge.lock` and `main.lock` stay shared by every delivery.
+ */
 export class DeliveryStore {
-  constructor(readonly dir: string) {}
+  constructor(
+    readonly dir: string,
+    readonly track: DeliveryTrack = "ticket",
+  ) {}
+
+  private get suffix(): string {
+    return this.track === "records" ? ".records" : "";
+  }
 
   private file(key: string): string {
     if (!isTicketKey(key)) throw new DeliveryError("invalid", `not a ticket key: ${String(key)}`);
-    return join(this.dir, `${key}.json`);
+    return join(this.dir, `${key}${this.suffix}.json`);
   }
 
   /** The folder, owner-only, even when it already existed with a wider mode. */
@@ -349,7 +388,7 @@ export class DeliveryStore {
   lock(name: string, what: string): () => void {
     if (!isTicketKey(name) && name !== "merge" && name !== "main") throw new DeliveryError("invalid", `not a lock name: ${String(name)}`);
     this.ensureDir();
-    const path = join(this.dir, `${name}.lock`);
+    const path = join(this.dir, `${name}${isTicketKey(name) ? this.suffix : ""}.lock`);
     const token = randomBytes(12).toString("hex");
     const body = JSON.stringify({ pid: process.pid, token, at: new Date().toISOString() }) + "\n";
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -394,6 +433,11 @@ export class DeliveryStore {
       }
     }
     throw new DeliveryError("blocked", `${what} is already running; wait for it to finish`, { reasons: [path] });
+  }
+
+  /** True when this identity has a state file for the key. */
+  exists(key: string): boolean {
+    return existsSync(this.file(key));
   }
 
   /** The stored state, or a fresh empty one. An unreadable file is not silently replaced. */

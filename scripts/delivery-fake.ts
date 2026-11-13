@@ -286,3 +286,24 @@ export function makeScenario(tmp: string, name: string) {
     new Delivery({ root: repo, repo: "owner/project", store: new DeliveryStore(stateDir), runner: world.runner, ...extra });
   return { repo, world, base, reviewed, head, write, commit, stateDir, delivery: make(), make };
 }
+
+/**
+ * The completion-records fixture (ticket 10.3): Feature 10's spec and the
+ * history file on main (local and origin), and the ticket naming its parent
+ * Feature in a record-only commit on its branch. `siblings` adds other tickets
+ * of the Feature to main, by file name.
+ */
+export function addRecordsFixture(s: ReturnType<typeof makeScenario>, opts: { siblings?: Record<string, string>; history?: string | null } = {}) {
+  const { repo, world } = s;
+  git(repo, "checkout", "-q", "main");
+  s.write("context/features/10-demo.md", "# Demo Feature\n\n## Status\n\nIn Progress\n\n## Goal\n\nDemo.\n");
+  if (opts.history !== null) s.write("context/history.md", opts.history ?? "# Project History\n\nCompact record of completed work.\n\n## Completed\n");
+  for (const [file, text] of Object.entries(opts.siblings ?? {})) s.write(`context/tickets/${file}`, text);
+  const main = s.commit("feature spec and history");
+  world.remote.set("refs/heads/main", main);
+  git(repo, "checkout", "-q", "ticket/10.1-demo");
+  s.write("context/tickets/10.1-demo.md", "# Demo\n\n## Status\n\nIn Progress\n\n## Parent Feature\n\n`10-demo.md`\n\nClaimed note.\n");
+  const head = s.commit("record: parent feature");
+  git(repo, "checkout", "-q", "main");
+  return { main, head };
+}

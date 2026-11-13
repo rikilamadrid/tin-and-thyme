@@ -12,6 +12,9 @@
 //   only on the human's explicit click.
 // - It is refused until local main contains the merge, because `orchestrate
 //   release` proves the merge from local main and refuses otherwise.
+// - It is refused until the completion records are on local main too: delivered
+//   through their own records PR (records.ts), or already recorded there. The
+//   coordinator is told they are, so `/ticket complete` never edits main.
 // - The plan is read with `orchestrate plan --json` (read-only); tickets that
 //   were waiting on this one and are eligible now are reported as newly eligible.
 
@@ -35,21 +38,35 @@ export function handbackMarker(key: string, mergeCommit: string): string {
 }
 
 /**
- * Where the completion records go. Feature 10's Notes make (a), a records PR
- * delivered through this same flow, the default, and forbid a dirty main; how
- * that records PR is branched and validated is still the human's decision, so the
- * coordinator is told to ask rather than edit main.
+ * Where the completion records are (Feature 10, Notes; human decision
+ * 2026-11-13): a records PR on `ticket/<key>-records`, delivered through this same
+ * flow, or already on main. Without that fact (never sent by the kitchen) the
+ * coordinator is told not to edit main.
  */
 export const RECORDS_CLAUSE =
-  "Completion records follow Feature 10's Notes (default: a records PR through the in-app delivery flow): never leave completion edits uncommitted on main; if where to commit them is not settled for you, open a human gate instead of editing main.";
+  "Completion records follow Feature 10's Notes (a records PR through the in-app delivery flow): never leave completion edits uncommitted on main; if where to commit them is not settled for you, open a human gate instead of editing main.";
+
+/** Where the ticket's completion records are: delivered by their records PR, or already on main. */
+export type RecordsDone = { pr: number; commit: string } | { onMain: true };
+
+export function recordsClause(records: RecordsDone): string {
+  const where =
+    "onMain" in records
+      ? "Local main already records it Complete"
+      : (() => {
+          if (!Number.isInteger(records.pr) || records.pr <= 0 || !isSha(records.commit)) throw new DeliveryError("invalid", "the records PR number and full merge commit id are required");
+          return `Its completion records (ticket Status, derived Feature Status, history entry) are on main through records PR #${records.pr}, squash-merged as ${records.commit}`;
+        })();
+  return `${where}: do not edit or commit them again, and never leave completion edits uncommitted on main.`;
+}
 
 /** The one line the coordinator receives. Only validated ids and numbers go into it. */
-export function handbackText(key: string, pr: number, mergeCommit: string): string {
+export function handbackText(key: string, pr: number, mergeCommit: string, records?: RecordsDone): string {
   const marker = handbackMarker(key, mergeCommit);
   if (!Number.isInteger(pr) || pr <= 0) throw new DeliveryError("invalid", "a handback needs the merged PR number");
   return (
     `[${marker}] The human delivered ticket ${key} in Tin & Thyme: PR #${pr} is squash-merged as ${mergeCommit}, verified, and the local main checkout contains it. ` +
-    `Run /ticket complete ${key}, then orchestrate release ${key}. ${RECORDS_CLAUSE} ` +
+    `Run /ticket complete ${key}, then orchestrate release ${key}. ${records ? recordsClause(records) : RECORDS_CLAUSE} ` +
     `This request is sent once; if you have already handled this marker, do nothing.`
   ).replace(/\s+/g, " ");
 }
@@ -60,6 +77,8 @@ export interface HandbackDeps {
   link: CoordinatorLink | null;
   /** True when local main contains this commit (read-only). */
   mainContains(commit: string): Promise<boolean>;
+  /** Where the completion records are, or why they are not on local main yet. */
+  records(key: string): Promise<RecordsDone | string>;
   now(): Date;
 }
 
@@ -81,6 +100,8 @@ export async function sendHandback(key: string, d: HandbackDeps): Promise<{ data
   if (!d.link) throw new DeliveryError("refused", "this server has no coordinator session to hand back to; nothing was sent");
   if (!(await d.mainContains(commit)))
     throw new DeliveryError("refused", `local main does not contain the merge ${commit} yet: reconcile the main checkout first. orchestrate release refuses until it does, so nothing was sent`);
+  const records = await d.records(key);
+  if (typeof records === "string") throw new DeliveryError("refused", `${records}; nothing was sent`);
   if (prev?.status === "sending") {
     // The kitchen stopped while typing it: it may have arrived. Never re-sent without the human looking first.
     d.update(key, (st) => {
@@ -95,7 +116,7 @@ export async function sendHandback(key: string, d: HandbackDeps): Promise<{ data
   });
   let ok = false;
   try {
-    ok = await d.link.type(handbackText(key, s.merged.pr, commit));
+    ok = await d.link.type(handbackText(key, s.merged.pr, commit, records));
   } catch {
     ok = false;
   }

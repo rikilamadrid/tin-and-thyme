@@ -10,16 +10,25 @@
 //
 // Nothing here talks to git, GitHub or the DOM.
 
-export const DELIVERY_OPS = ["inspect", "approve", "acknowledgeNoChecks", "push", "ensurePr", "status", "merge", "verify", "reconcilePlan", "reconcile", "handback", "plan"] as const;
+export const DELIVERY_OPS = ["inspect", "approve", "acknowledgeNoChecks", "push", "ensurePr", "status", "merge", "verify", "reconcilePlan", "reconcile", "prepareRecords", "handback", "plan"] as const;
 export type DeliveryOp = (typeof DELIVERY_OPS)[number];
 
 /**
  * The recorded steps (state.ts STEPS). Acknowledging "no checks" is recorded as
  * an approval; listing the main checkout (reconcilePlan) is read-only and records
- * nothing.
+ * nothing; preparing the completion records is the `records` step.
  */
-export const DELIVERY_STEPS = ["inspect", "approve", "push", "ensurePr", "status", "merge", "verify", "reconcile", "handback", "plan"] as const;
+export const DELIVERY_STEPS = ["inspect", "approve", "push", "ensurePr", "status", "merge", "verify", "reconcile", "records", "handback", "plan"] as const;
 export type DeliveryStep = (typeof DELIVERY_STEPS)[number];
+
+/**
+ * Which delivery a request or view is for: the ticket's implementation, or its
+ * completion records on `ticket/<key>-records` (server/delivery/records.ts), which
+ * has its own state, approval and steps. Only these ops exist on the records
+ * track; it has no records, handback or plan of its own.
+ */
+export type DeliveryTrack = "ticket" | "records";
+export const RECORDS_TRACK_OPS: readonly DeliveryOp[] = ["inspect", "approve", "acknowledgeNoChecks", "push", "ensurePr", "status", "merge", "verify", "reconcilePlan", "reconcile"];
 
 /**
  * Why an operation did not run. The first six come from the delivery core
@@ -213,8 +222,22 @@ export interface AfterMergeView {
   plan: PlanView | null;
 }
 
+/** The completion records prepared after the verified merge (state.ts RecordsPrepRecord). */
+export interface RecordsPrepView {
+  at: string;
+  branch: string;
+  /** The records commit; null when local main already records the ticket Complete. */
+  head: string | null;
+  parent: string;
+  mergeCommit: string;
+  changes: string[];
+  onMain: boolean;
+}
+
 export interface DeliveryView {
   key: string;
+  /** "records": the view of the ticket's completion-records delivery (nested in the ticket's view as `records`). */
+  track: DeliveryTrack;
   title: string | null;
   readiness: DeliveryReadiness;
   repo: string | null;
@@ -242,6 +265,9 @@ export interface DeliveryView {
   running: DeliveryOp | null;
   /** After a verified merge (empty before). */
   after: AfterMergeView;
+  /** The ticket track only: the prepared completion records, and their own delivery (null before the merge is verified). */
+  recordsPrep: RecordsPrepView | null;
+  records: DeliveryView | null;
   updated: string;
 }
 
@@ -324,6 +350,9 @@ export function gateOf(view: DeliveryView, op: DeliveryOp): Gate | null {
     if (!view.verified) return { kind: "refused", message: "Verify the merge first" };
     return null;
   };
+  // A records delivery never produces records, a handback or a plan of its own.
+  if (view.track === "records" && !RECORDS_TRACK_OPS.includes(op))
+    return { kind: "refused", message: "A completion-records delivery has no records, handback or plan of its own; those belong to the ticket" };
 
   switch (op) {
     case "status":
@@ -331,6 +360,18 @@ export function gateOf(view: DeliveryView, op: DeliveryOp): Gate | null {
     case "reconcilePlan":
     case "plan":
       return afterMerge();
+    case "prepareRecords": {
+      const g = afterMerge();
+      if (g) return g;
+      if (view.after.mainHasMerge !== true) return { kind: "refused", message: "Local main does not contain the merge yet: reconcile the main checkout first (the records are cut from the updated main)" };
+      const p = view.recordsPrep;
+      if (p && p.mergeCommit === view.merged!.commit) {
+        if (p.onMain) return { kind: "refused", message: "Local main already records this ticket Complete: there are no records to deliver" };
+        if (view.records?.outcome === "merged") return { kind: "refused", message: "The completion records are already merged" };
+        if (p.head && view.records?.readiness.reviewedHead === p.head) return { kind: "refused", message: `The completion records are prepared on ${p.branch} at ${short(p.head)}: deliver them below` };
+      }
+      return null;
+    }
     case "reconcile": {
       const g = afterMerge();
       if (g) return g;
@@ -351,6 +392,8 @@ export function gateOf(view: DeliveryView, op: DeliveryOp): Gate | null {
       }
       if (!view.after.coordinator) return { kind: "unavailable", message: "This server has no coordinator session to hand back to" };
       if (view.after.mainHasMerge !== true) return { kind: "refused", message: "Local main does not contain the merge yet: reconcile the main checkout first (orchestrate release refuses until it does)" };
+      const rs = recordsSettled(view);
+      if (rs) return { kind: "refused", message: rs };
       return null;
     }
     case "verify":
@@ -390,6 +433,21 @@ export function gateOf(view: DeliveryView, op: DeliveryOp): Gate | null {
       return null;
     }
   }
+}
+
+/**
+ * Null when the ticket's completion records are on local main: delivered through
+ * their records PR (merged, verified, and local main contains it), or local main
+ * already recorded the ticket Complete. Otherwise why the handback waits.
+ */
+export function recordsSettled(view: DeliveryView): string | null {
+  const p = view.recordsPrep;
+  if (p?.onMain && p.mergeCommit === view.merged?.commit) return null;
+  const r = view.records;
+  if (!r || r.outcome !== "merged" || !r.merged?.commit) return "Deliver the completion records first: prepare them, then merge their records PR (completion edits are never left uncommitted on main)";
+  if (!r.verified) return "Verify the completion records' merge first";
+  if (r.after.mainHasMerge !== true) return "Local main does not contain the completion records yet: reconcile the main checkout for them first";
+  return null;
 }
 
 /** The handback's marker (server/delivery/handback.ts handbackMarker). */

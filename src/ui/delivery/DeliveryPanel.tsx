@@ -5,12 +5,17 @@
 // Every button is enabled or disabled by the same gate the server applies
 // (src/data/delivery.ts gateOf), with the reason as its title. "No checks
 // reported" is never shown as passing.
+//
+// After a verified merge, the ticket's completion records are prepared and
+// delivered as their own records PR: the same panel, nested, for the records
+// view, with every request sent as `track: "records"`.
 
 import { useState, type ReactNode } from "react";
 import {
   DELIVERY_STEPS,
   gateOf,
   isReadyToDeliver,
+  recordsSettled,
   type DeliveryBoard,
   type DeliveryClient,
   type DeliveryOp,
@@ -33,6 +38,7 @@ const STEP_LABEL: Record<DeliveryStep, string> = {
   merge: "Merge",
   verify: "Verify",
   reconcile: "Reconcile main",
+  records: "Completion records",
   handback: "Hand back",
   plan: "Plan",
 };
@@ -48,6 +54,7 @@ const OP_LABEL: Record<DeliveryOp, string> = {
   verify: "Verify",
   reconcilePlan: "List main checkout",
   reconcile: "Reconcile main",
+  prepareRecords: "Prepare completion records",
   handback: "Hand back to the coordinator",
   plan: "Refresh plan",
 };
@@ -62,7 +69,12 @@ export interface DeliveryPanelProps {
   onSignIn?: () => void;
   /** Tests: a reply to show as the last result. */
   initialReply?: DeliveryReply | null;
+  /** Rendered inside the ticket's panel (the completion-records delivery). */
+  nested?: boolean;
 }
+
+/** The client for the records delivery: the same requests, for `track: "records"`. */
+export const recordsClientOf = (client: DeliveryClient): DeliveryClient => ({ request: (op, params) => client.request(op, { ...params, track: "records" }) });
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -114,7 +126,7 @@ function StepRow({ name, step, running }: { name: DeliveryStep; step: StepView |
   );
 }
 
-export function DeliveryPanel({ deliveryKey, board, view, client, onSignIn, initialReply = null }: DeliveryPanelProps) {
+export function DeliveryPanel({ deliveryKey, board, view, client, onSignIn, initialReply = null, nested = false }: DeliveryPanelProps) {
   const [busy, setBusy] = useState<DeliveryOp | null>(null);
   const [last, setLast] = useState<DeliveryReply | null>(initialReply);
   const [ack, setAck] = useState(false);
@@ -153,9 +165,15 @@ export function DeliveryPanel({ deliveryKey, board, view, client, onSignIn, init
   const noChecks = st?.checks.summary === "none";
   const evidence = i?.evidence;
   const ready = isReadyToDeliver(view);
+  const recordsTrack = view.track === "records";
+  const steps = recordsTrack ? DELIVERY_STEPS.filter((n) => n !== "records" && n !== "handback" && n !== "plan") : DELIVERY_STEPS;
+  const recordsPanel =
+    !recordsTrack && view.records ? (
+      <DeliveryPanel deliveryKey={view.key} board={board} view={view.records} client={recordsClientOf(client)} onSignIn={onSignIn} nested />
+    ) : null;
 
   return (
-    <div className="scroll-thin min-h-0 flex-1 overflow-y-auto p-4" data-delivery={view.key}>
+    <div className={nested ? "border-[3px] border-dashed border-cream-3 p-3" : "scroll-thin min-h-0 flex-1 overflow-y-auto p-4"} data-delivery={view.key} data-track={view.track}>
       {/* Readiness and outcome */}
       <div className="mb-3 flex flex-wrap items-center gap-2 text-[14px]">
         {view.readiness.ready ? (
@@ -225,7 +243,11 @@ export function DeliveryPanel({ deliveryKey, board, view, client, onSignIn, init
         <Row label="Repository">{view.repo ?? i?.repo ?? "—"}</Row>
         <Row label="Branch">{view.branch ?? view.readiness.branch ?? "—"}</Row>
         <Row label="Head">{view.head ?? "— (inspect)"}</Row>
-        <Row label="Reviewed head">{i?.reviewedHead ?? view.readiness.reviewedHead ?? "—"}</Row>
+        {recordsTrack ? (
+          <Row label="Records head">{view.readiness.reviewedHead ?? "— (prepare the records)"}</Row>
+        ) : (
+          <Row label="Reviewed head">{i?.reviewedHead ?? view.readiness.reviewedHead ?? "—"}</Row>
+        )}
         {i && i.recordOnly.length > 0 && <Row label="Record-only">{i.recordOnly.join(", ")} (change only {i.recordPath})</Row>}
         <Row label="Base (origin)">{view.base ?? "—"}</Row>
         {i && <Row label="Behind base">{i.behind ? `yes (merge base ${i.mergeBase})` : "no"}</Row>}
@@ -259,6 +281,17 @@ export function DeliveryPanel({ deliveryKey, board, view, client, onSignIn, init
         )}
       </Section>
 
+      {recordsTrack ? (
+        <Section title="Records check">
+          <div className="text-[13px]" data-testid="records-check">
+            {i?.evidence.line ? <span>{i.evidence.line}</span> : <span className="text-muted">Inspect to run the mechanical records check.</span>}
+            <p className="mt-1 text-muted">
+              Only a records-only diff passes: the ticket's Status, the derived Feature Status and the history entry, exactly. Your exact approval of this head accepts it in place of a tester PASS; any
+              other change is refused and needs normal review.
+            </p>
+          </div>
+        </Section>
+      ) : (
       <Section title="Evidence">
         <Row label="Review">{evidence?.line ?? (view.readiness.reviewedHead ? `review PASS on ${view.readiness.reviewedHead}` : "—")}</Row>
         <div className="mt-1 text-[13px]" data-testid="local-evidence">
@@ -276,6 +309,7 @@ export function DeliveryPanel({ deliveryKey, board, view, client, onSignIn, init
           )}
         </div>
       </Section>
+      )}
 
       <Section title="Approval">
         {view.approvalState === "stale" && (
@@ -397,11 +431,11 @@ export function DeliveryPanel({ deliveryKey, board, view, client, onSignIn, init
         {(view.pr || view.outcome !== "none") && view.outcome !== "pending" && view.outcome !== "unknown" && <div className="mt-2">{button("verify", "Verify merge")}</div>}
       </Section>
 
-      {view.outcome === "merged" && <AfterMerge view={view} button={button} busy={busy} confirm={confirmReconcile} setConfirm={setConfirmReconcile} />}
+      {view.outcome === "merged" && <AfterMerge view={view} button={button} busy={busy} confirm={confirmReconcile} setConfirm={setConfirmReconcile} records={recordsPanel} />}
 
       <Section title="Steps">
         <ul data-testid="steps">
-          {DELIVERY_STEPS.map((n) => (
+          {steps.map((n) => (
             <StepRow key={n} name={n} step={stepOf.get(n)} running={runningStep === n} />
           ))}
         </ul>
@@ -416,7 +450,21 @@ type ButtonFn = (op: DeliveryOp, label: string, params?: Record<string, string>,
  * After a verified merge: list the main checkout and reconcile it for exactly
  * that listing, hand the ticket back to the coordinator once, refresh the plan.
  */
-function AfterMerge({ view, button, busy, confirm, setConfirm }: { view: DeliveryView; button: ButtonFn; busy: DeliveryOp | null; confirm: boolean; setConfirm: (v: boolean) => void }) {
+function AfterMerge({
+  view,
+  button,
+  busy,
+  confirm,
+  setConfirm,
+  records,
+}: {
+  view: DeliveryView;
+  button: ButtonFn;
+  busy: DeliveryOp | null;
+  confirm: boolean;
+  setConfirm: (v: boolean) => void;
+  records: ReactNode;
+}) {
   const am = view.after;
   const rp = am.reconcilePlan;
   const done = am.reconciled;
@@ -501,6 +549,10 @@ function AfterMerge({ view, button, busy, confirm, setConfirm }: { view: Deliver
         </div>
       )}
 
+      {view.track === "ticket" && <CompletionRecords view={view} button={button} records={records} />}
+
+      {view.track === "ticket" && (
+      <>
       <div className="mt-3 flex flex-wrap items-center gap-2">
         {button("handback", hb?.status === "unconfirmed" ? "Send the handback again" : "Hand back to the coordinator")}
         <span className="text-[12px] text-muted">asks it once to run /ticket complete {view.key}, then orchestrate release {view.key}</span>
@@ -546,6 +598,50 @@ function AfterMerge({ view, button, busy, confirm, setConfirm }: { view: Deliver
           )}
         </div>
       )}
+      </>
+      )}
     </Section>
+  );
+}
+
+/**
+ * The completion records: prepared on ticket/<key>-records from the updated
+ * main, then delivered as their own records PR (the nested panel). The handback
+ * waits until they are on local main.
+ */
+function CompletionRecords({ view, button, records }: { view: DeliveryView; button: ButtonFn; records: ReactNode }) {
+  const p = view.recordsPrep;
+  const settled = recordsSettled(view);
+  return (
+    <div className="mt-3" data-testid="completion-records" data-settled={settled ? "no" : "yes"}>
+      <h5 className="text-[13px] font-semibold">Completion records</h5>
+      <p className="text-[12px] text-muted">
+        The ticket's Status, the derived Feature Status and, when the Feature completes, one history entry — committed on their own branch from the updated main and delivered as a records PR, never left
+        on main uncommitted.
+      </p>
+      <div className="mt-1 flex flex-wrap items-center gap-2">{button("prepareRecords", p?.head ? "Prepare again" : "Prepare completion records")}</div>
+      {p && (
+        <div className="mt-1 text-[13px]" data-testid="records-prep" data-on-main={String(p.onMain)}>
+          {p.onMain ? (
+            <span>Local main already records {view.key} Complete: there are no records to deliver.</span>
+          ) : (
+            <>
+              <Row label="Branch">{p.branch}</Row>
+              <Row label="Records head">{p.head}</Row>
+              <Row label="Cut from">{p.parent}</Row>
+              <ul className="list-disc pl-4 text-[12px]">
+                {p.changes.map((c) => (
+                  <li key={c}>{c}</li>
+                ))}
+              </ul>
+            </>
+          )}
+        </div>
+      )}
+      {records}
+      <p className="mt-1 text-[12px]" style={{ color: settled ? AMBER : GREEN }}>
+        {settled ?? "The completion records are on local main."}
+      </p>
+    </div>
   );
 }

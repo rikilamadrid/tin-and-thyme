@@ -25,7 +25,7 @@ import { parseNameStatus, parseStatus, Reconciler, safeRelative } from "../serve
 import { createDeliveryService, type DeliveryService } from "../server/delivery/service";
 import { backupsDir, DeliveryStore } from "../server/delivery/state";
 import { parseRequest } from "../server/delivery/wire";
-import { git, makeScenario, result, type World } from "./delivery-fake";
+import { addRecordsFixture, git, makeScenario, result, type World } from "./delivery-fake";
 
 // ---------------------------------------------------------------- harness
 
@@ -70,7 +70,7 @@ function refusedReply(label: string, r: DeliveryReply, kind: string, text?: RegE
 const ORIGIN = "http://127.0.0.1:5173";
 
 /** Local git commands the fake world does not answer: reconcile's, run for real on the throwaway repository. */
-const LOCAL = new Set(["--no-optional-locks", "ls-tree", "ls-files", "symbolic-ref", "merge", "checkout", "rm", "checkout-index"]);
+const LOCAL = new Set(["--no-optional-locks", "ls-tree", "ls-files", "symbolic-ref", "merge", "checkout", "rm", "checkout-index", "hash-object", "mktree", "commit-tree", "update-ref"]);
 
 interface PlanFixture {
   dispatch: { key: string; title: string }[];
@@ -89,7 +89,7 @@ function runnerFor(world: World, plan: { current: PlanFixture | null }, owners: 
       if (!plan.current) return result("", 1, "refusing to plan: not in orchestrator mode");
       return result(JSON.stringify({ outcome: plan.current.dispatch.length ? "dispatch" : "nothing-eligible", message: "plan", ...plan.current, stale: [] }));
     }
-    if (cmd === "git" && LOCAL.has(args[0])) return run("git", args, { cwd: opts.cwd ?? world.repo });
+    if (cmd === "git" && LOCAL.has(args[0])) return run("git", args, { cwd: opts.cwd ?? world.repo, ...(opts.input !== undefined ? { input: opts.input } : {}) });
     return world.runner(cmd, args, opts);
   };
 }
@@ -100,8 +100,9 @@ interface Typed {
   answer: boolean | "throw";
 }
 
-async function kitchen(name: string, opts: { coordinator?: boolean } = {}) {
+async function kitchen(name: string, opts: { coordinator?: boolean; records?: boolean } = {}) {
   const s = makeScenario(tmp, name);
+  if (opts.records) addRecordsFixture(s);
   const snap: { delivery?: DeliveryBoard } = {};
   const events: OfficeEvent[] = [];
   const hub = { snap, emit: (e: OfficeEvent) => void events.push(e) };
@@ -150,6 +151,24 @@ async function deliver(k: Kitchen) {
   const v = k.view();
   if (v.outcome !== "merged" || !v.verified) throw new Error(`${k.kitchenKey}: not merged and verified`);
   return { merge: v.merged!.commit!, approved: i };
+}
+
+/** Prepares the completion records and delivers their records PR (ticket 10.3), through local main reconciled. */
+async function deliverRecords(k: Kitchen) {
+  okReply(`${k.kitchenKey} prepare records`, await k.call("prepareRecords", { key: "10.1" }));
+  const R = { key: "10.1", track: "records" };
+  okReply(`${k.kitchenKey} records inspect`, await k.call("inspect", R));
+  const i = k.view().records!.inspection!;
+  const t = { ...R, head: i.head, base: i.base, tree: i.tree };
+  okReply(`${k.kitchenKey} records approve`, await k.call("approve", t));
+  okReply(`${k.kitchenKey} records push`, await k.call("push", { ...R, head: i.head }));
+  okReply(`${k.kitchenKey} records PR`, await k.call("ensurePr", R));
+  okReply(`${k.kitchenKey} records status`, await k.call("status", R));
+  okReply(`${k.kitchenKey} records acknowledge`, await k.call("acknowledgeNoChecks", t));
+  okReply(`${k.kitchenKey} records merge`, await k.call("merge", t));
+  okReply(`${k.kitchenKey} records list`, await k.call("reconcilePlan", R));
+  okReply(`${k.kitchenKey} records reconcile`, await k.call("reconcile", { ...R, digest: k.view().records!.after.reconcilePlan!.digest }));
+  return { head: i.head, merge: k.view().records!.merged!.commit! };
 }
 
 const porcelain = (repo: string) => execFileSync("git", ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching"], { cwd: repo, encoding: "utf8" });
@@ -441,7 +460,7 @@ async function reconcileRefusals() {
 // ---------------------------------------------------------------- the handback: once per marker, only once main has the merge
 
 async function handbackOnce() {
-  const k = await kitchen("handback");
+  const k = await kitchen("handback", { records: true });
   const { merge } = await deliver(k);
   // Release is refused until local main contains the merge, so the handback (which asks for it) is too.
   refusedReply("handback before main has the merge (gate)", await k.call("handback", { key: "10.1" }), "refused", /reconcile the main checkout first/);
@@ -452,6 +471,7 @@ async function handbackOnce() {
     update: (key: string, change: Parameters<DeliveryStore["update"]>[1]) => void store.update(key, change),
     link: { type: async (t: string) => (k.typed.texts.push(t), true) },
     mainContains: (c: string) => rec.mainContains(c),
+    records: async () => ({ onMain: true as const }),
     now: () => new Date(),
   };
   let refusal = "";
@@ -465,7 +485,12 @@ async function handbackOnce() {
 
   okReply("list", await k.call("reconcilePlan", { key: "10.1" }));
   okReply("reconcile", await k.call("reconcile", { key: "10.1", digest: k.view().after.reconcilePlan!.digest }));
-  check("drawer: handback enabled once main has the merge", buttons(render(k.view()), "handback").every((b) => !b.includes("disabled")));
+  // The completion records come first: the handback waits until they are on local main (10.3, human decision 2026-11-13).
+  refusedReply("handback before the records are on main (gate)", await k.call("handback", { key: "10.1" }), "refused", /completion records first/);
+  check("drawer: handback disabled until the records are on main", buttons(render(k.view()), "handback").every((b) => b.includes("disabled")));
+  eq("nothing typed before the records are on main", k.typed.texts.length, 0);
+  const records = await deliverRecords(k);
+  check("drawer: handback enabled once main has the merge and the records", buttons(render(k.view()), "handback").every((b) => !b.includes("disabled")));
 
   // Two clicks at once: one runs, the other is busy. Exactly one line is typed.
   const [a, b] = await Promise.all([k.call("handback", { key: "10.1" }), k.call("handback", { key: "10.1" })]);
@@ -473,6 +498,7 @@ async function handbackOnce() {
   eq("typed once", k.typed.texts.length, 1);
   const marker = handbackMarker("10.1", merge);
   check("typed: the marked request", k.typed.texts[0].startsWith(`[${marker}]`) && /\/ticket complete 10\.1/.test(k.typed.texts[0]) && /orchestrate release 10\.1/.test(k.typed.texts[0]));
+  check("typed: the records are on main, not to be edited again", k.typed.texts[0].includes(`records PR #${k.view().records!.merged!.pr}, squash-merged as ${records.merge}`) && /do not edit or commit them again/.test(k.typed.texts[0]));
   let v = k.view();
   check("view: handed back", v.after.handback?.status === "sent" && v.after.handback.marker === marker && v.after.handback.attempts === 1);
 
@@ -507,10 +533,11 @@ async function handbackOnce() {
 }
 
 async function handbackUnconfirmed() {
-  const k = await kitchen("unconfirmed");
+  const k = await kitchen("unconfirmed", { records: true });
   await deliver(k);
   okReply("list", await k.call("reconcilePlan", { key: "10.1" }));
   okReply("reconcile", await k.call("reconcile", { key: "10.1", digest: k.view().after.reconcilePlan!.digest }));
+  await deliverRecords(k);
   k.typed.answer = false;
   refusedReply("terminal did not confirm", await k.call("handback", { key: "10.1" }), "failed", /did not confirm/);
   check("unconfirmed recorded", k.view().after.handback?.status === "unconfirmed");
@@ -537,7 +564,14 @@ async function handbackUnconfirmed() {
   const rec = new Reconciler({ root: k2.repo, repo: "owner/project", base: "main", runner: k2.runner });
   let kind = "";
   try {
-    await sendHandback("10.1", { read: (key) => store.read(key), update: (key, c) => void store.update(key, c), link: { type: async (t) => (k2.typed.texts.push(t), true) }, mainContains: (c) => rec.mainContains(c), now: () => new Date() });
+    await sendHandback("10.1", {
+      read: (key) => store.read(key),
+      update: (key, c) => void store.update(key, c),
+      link: { type: async (t) => (k2.typed.texts.push(t), true) },
+      mainContains: (c) => rec.mainContains(c),
+      records: async () => ({ onMain: true as const }),
+      now: () => new Date(),
+    });
   } catch (e) {
     kind = (e as { kind?: string }).kind ?? "";
   }
