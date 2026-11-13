@@ -145,7 +145,9 @@ async function main() {
 
   // In-app delivery (Feature 10): Pathfinder projects with a GitHub origin. Its state is kept in
   // ~/.controlroom/<kitchen>/deliveries/, and it runs only on a request from this kitchen's browser page.
-  const delivery = pf ? attachDelivery({ hub, root: repo.root, github: repo.github, kitchenKey: slug }) : null;
+  // The handback (ticket 10.3) is typed into the coordinator's session, once per merge.
+  const coordinator = pfRun ? { type: (text: string) => sessions.typeInto(COORDINATOR_ID, text) } : null;
+  const delivery = pf ? attachDelivery({ hub, root: repo.root, github: repo.github, kitchenKey: slug, coordinator }) : null;
   const noDelivery = "Delivery works in Pathfinder projects only.";
   if (!delivery) hub.snap.delivery = unavailableBoard(noDelivery);
 

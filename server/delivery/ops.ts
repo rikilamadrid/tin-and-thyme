@@ -289,6 +289,27 @@ export interface DeliveryConfig {
    * (default 5 minutes; the merge command is killed after 60 s).
    */
   settleAfterMs?: number;
+  /**
+   * Set for the completion-records track (records.ts, service.ts): the branch
+   * delivered to origin is `ticket/<key>-records`, the commit is read from the
+   * kitchen's own local ref (never a local branch), there is no engine claim or
+   * worktree, and the engine's reviewed head is replaced by the mechanical
+   * records check, which must pass on every inspection (and so before every
+   * approval, push, PR and merge). Only that verified records-only diff can be
+   * approved in place of a tester PASS. Everything else — the exact approval,
+   * the push refspec, the PR, the checks, the pinned squash merge and its
+   * verification — is the same code as for a ticket.
+   */
+  records?: RecordsTrack;
+}
+
+export interface RecordsTrack {
+  /** `ticket/<key>-records`: the branch on origin. */
+  branch(key: string): string;
+  /** The local ref that holds the records commit (`refs/tin-and-thyme/records/<key>`). */
+  localRef(key: string): string;
+  /** Throws a DeliveryError unless `head` is exactly the key's completion records, on main and onto `base` (merge tree `tree`). */
+  check(key: string, o: { head: string; base: string; tree: string }): Promise<{ evidence: string; recordPath: string; title: string | null }>;
 }
 
 export type Outcome<T> =
@@ -425,10 +446,22 @@ export class Delivery {
         return { data: { pr, created: false, merged: false }, message: `reusing PR #${pr.number}`, change: record(pr) };
       }
 
-      const title = text(opts.title, 256) ?? `${insp.title ?? `Ticket ${key}`} (ticket ${key})`;
+      const records = !!this.cfg.records;
+      const title = text(opts.title, 256) ?? (records ? `Completion records for ticket ${key}` : `${insp.title ?? `Ticket ${key}`} (ticket ${key})`);
       const body =
         text(opts.body, 20_000) ??
-        [`Delivers ticket \`${insp.recordPath ?? `context/tickets/${key}`}\`.`, "", `- Head: \`${insp.head}\``, `- Reviewed: \`${insp.reviewedHead}\``, `- Base: \`${insp.base}\``, `- Expected tree after merge: \`${insp.tree}\``].join("\n");
+        (records
+          ? [
+              `Completion records for ticket \`${insp.recordPath ?? `context/tickets/${key}`}\`, after its implementation merge was verified.`,
+              "",
+              `- Head: \`${insp.head}\``,
+              `- Base: \`${insp.base}\``,
+              `- Expected tree after merge: \`${insp.tree}\``,
+              `- Check: ${insp.evidence ?? "records-only diff verified mechanically"}`,
+              "",
+              "A records-only diff: the human's exact approval of this head in Tin & Thyme stands in for a tester PASS. Any other change needs normal review.",
+            ].join("\n")
+          : [`Delivers ticket \`${insp.recordPath ?? `context/tickets/${key}`}\`.`, "", `- Head: \`${insp.head}\``, `- Reviewed: \`${insp.reviewedHead}\``, `- Base: \`${insp.base}\``, `- Expected tree after merge: \`${insp.tree}\``].join("\n"));
       await this.forge.createPr(insp.branch, title, body);
       const pr = await this.forge.findPr(insp.branch);
       if (!pr || pr.state !== "OPEN") throw new DeliveryError("failed", `created a PR for ${insp.branch} but cannot find it open`);
@@ -625,6 +658,15 @@ export class Delivery {
     });
   }
 
+  /**
+   * Runs a post-merge step (reconcile.ts, handback.ts) the way every operation
+   * here runs: one step per ticket at a time across processes, its result
+   * recorded and redacted.
+   */
+  runStep<T>(key: string, name: StepName, fn: () => Promise<{ data: T; message: string; change?: (s: DeliveryState) => void }>): Promise<Outcome<T>> {
+    return this.step(key, name, fn);
+  }
+
   // ------------------------------------------------------------ internals
 
   /** Runs one operation for a key, one at a time, recording its result. */
@@ -736,6 +778,8 @@ export class Delivery {
 
   private async validClaim(key: string, opts: { allowAnyState?: boolean } = {}): Promise<Claim> {
     await this.validRepo();
+    // The records track has no engine claim: its branch is fixed, and what may be delivered is decided by the records check.
+    if (this.cfg.records) return { key, branch: this.cfg.records.branch(key), worktree: null, orphan: false, state: "done", last: null, ref: null, title: null };
     const claim = await this.claim(key);
     if (!claim) throw new DeliveryError("invalid", `${key} has no engine claim`);
     if (!claim.branch || !isTicketBranch(claim.branch, key)) throw new DeliveryError("invalid", `${key}'s claim is on ${claim.branch ?? "no branch"}, not ticket/${key}-<slug>`);
@@ -763,6 +807,12 @@ export class Delivery {
   private async inspectNow(key: string): Promise<Inspection> {
     const claim = await this.validClaim(key);
     const branch = claim.branch!;
+    if (this.cfg.records) {
+      const r = await this.git(["rev-parse", "--verify", "--quiet", `${this.cfg.records.localRef(key)}^{commit}`]);
+      const head = r.stdout.trim();
+      if (!r.ok || !isSha(head)) throw new DeliveryError("refused", `the completion records for ${key} are not prepared yet (${this.cfg.records.localRef(key)} does not exist): prepare them first`);
+      return this.inspectCommon(key, { branch, worktree: "", title: null, head, reviewedHead: head, recordOnly: [], recordPath: null, evidence: null });
+    }
     const worktree = join(this.cfg.root, claim.worktree!);
     const head = await this.commit(`refs/heads/${branch}`, `the ${branch} head`);
 
@@ -783,7 +833,12 @@ export class Delivery {
       if (other.length) throw new DeliveryError("refused", `commits after the reviewed head change more than the ticket record`, { reasons: other.slice(0, 10) });
       recordOnly = (await this.gitOk(["rev-list", `${reviewedHead}..${head}`], "listing post-review commits")).split("\n").filter(Boolean);
     }
+    return this.inspectCommon(key, { branch, worktree: claim.worktree!, title: claim.title, head, reviewedHead, recordOnly, recordPath: claim.ref, evidence: claim.last });
+  }
 
+  /** The validations both tracks share: denylist, base, secret scan, merge tree; then the records check on the records track. */
+  private async inspectCommon(key: string, t: Pick<Inspection, "branch" | "worktree" | "title" | "head" | "reviewedHead" | "recordOnly" | "recordPath" | "evidence">): Promise<Inspection> {
+    const { branch, head } = t;
     await this.checkDenylist(head);
 
     const base = await this.fetchBase();
@@ -812,22 +867,28 @@ export class Delivery {
     const tree = merge.stdout.split("\n")[0].trim();
     if (!isSha(tree)) throw new DeliveryError("failed", "merge-tree returned no tree");
 
+    let { title, recordPath, evidence } = t;
+    if (this.cfg.records) {
+      // Exactly the completion records, cut from a main that contains the verified implementation merge, and exactly them onto this base.
+      const rc = await this.cfg.records.check(key, { head, base, tree });
+      ({ title, recordPath, evidence } = rc);
+    }
     const insp: Inspection = {
       key,
       repo: this.cfg.repo,
       branch,
-      worktree: claim.worktree!,
-      title: claim.title,
+      worktree: t.worktree,
+      title,
       head,
-      reviewedHead,
-      recordOnly,
-      recordPath: claim.ref,
+      reviewedHead: t.reviewedHead,
+      recordOnly: t.recordOnly,
+      recordPath,
       base,
       mergeBase,
       behind: mergeBase !== base,
       tree,
       unscanned: scan.binary,
-      evidence: claim.last,
+      evidence,
     };
     this.cfg.store.update(key, (s) => {
       s.repo = insp.repo;

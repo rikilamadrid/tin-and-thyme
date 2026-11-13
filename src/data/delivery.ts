@@ -10,12 +10,25 @@
 //
 // Nothing here talks to git, GitHub or the DOM.
 
-export const DELIVERY_OPS = ["inspect", "approve", "acknowledgeNoChecks", "push", "ensurePr", "status", "merge", "verify"] as const;
+export const DELIVERY_OPS = ["inspect", "approve", "acknowledgeNoChecks", "push", "ensurePr", "status", "merge", "verify", "reconcilePlan", "reconcile", "prepareRecords", "handback", "plan"] as const;
 export type DeliveryOp = (typeof DELIVERY_OPS)[number];
 
-/** The recorded steps (state.ts STEPS). Acknowledging "no checks" is recorded as an approval. */
-export const DELIVERY_STEPS = ["inspect", "approve", "push", "ensurePr", "status", "merge", "verify"] as const;
+/**
+ * The recorded steps (state.ts STEPS). Acknowledging "no checks" is recorded as
+ * an approval; listing the main checkout (reconcilePlan) is read-only and records
+ * nothing; preparing the completion records is the `records` step.
+ */
+export const DELIVERY_STEPS = ["inspect", "approve", "push", "ensurePr", "status", "merge", "verify", "reconcile", "records", "handback", "plan"] as const;
 export type DeliveryStep = (typeof DELIVERY_STEPS)[number];
+
+/**
+ * Which delivery a request or view is for: the ticket's implementation, or its
+ * completion records, delivered as `ticket/<key>-records` (server/delivery/records.ts),
+ * which has its own state, approval and steps. Only these ops exist on the
+ * records track; it has no records, handback or plan of its own.
+ */
+export type DeliveryTrack = "ticket" | "records";
+export const RECORDS_TRACK_OPS: readonly DeliveryOp[] = ["inspect", "approve", "acknowledgeNoChecks", "push", "ensurePr", "status", "merge", "verify", "reconcilePlan", "reconcile"];
 
 /**
  * Why an operation did not run. The first six come from the delivery core
@@ -38,8 +51,16 @@ export interface DeliveryReadiness {
   /** The reviewed head the claim records (`Last: review PASS on <full sha>`), or null. */
   reviewedHead: string | null;
   branch: string | null;
-  /** Ready to deliver: engine state `done`, a recorded review PASS, and a live claim on ticket/<key>-*. */
+  /**
+   * Ready to deliver: engine state `done`, a recorded review PASS, a live claim on
+   * ticket/<key>-*, every `Blocked by` ticket Complete, and a branch that is not
+   * stacked on another ticket's unmerged commits.
+   */
   ready: boolean;
+  /** The tickets it waits on: unfinished blockers, or parents it is stacked on. */
+  waitingOn: string[];
+  /** Its branch carries another ticket's unmerged commits ("Waiting on <key> (stacked)"). */
+  stacked: boolean;
   /** Why it is not ready, when it is not. */
   reason: string | null;
 }
@@ -132,8 +153,100 @@ export interface MergedView {
   verification: { at: string; parent: string; tree: string; main: string } | null;
 }
 
+/** One file a fast-forward of main would overwrite or remove (server/delivery/reconcile.ts). */
+export interface ReconcileCollisionView {
+  path: string;
+  kind: "modified" | "untracked" | "ignored";
+  status: string;
+  why: string;
+  type: "file" | "symlink" | "missing";
+  size: number | null;
+  /** The main checkout's copy equals what the merged origin/main has there. */
+  sameAsMerged: boolean;
+  /** Staged content that differs from the working file is backed up too. */
+  staged: boolean;
+}
+
+/** The last listing of the main checkout, kept in memory: the click must match its digest. */
+export interface ReconcilePlanView {
+  at: string;
+  branch: string;
+  head: string;
+  target: string;
+  mergeCommit: string;
+  upToDate: boolean;
+  collisions: ReconcileCollisionView[];
+  preserved: { path: string; status: string }[];
+  preservedTotal: number;
+  refusal: string | null;
+  digest: string;
+}
+
+export interface ReconciledView {
+  at: string;
+  before: string;
+  after: string;
+  target: string;
+  mergeCommit: string;
+  backup: string | null;
+  moved: number;
+  preserved: number;
+}
+
+export interface HandbackView {
+  marker: string;
+  at: string;
+  status: "sending" | "sent" | "unconfirmed";
+  note: string;
+  attempts: number;
+}
+
+export interface PlanView {
+  at: string;
+  outcome: string;
+  message: string;
+  eligible: { key: string; title: string; deferred: string | null }[];
+  waitingOn: { key: string; title: string }[];
+  newly: string[];
+}
+
+/** After a verified merge: the main checkout, the handback to the coordinator, and the refreshed plan. */
+export interface AfterMergeView {
+  /** Local main contains the merge commit (null: not known yet). */
+  mainHasMerge: boolean | null;
+  reconcilePlan: ReconcilePlanView | null;
+  reconciled: ReconciledView | null;
+  handback: HandbackView | null;
+  /** A coordinator session exists to hand back to (not in a preview). */
+  coordinator: boolean;
+  /**
+   * The engine's claim on the ticket is released (`orchestrate release`): true,
+   * false while it is still held, null when not known (not read yet, or the
+   * engine could not be read). The completion records wait for it.
+   */
+  claimReleased: boolean | null;
+  plan: PlanView | null;
+}
+
+/** The completion records prepared after the verified merge (state.ts RecordsPrepRecord). */
+export interface RecordsPrepView {
+  at: string;
+  /** The branch on origin they are delivered from (`ticket/<key>-records`). */
+  branch: string;
+  /** The kitchen's local ref that holds the commit (never a local branch). */
+  ref: string;
+  /** The records commit; null when local main already records the ticket Complete. */
+  head: string | null;
+  parent: string;
+  mergeCommit: string;
+  changes: string[];
+  onMain: boolean;
+}
+
 export interface DeliveryView {
   key: string;
+  /** "records": the view of the ticket's completion-records delivery (nested in the ticket's view as `records`). */
+  track: DeliveryTrack;
   title: string | null;
   readiness: DeliveryReadiness;
   repo: string | null;
@@ -159,6 +272,11 @@ export interface DeliveryView {
   /** The latest result of each step, in step order. */
   steps: StepView[];
   running: DeliveryOp | null;
+  /** After a verified merge (empty before). */
+  after: AfterMergeView;
+  /** The ticket track only: the prepared completion records, and their own delivery (null before the merge is verified). */
+  recordsPrep: RecordsPrepView | null;
+  records: DeliveryView | null;
   updated: string;
 }
 
@@ -236,9 +354,64 @@ export function gateOf(view: DeliveryView, op: DeliveryOp): Gate | null {
     return null;
   };
 
+  const afterMerge = (): Gate | null => {
+    if (outcome !== "merged" || !view.merged?.commit) return { kind: "refused", message: "Nothing is merged yet: this comes after a verified merge" };
+    if (!view.verified) return { kind: "refused", message: "Verify the merge first" };
+    return null;
+  };
+  // A records delivery never produces records, a handback or a plan of its own.
+  if (view.track === "records" && !RECORDS_TRACK_OPS.includes(op))
+    return { kind: "refused", message: "A completion-records delivery has no records, handback or plan of its own; those belong to the ticket" };
+
   switch (op) {
     case "status":
       return null;
+    case "reconcilePlan":
+    case "plan":
+      return afterMerge();
+    case "prepareRecords": {
+      const g = afterMerge();
+      if (g) return g;
+      if (view.records?.outcome === "merged") return { kind: "refused", message: "The completion records are already merged" };
+      const p = view.recordsPrep && view.recordsPrep.mergeCommit === view.merged!.commit ? view.recordsPrep : null;
+      if (p?.onMain) return { kind: "refused", message: "Local main already records this ticket Complete: there are no records to deliver" };
+      if (view.after.mainHasMerge !== true) return { kind: "refused", message: "Local main does not contain the merge yet: reconcile the main checkout first (the records are cut from the updated main)" };
+      if (view.after.claimReleased !== true)
+        return {
+          kind: "refused",
+          message:
+            view.after.claimReleased === false
+              ? `Hand the ticket back first: the records are prepared once the coordinator has released ${view.key}'s claim (orchestrate release proves the merge from local main, and cannot once the records are on it)`
+              : `Whether ${view.key}'s claim is released is not known yet (the engine has not answered); the records are prepared only after it is`,
+        };
+      // Preparing again is safe: a commit that is still exactly the records is kept as it is.
+      return null;
+    }
+    case "reconcile": {
+      const g = afterMerge();
+      if (g) return g;
+      const p = view.after.reconcilePlan;
+      if (!p) return { kind: "refused", message: "List the main checkout first: the backup is for exactly what you were shown" };
+      if (p.mergeCommit !== view.merged!.commit) return { kind: "stale", message: "The listing is for another merge; list the main checkout again" };
+      if (p.refusal) return { kind: "refused", message: p.refusal };
+      if (p.upToDate) return { kind: "refused", message: "Local main already contains the merge: nothing to reconcile" };
+      return null;
+    }
+    case "handback": {
+      const g = afterMerge();
+      if (g) return g;
+      const h = view.after.handback;
+      if (h && h.marker === handbackMarkerOf(view.key, view.merged!.commit!)) {
+        if (h.status === "sent") return { kind: "refused", message: `Handed back to the coordinator at ${h.at}; it is never sent twice` };
+        // A persisted "sending" can outlive its process. Active requests are
+        // gated by view.running above and the server's step lock; an idle
+        // request must reach sendHandback to mark an interrupted send
+        // unconfirmed, without typing again on that recovery click.
+      }
+      if (!view.after.coordinator) return { kind: "unavailable", message: "This server has no coordinator session to hand back to" };
+      if (view.after.mainHasMerge !== true) return { kind: "refused", message: "Local main does not contain the merge yet: reconcile the main checkout first (orchestrate release refuses until it does)" };
+      return null;
+    }
     case "verify":
       return outcome !== "none" || view.pr || view.status?.pr ? null : { kind: "refused", message: "Nothing to verify yet: no PR or merge is recorded" };
     case "inspect":
@@ -277,6 +450,28 @@ export function gateOf(view: DeliveryView, op: DeliveryOp): Gate | null {
     }
   }
 }
+
+/**
+ * Null when the ticket's completion records are on local main: delivered through
+ * their records PR (merged, verified, and local main contains it), or local main
+ * already recorded the ticket Complete. Otherwise what is still to do, in order:
+ * the handback and release come first, then the records PR.
+ */
+export function recordsSettled(view: DeliveryView): string | null {
+  const p = view.recordsPrep;
+  if (p?.onMain && p.mergeCommit === view.merged?.commit) return null;
+  const r = view.records;
+  if (!r || r.outcome !== "merged" || !r.merged?.commit) {
+    if (view.after.claimReleased !== true) return `Next: hand the ticket back; once ${view.key}'s claim is released, prepare the completion records and merge their records PR`;
+    return "Next: prepare the completion records, then merge their records PR (completion edits are never left uncommitted on main)";
+  }
+  if (!r.verified) return "Verify the completion records' merge first";
+  if (r.after.mainHasMerge !== true) return "Local main does not contain the completion records yet: reconcile the main checkout for them";
+  return null;
+}
+
+/** The handback's marker (server/delivery/handback.ts handbackMarker). */
+export const handbackMarkerOf = (key: string, mergeCommit: string) => `tin-and-thyme:handback ${key} ${mergeCommit}`;
 
 /** A ticket shown as "Ready to deliver": deliverable now and nothing sent yet (or a settled not-merged). */
 export function isReadyToDeliver(view: DeliveryView): boolean {

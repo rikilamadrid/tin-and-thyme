@@ -5,12 +5,18 @@
 // Every button is enabled or disabled by the same gate the server applies
 // (src/data/delivery.ts gateOf), with the reason as its title. "No checks
 // reported" is never shown as passing.
+//
+// After a verified merge: reconcile main, hand the ticket back (the coordinator
+// releases its claim), then the ticket's completion records are prepared and
+// delivered as their own records PR: the same panel, nested, for the records
+// view, with every request sent as `track: "records"`.
 
 import { useState, type ReactNode } from "react";
 import {
   DELIVERY_STEPS,
   gateOf,
   isReadyToDeliver,
+  recordsSettled,
   type DeliveryBoard,
   type DeliveryClient,
   type DeliveryOp,
@@ -32,6 +38,10 @@ const STEP_LABEL: Record<DeliveryStep, string> = {
   status: "Checks & status",
   merge: "Merge",
   verify: "Verify",
+  reconcile: "Reconcile main",
+  records: "Completion records",
+  handback: "Hand back",
+  plan: "Plan",
 };
 
 const OP_LABEL: Record<DeliveryOp, string> = {
@@ -43,6 +53,11 @@ const OP_LABEL: Record<DeliveryOp, string> = {
   status: "Refresh status",
   merge: "Merge",
   verify: "Verify",
+  reconcilePlan: "List main checkout",
+  reconcile: "Reconcile main",
+  prepareRecords: "Prepare completion records",
+  handback: "Hand back to the coordinator",
+  plan: "Refresh plan",
 };
 
 export interface DeliveryPanelProps {
@@ -55,7 +70,12 @@ export interface DeliveryPanelProps {
   onSignIn?: () => void;
   /** Tests: a reply to show as the last result. */
   initialReply?: DeliveryReply | null;
+  /** Rendered inside the ticket's panel (the completion-records delivery). */
+  nested?: boolean;
 }
+
+/** The client for the records delivery: the same requests, for `track: "records"`. */
+export const recordsClientOf = (client: DeliveryClient): DeliveryClient => ({ request: (op, params) => client.request(op, { ...params, track: "records" }) });
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -107,11 +127,12 @@ function StepRow({ name, step, running }: { name: DeliveryStep; step: StepView |
   );
 }
 
-export function DeliveryPanel({ deliveryKey, board, view, client, onSignIn, initialReply = null }: DeliveryPanelProps) {
+export function DeliveryPanel({ deliveryKey, board, view, client, onSignIn, initialReply = null, nested = false }: DeliveryPanelProps) {
   const [busy, setBusy] = useState<DeliveryOp | null>(null);
   const [last, setLast] = useState<DeliveryReply | null>(initialReply);
   const [ack, setAck] = useState(false);
   const [confirmMerge, setConfirmMerge] = useState(false);
+  const [confirmReconcile, setConfirmReconcile] = useState(false);
 
   if (!client) return <p className="p-4 text-[14px] text-muted">Delivery needs the real kitchen. This demo has no repository to deliver.</p>;
   if (board && !board.available) return <p className="p-4 text-[14px] text-muted">Delivery is not available here: {board.reason}</p>;
@@ -120,6 +141,7 @@ export function DeliveryPanel({ deliveryKey, board, view, client, onSignIn, init
   const act = async (op: DeliveryOp, params: Record<string, string>) => {
     setBusy(op);
     setConfirmMerge(false);
+    setConfirmReconcile(false);
     try {
       setLast(await client.request(op, { key: view.key, ...params }));
     } finally {
@@ -144,9 +166,15 @@ export function DeliveryPanel({ deliveryKey, board, view, client, onSignIn, init
   const noChecks = st?.checks.summary === "none";
   const evidence = i?.evidence;
   const ready = isReadyToDeliver(view);
+  const recordsTrack = view.track === "records";
+  const steps = recordsTrack ? DELIVERY_STEPS.filter((n) => n !== "records" && n !== "handback" && n !== "plan") : DELIVERY_STEPS;
+  const recordsPanel =
+    !recordsTrack && view.records ? (
+      <DeliveryPanel deliveryKey={view.key} board={board} view={view.records} client={recordsClientOf(client)} onSignIn={onSignIn} nested />
+    ) : null;
 
   return (
-    <div className="scroll-thin min-h-0 flex-1 overflow-y-auto p-4" data-delivery={view.key}>
+    <div className={nested ? "border-[3px] border-dashed border-cream-3 p-3" : "scroll-thin min-h-0 flex-1 overflow-y-auto p-4"} data-delivery={view.key} data-track={view.track}>
       {/* Readiness and outcome */}
       <div className="mb-3 flex flex-wrap items-center gap-2 text-[14px]">
         {view.readiness.ready ? (
@@ -216,7 +244,11 @@ export function DeliveryPanel({ deliveryKey, board, view, client, onSignIn, init
         <Row label="Repository">{view.repo ?? i?.repo ?? "—"}</Row>
         <Row label="Branch">{view.branch ?? view.readiness.branch ?? "—"}</Row>
         <Row label="Head">{view.head ?? "— (inspect)"}</Row>
-        <Row label="Reviewed head">{i?.reviewedHead ?? view.readiness.reviewedHead ?? "—"}</Row>
+        {recordsTrack ? (
+          <Row label="Records head">{view.readiness.reviewedHead ?? "— (prepare the records)"}</Row>
+        ) : (
+          <Row label="Reviewed head">{i?.reviewedHead ?? view.readiness.reviewedHead ?? "—"}</Row>
+        )}
         {i && i.recordOnly.length > 0 && <Row label="Record-only">{i.recordOnly.join(", ")} (change only {i.recordPath})</Row>}
         <Row label="Base (origin)">{view.base ?? "—"}</Row>
         {i && <Row label="Behind base">{i.behind ? `yes (merge base ${i.mergeBase})` : "no"}</Row>}
@@ -250,6 +282,17 @@ export function DeliveryPanel({ deliveryKey, board, view, client, onSignIn, init
         )}
       </Section>
 
+      {recordsTrack ? (
+        <Section title="Records check">
+          <div className="text-[13px]" data-testid="records-check">
+            {i?.evidence.line ? <span>{i.evidence.line}</span> : <span className="text-muted">Inspect to run the mechanical records check.</span>}
+            <p className="mt-1 text-muted">
+              Only a records-only diff passes: the ticket's Status, the derived Feature Status and the history entry, exactly. Your exact approval of this head accepts it in place of a tester PASS; any
+              other change is refused and needs normal review.
+            </p>
+          </div>
+        </Section>
+      ) : (
       <Section title="Evidence">
         <Row label="Review">{evidence?.line ?? (view.readiness.reviewedHead ? `review PASS on ${view.readiness.reviewedHead}` : "—")}</Row>
         <div className="mt-1 text-[13px]" data-testid="local-evidence">
@@ -267,6 +310,7 @@ export function DeliveryPanel({ deliveryKey, board, view, client, onSignIn, init
           )}
         </div>
       </Section>
+      )}
 
       <Section title="Approval">
         {view.approvalState === "stale" && (
@@ -388,13 +432,224 @@ export function DeliveryPanel({ deliveryKey, board, view, client, onSignIn, init
         {(view.pr || view.outcome !== "none") && view.outcome !== "pending" && view.outcome !== "unknown" && <div className="mt-2">{button("verify", "Verify merge")}</div>}
       </Section>
 
+      {view.outcome === "merged" && <AfterMerge view={view} button={button} busy={busy} confirm={confirmReconcile} setConfirm={setConfirmReconcile} records={recordsPanel} />}
+
       <Section title="Steps">
         <ul data-testid="steps">
-          {DELIVERY_STEPS.map((n) => (
+          {steps.map((n) => (
             <StepRow key={n} name={n} step={stepOf.get(n)} running={runningStep === n} />
           ))}
         </ul>
       </Section>
+    </div>
+  );
+}
+
+type ButtonFn = (op: DeliveryOp, label: string, params?: Record<string, string>, extraBlock?: string | null) => ReactNode;
+
+/**
+ * After a verified merge, in order: list the main checkout and reconcile it for
+ * exactly that listing, hand the ticket back to the coordinator once, deliver
+ * the completion records (the ticket's panel only), refresh the plan.
+ */
+function AfterMerge({
+  view,
+  button,
+  busy,
+  confirm,
+  setConfirm,
+  records,
+}: {
+  view: DeliveryView;
+  button: ButtonFn;
+  busy: DeliveryOp | null;
+  confirm: boolean;
+  setConfirm: (v: boolean) => void;
+  records: ReactNode;
+}) {
+  const am = view.after;
+  const rp = am.reconcilePlan;
+  const done = am.reconciled;
+  const hb = am.handback;
+  const plan = am.plan;
+  const reconcileGate = gateOf(view, "reconcile");
+  return (
+    <Section title="After merge">
+      <Row label="Local main">
+        <span data-testid="main-has-merge" data-value={String(am.mainHasMerge)}>
+          {am.mainHasMerge === true ? "contains the merge" : am.mainHasMerge === false ? "does not contain the merge yet" : "—"}
+        </span>
+      </Row>
+
+      <div className="mt-2 flex flex-wrap items-center gap-2">{button("reconcilePlan", rp ? "List the main checkout again" : "List the main checkout")}</div>
+      {rp && (
+        <div className="mt-2 text-[13px]" data-testid="reconcile-plan" data-collisions={rp.collisions.length}>
+          <div className="text-muted">
+            as of {rp.at}: {rp.branch} {rp.head.slice(0, 12)} → origin/{rp.branch} {rp.target.slice(0, 12)}
+          </div>
+          {rp.refusal ? (
+            <Banner color={RED} testId="reconcile-refusal">
+              <b>Cannot reconcile.</b> {rp.refusal}
+            </Banner>
+          ) : rp.upToDate ? (
+            <p>Local main already contains the merge: nothing to move or fast-forward.</p>
+          ) : (
+            <>
+              {rp.collisions.length ? (
+                <>
+                  <p>
+                    These {rp.collisions.length} file{rp.collisions.length === 1 ? "" : "s"} would be overwritten or removed. Each is copied to a new backup folder with a manifest, the copy is checked byte for
+                    byte, and only then is it moved out of the way. Nothing is deleted.
+                  </p>
+                  <ul className="mt-1 font-mono text-[12px]" data-testid="collisions">
+                    {rp.collisions.map((c) => (
+                      <li key={c.path} className="border-t-2 border-dashed border-cream-3 py-0.5" data-path={c.path}>
+                        <span className="break-all">{c.path}</span>{" "}
+                        <span className="text-muted">
+                          · {c.kind} ({c.status}) · {c.why}
+                          {c.type === "missing" ? " · deleted here" : ""}
+                          {c.staged ? " · staged content saved too" : ""}
+                        </span>{" "}
+                        {c.sameAsMerged ? <span style={{ color: GREEN }}>same as merged</span> : <span style={{ color: AMBER }}>differs from merged</span>}
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              ) : (
+                <p>Nothing collides: main fast-forwards as it is.</p>
+              )}
+              <p className="mt-1 text-muted">
+                {rp.preservedTotal} unrelated change{rp.preservedTotal === 1 ? "" : "s"} stay{rp.preservedTotal === 1 ? "s" : ""} exactly where {rp.preservedTotal === 1 ? "it is" : "they are"}
+                {rp.preserved.length ? `: ${rp.preserved.slice(0, 12).map((p) => p.path).join(", ")}${rp.preservedTotal > 12 ? ", …" : ""}` : ""}
+              </p>
+              <div className="mt-1 flex flex-wrap items-center gap-2">
+                {confirm ? (
+                  <>
+                    {button("reconcile", `Confirm: back up ${rp.collisions.length} and fast-forward ${rp.branch}`, { digest: rp.digest })}
+                    <button className="btn px-2 text-[13px]" onClick={() => setConfirm(false)}>
+                      Cancel
+                    </button>
+                  </>
+                ) : (
+                  <button className="btn px-2 text-[13px]" data-op="reconcile" disabled={!!(busy || reconcileGate)} title={reconcileGate?.message} onClick={() => setConfirm(true)}>
+                    Back up {rp.collisions.length} file{rp.collisions.length === 1 ? "" : "s"} and fast-forward {rp.branch}…
+                  </button>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+      {done && (
+        <div className="mt-2 text-[13px]" data-testid="reconciled">
+          <b style={{ color: GREEN }}>Main reconciled</b> <span className="text-muted">at {done.at}</span>
+          <Row label="Fast-forward">
+            {done.before.slice(0, 12)} → {done.after.slice(0, 12)}
+          </Row>
+          <Row label="Backup">{done.backup ? `${done.backup} (${done.moved} file${done.moved === 1 ? "" : "s"}, manifest.json)` : "nothing was moved"}</Row>
+          <Row label="Kept">{`${done.preserved} unrelated change${done.preserved === 1 ? "" : "s"}`}</Row>
+        </div>
+      )}
+
+      {view.track === "ticket" && (
+      <>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        {button("handback", hb?.status === "unconfirmed" ? "Send the handback again" : "Hand back to the coordinator")}
+        <span className="text-[12px] text-muted">asks it once to run /ticket complete {view.key}, then orchestrate release {view.key}</span>
+      </div>
+      {hb && (
+        <div className="mt-1 text-[13px]" data-testid="handback" data-status={hb.status}>
+          <b style={{ color: hb.status === "sent" ? GREEN : AMBER }}>{hb.status === "sent" ? "Handed back" : hb.status === "sending" ? "Sending…" : "Not confirmed"}</b>{" "}
+          <span className="text-muted">
+            at {hb.at} · {hb.note}
+          </span>
+          <div className="font-mono text-[12px] text-muted">{hb.marker}</div>
+        </div>
+      )}
+      <Row label="Claim">
+        <span data-testid="claim-released" data-value={String(am.claimReleased)}>
+          {am.claimReleased === true ? "released" : am.claimReleased === false ? "still held (the coordinator releases it after the handback)" : "—"}
+        </span>
+      </Row>
+
+      <CompletionRecords view={view} button={button} records={records} />
+
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        {button("plan", "Refresh the plan")}
+        {plan && <span className="text-[12px] text-muted">as of {plan.at}</span>}
+      </div>
+      {plan && (
+        <div className="mt-1 text-[13px]" data-testid="plan">
+          <p className="text-muted">{plan.message}</p>
+          {plan.eligible.length > 0 ? (
+            <ul>
+              {plan.eligible.map((e) => (
+                <li key={e.key} data-key={e.key} data-newly={plan.newly.includes(e.key) ? "yes" : "no"}>
+                  <b>{e.key}</b> {e.title}
+                  {plan.newly.includes(e.key) && (
+                    <span className="chip ml-1 text-[11px]" style={{ background: GREEN }}>
+                      newly eligible
+                    </span>
+                  )}
+                  {e.deferred && <span className="text-muted"> · {e.deferred}</span>}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p>No ticket is eligible now.</p>
+          )}
+          {plan.waitingOn.length > 0 && (
+            <p className="text-muted">
+              Still waiting on {view.key}: {plan.waitingOn.map((w) => w.key).join(", ")} (its completion has not reached the ticket store yet)
+            </p>
+          )}
+        </div>
+      )}
+      </>
+      )}
+    </Section>
+  );
+}
+
+/**
+ * The completion records: prepared from the updated main once the claim is
+ * released, then delivered as their own records PR from ticket/<key>-records
+ * (the nested panel).
+ */
+function CompletionRecords({ view, button, records }: { view: DeliveryView; button: ButtonFn; records: ReactNode }) {
+  const p = view.recordsPrep;
+  const settled = recordsSettled(view);
+  return (
+    <div className="mt-3" data-testid="completion-records" data-settled={settled ? "no" : "yes"}>
+      <h5 className="text-[13px] font-semibold">Completion records</h5>
+      <p className="text-[12px] text-muted">
+        The ticket's Status, the derived Feature Status and, when the Feature completes, one history entry — committed from the updated main once the claim is released, and delivered as a records PR
+        from ticket/{view.key}-records, never left on main uncommitted.
+      </p>
+      <div className="mt-1 flex flex-wrap items-center gap-2">{button("prepareRecords", p?.head ? "Prepare again" : "Prepare completion records")}</div>
+      {p && (
+        <div className="mt-1 text-[13px]" data-testid="records-prep" data-on-main={String(p.onMain)}>
+          {p.onMain ? (
+            <span>Local main already records {view.key} Complete: there are no records to deliver.</span>
+          ) : (
+            <>
+              <Row label="Branch (origin)">{p.branch}</Row>
+              <Row label="Records head">{p.head}</Row>
+              <Row label="Kept locally as">{p.ref} (not a local branch)</Row>
+              <Row label="Cut from">{p.parent}</Row>
+              <ul className="list-disc pl-4 text-[12px]">
+                {p.changes.map((c) => (
+                  <li key={c}>{c}</li>
+                ))}
+              </ul>
+            </>
+          )}
+        </div>
+      )}
+      {records}
+      <p className="mt-1 text-[12px]" style={{ color: settled ? AMBER : GREEN }}>
+        {settled ?? "The completion records are on local main."}
+      </p>
     </div>
   );
 }

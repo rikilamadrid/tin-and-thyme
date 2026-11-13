@@ -3,13 +3,17 @@
 //   { rpc: "delivery", id, op, params }
 //
 // `id` matches /^[A-Za-z0-9_-]{1,64}$/ and comes back on the reply. `op` is one of
-// the eight named operations, looked up as an own property only. `params` holds
-// exactly the fields that op takes: a ticket key and full commit/tree ids, never
-// a title, a body, a flag or a command. Anything else is refused as `invalid`
-// before the delivery core is reached.
+// the named operations (eight up to the merge, five after it), looked up as an
+// own property only. `params` holds exactly the fields that op takes: a ticket
+// key, full commit/tree ids and a listing digest, never a title, a body, a flag
+// or a command. Anything else is refused as `invalid` before the delivery core
+// is reached. The ops a completion-records delivery has (RECORDS_TRACK_OPS) also
+// take `track: "records"`, its one value, naming that delivery; without it they
+// are the ticket's own.
 
-import { DELIVERY_OPS, type DeliveryOp } from "../../src/data/delivery";
+import { DELIVERY_OPS, RECORDS_TRACK_OPS, type DeliveryOp } from "../../src/data/delivery";
 import { isSha } from "./ops";
+import { isPlanDigest } from "./reconcile";
 import { isTicketKey } from "./state";
 
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
@@ -24,6 +28,11 @@ const PARAMS: Record<DeliveryOp, readonly string[]> = Object.assign(Object.creat
   status: ["key"],
   merge: ["key", "head", "base", "tree"],
   verify: ["key"],
+  reconcilePlan: ["key"],
+  reconcile: ["key", "digest"],
+  prepareRecords: ["key"],
+  handback: ["key"],
+  plan: ["key"],
 } satisfies Record<DeliveryOp, readonly string[]>);
 
 export interface DeliveryParams {
@@ -31,6 +40,10 @@ export interface DeliveryParams {
   head?: string;
   base?: string;
   tree?: string;
+  /** reconcile: the digest of the listing the human was shown. */
+  digest?: string;
+  /** The completion-records delivery instead of the ticket's own. */
+  track?: "records";
 }
 
 export interface DeliveryRequest {
@@ -62,7 +75,7 @@ export function parseRequest(raw: unknown): Parsed {
   const p = msg.params;
   if (!p || typeof p !== "object" || Array.isArray(p)) return fail("params must be an object", op);
   const params = p as Record<string, unknown>;
-  const allowed = PARAMS[op];
+  const allowed = RECORDS_TRACK_OPS.includes(op) ? [...PARAMS[op], "track"] : PARAMS[op];
   for (const k of Object.keys(params)) if (!allowed.includes(k)) return fail(`${op} takes no ${JSON.stringify(k).slice(0, 40)}`, op);
   if (!isTicketKey(params.key)) return fail("key must be a ticket key like 10.2", op);
   const key = params.key;
@@ -71,6 +84,14 @@ export function parseRequest(raw: unknown): Parsed {
     if (!allowed.includes(f)) continue;
     if (!isSha(params[f])) return fail(`${f} must be a full 40-character id`, op, key);
     out[f] = params[f] as string;
+  }
+  if (allowed.includes("digest")) {
+    if (!isPlanDigest(params.digest)) return fail("digest must be the 64-character listing digest", op, key);
+    out.digest = params.digest;
+  }
+  if (Object.hasOwn(params, "track")) {
+    if (params.track !== "records") return fail('track must be "records" (or left out for the ticket itself)', op, key);
+    out.track = "records";
   }
   return { ok: true, req: { id, op, params: out } };
 }
