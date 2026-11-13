@@ -30,7 +30,7 @@ export function handleHook(hub: Hub, inbox: Inbox, agentId: string, event: strin
   const st = hub.status(agentId);
   const name = hub.name(agentId);
   if (!st) return { ok: false };
-  inbox.noteHook(agentId, event);
+  inbox.noteHook(agentId, event, body.prompt);
 
   switch (event) {
     case "SessionStart":
@@ -83,6 +83,7 @@ export function handleHook(hub: Hub, inbox: Inbox, agentId: string, event: strin
       turnOpen.set(agentId, false);
       hub.setStatus(agentId, { state: "idle", note: "Finished — ready for the next instruction" });
       hub.activity("agent.answered", agentId, `${name} finished a turn`);
+      inbox.finishTurn(agentId);
       break;
     }
     case "SessionEnd":

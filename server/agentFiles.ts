@@ -14,7 +14,25 @@ export const MCP_CONFIG = ".claude/hq-mcp.json";
 export const HOOK_SCRIPT = ".jsmhq-hook.mjs";
 /** HQ's generated role file. Its own name, so a ROLE.md the project has is never overwritten. */
 export const ROLE_FILE = ".jsmhq-role.md";
-export const HQ_FILES = [ROLE_FILE, ".claude/settings.local.json", MCP_CONFIG, HOOK_SCRIPT];
+export const SUMMARY_FILE = ".jsmhq-summary.md";
+export const HQ_FILES = [ROLE_FILE, SUMMARY_FILE, ".claude/settings.local.json", MCP_CONFIG, HOOK_SCRIPT];
+
+/** Exclude an agent's output in a clone or linked worktree before asking it to write. */
+export async function excludeSummaryFile(dir: string) {
+  const tracked = await run("git", ["ls-files", "--error-unmatch", "--", SUMMARY_FILE], { cwd: dir });
+  if (tracked.ok) throw new Error(`${SUMMARY_FILE} is tracked by this repository. Untrack it before requesting a summary.`);
+  // Git resolves a linked worktree's shared info/exclude; .git itself may be a file.
+  const git = await run("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: dir });
+  if (!git.ok) throw new Error("Could not find the repository's Git exclusions.");
+  const metadata = git.stdout.trim();
+  if (!lstatSync(metadata).isDirectory()) throw new Error("The Git metadata folder is not a regular directory.");
+  const file = "info/exclude";
+  const current = agentRead(metadata, file) ?? "";
+  const pattern = `/${SUMMARY_FILE}`;
+  if (!current.split("\n").includes(pattern)) agentWrite(metadata, file, `${current}${current.endsWith("\n") || !current ? "" : "\n"}# JSM HQ summary\n${pattern}\n`);
+  const ignored = await run("git", ["check-ignore", "--quiet", "--", SUMMARY_FILE], { cwd: dir });
+  if (!ignored.ok) throw new Error("Could not exclude the summary from Git. No prompt was sent.");
+}
 
 /** Extra context for the generated role: the folder's own ROLE.md, and whether app variables are set. */
 export interface RoleExtras {
