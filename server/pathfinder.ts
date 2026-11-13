@@ -37,6 +37,7 @@ import { newAgent } from "./store";
 import { log } from "./lib/log";
 import { Attribution, readReport, type Evidence, type Identity } from "./attribution";
 import { coordinatorAttention, gateOwner, sameQuestion, sessionEnding, ticketView, type GateCandidate } from "./workflowState";
+import { gateRevision, isGateOccurrence, readGateHistory, type GateHistory } from "./gateRecord";
 import { subagentMeta, subagentPrompt, subagentReport } from "./transcripts";
 import type { ActionAnswer, ActionRequest, DeliveryStage } from "../src/data/types";
 import { requestShelf } from "../src/data/requests";
@@ -85,15 +86,33 @@ interface Worker {
   ended: SessionEnd | null;
   /** When a finished session was resumed under the same subagent id (its earlier `finished` predates this). */
   resumedAt?: number;
+  /**
+   * The gate occurrence open on its ticket at its latest hook event (so while it was running); null when there was
+   * none, or the gate had no occurrence. In memory only: a restart forgets it, and then nothing is credited.
+   */
+  gateSeen: string | null;
 }
 
 /**
  * A saved session outcome, with the ticket and stage it belongs to (absent in files from before they were kept).
- * `consumed`: the gate question its GATE report raised, once Pathfinder recorded that gate resolved after it.
- * A consumed report credits no later gate, even an identical one, across restarts.
+ * `occurrence`: the gate occurrence its GATE report was made in (see `reportedIn`). The report credits that
+ * occurrence only, across restarts; an entry without one (any saved before occurrences) credits no gate.
+ * `consumed` is what earlier versions kept instead; it is read past and never written.
  */
-type BookEntry = SessionEnd & { key?: string; session?: string; consumed?: string };
-const stripBook = ({ key: _key, session: _session, consumed: _consumed, ...ended }: BookEntry): SessionEnd => ended;
+type BookEntry = SessionEnd & { key?: string; session?: string; occurrence?: string; consumed?: string };
+const stripBook = ({ key: _key, session: _session, occurrence: _occurrence, consumed: _consumed, ...ended }: BookEntry): SessionEnd => ended;
+
+/** The gate open on a ticket right now, as Pathfinder's durable record states it. */
+interface GateNow {
+  text: string;
+  stage: string | null;
+  /** The open gate's occurrence, from the state file's `Gate-Id`; null when it has none. */
+  occurrence: string | null;
+  /** The ticket's gate history (resolved occurrences), from the notes the engine wrote. */
+  history: GateHistory;
+  /** That history records this very occurrence resolved (a resolve that hasn't reached the state file yet). */
+  resolved: boolean;
+}
 
 /** How a stopped session ended from its ticket's recorded state alone (see workflowState.ts). */
 export { sessionOutcome } from "./workflowState";
@@ -590,7 +609,7 @@ export class PathfinderRun {
     if (!saved) this.crewBook({ ...this.crewBook(), [agentId]: c });
     const transcript = this.subagentTranscript(agentId);
     const ended = finished ? this.restoredEnding(agentId, b.key, b.session, transcript) : null;
-    const w: Worker = { agentId, hqId, key: b.key, session: b.session, role, worktree: b.worktree, live: !finished, tools: 0, character: c.id, transcript, ended };
+    const w: Worker = { agentId, hqId, key: b.key, session: b.session, role, worktree: b.worktree, live: !finished, tools: 0, character: c.id, transcript, ended, gateSeen: null };
     this.workers.set(agentId, w);
     const cfg = newAgent(hqId, c.name, role, ROLE_COLOR[role] ?? "#c2c3c7", false);
     cfg.mode = "local";
@@ -633,6 +652,7 @@ export class PathfinderRun {
   private resumeWorker(w: Worker) {
     w.live = true;
     w.ended = null;
+    w.gateSeen = null;
     w.resumedAt = Date.now();
     this.hub.setSession(w.hqId, { state: "running", detail: `Background subagent ${w.agentId} of the coordinator (resumed)` });
     this.hub.setStatus(w.hqId, { state: "working", note: `Resumed ${w.session} session`, ended: null, currentTaskId: w.key });
@@ -684,34 +704,35 @@ export class PathfinderRun {
   }
 
   /**
-   * Keep one session's outcome under its own subagent id, with its own ticket and stage. A report already consumed
-   * by a resolved gate stays consumed when the same GATE question is settled again (a repeated stop, or a resumed
-   * session whose transcript still ends with that old report).
+   * Keep one session's outcome under its own subagent id, with its own ticket and stage. `occurrence` is the gate
+   * occurrence its GATE report was made in, when the kitchen saw that (`reportedIn`). A report that states the same
+   * GATE question as the entry already saved for this session is not taken as a new report: it may be the old one
+   * read again (a repeated stop, or a resumed session whose transcript still ends with it), so it keeps what the
+   * saved entry had, an occurrence or none, and is never moved to a later occurrence.
    */
-  private settleAs(agentId: string, key: string, ended: SessionEnd, session?: string): SessionEnd {
+  private settleAs(agentId: string, key: string, ended: SessionEnd, session?: string, occurrence: string | null = null): SessionEnd {
     const w = this.workers.get(agentId);
     if (w) w.ended = ended;
     const book = this.endBook();
-    const was = book[agentId]?.key === key ? book[agentId]?.consumed : undefined;
-    const consumed = was && ended.verdict === "GATE" && sameQuestion(ended.result ?? "", was) ? { consumed: was } : {};
-    this.endBook({ ...book, [agentId]: { ...ended, key, session: session ?? w?.session, ...consumed } });
+    const was = book[agentId]?.key === key ? book[agentId] : undefined;
+    const same = ended.verdict === "GATE" && was?.verdict === "GATE" && sameQuestion(ended.result ?? "", was.result ?? "");
+    const made = same ? (isGateOccurrence(was?.occurrence) ? was.occurrence : null) : occurrence;
+    this.endBook({ ...book, [agentId]: { ...ended, key, session: session ?? w?.session, ...(made ? { occurrence: made } : {}) } });
     return ended;
   }
 
   /**
-   * Pathfinder recorded `key`'s gate `question` resolved (or replaced by another): every saved GATE report on that
-   * ticket that raised it is consumed, in sessions.json, so it never credits a later gate, even an identical one.
-   * Decided by event order (reports saved before this resolution), never by time.
+   * The gate occurrence a stopping session's GATE report was made in, or null when that can't be shown. It can
+   * when all of this holds: the kitchen saw the occurrence open on the ticket at a hook event from the session
+   * itself (so while it ran), the same occurrence is still the open one now that it stopped, Pathfinder's history
+   * doesn't record it resolved, and the report states its question. An occurrence is never reopened, so it was
+   * open the whole time between, which includes the moment the session reported. No clock is read, and no gate
+   * without an occurrence is ever used.
    */
-  private consumeGate(key: string, question: string) {
-    const book = this.endBook();
-    let changed = false;
-    for (const e of Object.values(book)) {
-      if (e.key !== key || e.consumed || e.verdict !== "GATE" || !sameQuestion(e.result ?? "", question)) continue;
-      e.consumed = question;
-      changed = true;
-    }
-    if (changed) this.endBook(book);
+  private reportedIn(w: Worker, ended: SessionEnd): string | null {
+    if (ended.verdict !== "GATE" || !w.gateSeen) return null;
+    const now = this.gateNow(w.key);
+    return now && now.occurrence === w.gateSeen && !now.resolved && sameQuestion(ended.result ?? "", now.text) ? now.occurrence : null;
   }
 
   /** A session stopped: its own report decides how it ended, else its ticket's recorded state. */
@@ -719,7 +740,9 @@ export class PathfinderRun {
     const hub = this.hub;
     w.live = false;
     const own = readReport(report) ? report : w.transcript ? subagentReport(w.transcript) : null;
-    const ended = this.settleAs(w.agentId, w.key, sessionEnding(w.session, own ?? report, this.recorded(w.key)), w.session);
+    const ending = sessionEnding(w.session, own ?? report, this.recorded(w.key));
+    const ended = this.settleAs(w.agentId, w.key, ending, w.session, this.reportedIn(w, ending));
+    w.gateSeen = null;
     const note =
       ended.outcome === "handed-off"
         ? ended.verdict && ended.verdict !== "DONE" ? `Reported ${ended.verdict}${ended.next ? ` — Pathfinder recorded ${ended.next}` : ""}` : `Handed off — ${ended.next ? `Pathfinder recorded ${ended.next}` : "reported done"}`
@@ -851,7 +874,7 @@ export class PathfinderRun {
   private openGates(): string[] {
     const items = (this.hub.snap.actionItems ?? []).filter((i) => i.status === "open" && i.id.startsWith("gate-"));
     const answered = new Set(items.filter((i) => requestShelf(i) === "awaiting").map((i) => i.request?.key ?? i.taskId));
-    const rows = this.rows.filter((r) => r.state === "human-gate").map((r) => r.key);
+    const rows = this.rows.filter((r) => r.state === "human-gate" && !this.settledGates.has(r.key)).map((r) => r.key);
     return [...new Set([...rows, ...items.map((i) => i.taskId ?? i.id.replace(/^gate-/, ""))])].filter((k) => !answered.has(k));
   }
 
@@ -903,11 +926,10 @@ export class PathfinderRun {
       return { ok: true };
     }
     const hub = this.hub;
+    if (event === "SubagentStart" && !w.live) this.resumeWorker(w); // the same subagent id starting again is that session resuming: never another session's identity
+    // A hook event from the session itself shows it is running now: note which gate occurrence is open on its ticket.
+    if (event !== "SubagentStop") w.gateSeen = this.openOccurrence(w.key);
     switch (event) {
-      case "SubagentStart":
-        // The same subagent id starting again is that session resuming: never another session's identity.
-        if (!w.live) this.resumeWorker(w);
-        break;
       case "PreToolUse": {
         w.tools += 1;
         const input = (body.tool_input ?? {}) as Record<string, unknown>;
@@ -1004,10 +1026,51 @@ export class PathfinderRun {
     const out: Record<string, string> = {};
     if (!existsSync(file)) return out;
     for (const line of readFileSync(file, "utf8").split("\n")) {
-      const m = /^-\s*([A-Za-z ]+):\s*(.+)$/.exec(line);
-      if (m && ["State", "Gate", "Last", "Next", "Updated", "Adversary", "Review", "Repair", "Resolved findings", "Gate stage", "Failed stage", "Worker"].includes(m[1])) out[m[1]] = m[2].trim();
+      const m = /^-\s*([A-Za-z -]+):\s*(.+)$/.exec(line);
+      if (m && ["State", "Gate", "Gate-Id", "Store", "Last", "Next", "Updated", "Adversary", "Review", "Repair", "Resolved findings", "Gate stage", "Failed stage", "Worker"].includes(m[1])) out[m[1]] = m[2].trim();
     }
     return out;
+  }
+
+  /**
+   * The gate open on `key` right now, from Pathfinder's durable record: its worker's state file (`State`, `Gate`,
+   * `Gate-Id`) and the gate notes the engine wrote in its ticket. Null when the state file isn't at a gate. Read
+   * from disk every time, so a start-up, a refresh and an answer all see the record as it is at that moment.
+   */
+  private gateNow(key: string, sf = this.stateFile(key)): GateNow | null {
+    if (sf.State?.split(/\s/)[0] !== "human-gate") return null;
+    const occurrence = isGateOccurrence(sf["Gate-Id"]) ? sf["Gate-Id"] : null;
+    const history = readGateHistory(join(this.root, ".pathfinder", "worktrees", key), key, sf.Store ?? null);
+    return { text: sf.Gate ?? "", stage: sf["Gate stage"] ?? null, occurrence, history, resolved: !!occurrence && history.resolved.includes(occurrence) };
+  }
+
+  /** The occurrence of the gate open on `key` right now, from its state file alone; null when there is no gate, or it has none. */
+  private openOccurrence(key: string): string | null {
+    const sf = this.stateFile(key);
+    return sf.State?.split(/\s/)[0] === "human-gate" && isGateOccurrence(sf["Gate-Id"]) ? sf["Gate-Id"] : null;
+  }
+
+  /** Gate requests this run has itself seen open (by revision). One without an occurrence is the same request only while watched. */
+  private watched = new Set<string>();
+  /** Tickets whose state file still shows a gate occurrence that Pathfinder's history records resolved (ticket → occurrence). */
+  private settledGates = new Map<string, string>();
+
+  /**
+   * Answers delivered for gate occurrences, kept in ~/.controlroom by request revision, so a restart shows the same
+   * result for the same occurrence and sends nothing twice. Only a request with an occurrence is kept: without
+   * one, nothing shows that a saved answer was for the gate open now.
+   */
+  private answerBook(next?: Record<string, ActionAnswer>) {
+    const file = join(this.stateDir, "gate-answers.json");
+    if (next) {
+      writeFileSync(file, JSON.stringify(next, null, 2));
+      return next;
+    }
+    try {
+      return JSON.parse(readFileSync(file, "utf8")) as Record<string, ActionAnswer>;
+    } catch {
+      return {};
+    }
   }
 
   private async refresh() {
@@ -1138,19 +1201,40 @@ export class PathfinderRun {
       }
     }
 
-    // Human gates → action items (Pathfinder's own gate text, verbatim).
+    // Human gates → action items (Pathfinder's own gate text, verbatim), one request per gate occurrence.
     const open = new Set<string>();
+    const requests = new Set<string>();
+    const settled = new Map<string, string>();
     for (const row of this.rows.filter((r) => r.state === "human-gate")) {
       // Read the list fresh each time: an earlier gate in this loop may have just been added.
       const items = hub.snap.actionItems ?? [];
       const id = `gate-${row.key}`;
-      open.add(id);
       const sf = this.stateFile(row.key);
+      if (sf.State && sf.State.split(/\s/)[0] !== "human-gate") {
+        // The state file moved on after the engine read it. A mixed reading opens and closes nothing: read again.
+        open.add(id);
+        this.queueRefresh(400);
+        continue;
+      }
+      const now = this.gateNow(row.key, sf);
+      if (now?.resolved) {
+        // Pathfinder's gate history records this occurrence resolved; only the state file hasn't caught up. It isn't
+        // waiting on the human, so it is not an open request (it closes below).
+        settled.set(row.key, now.occurrence!);
+        continue;
+      }
+      open.add(id);
       const text = sf.Gate ?? row.gate;
-      const request = this.gateRequest(row.key, text, sf["Gate stage"] ?? null);
+      const request = this.gateRequest(row.key, { text, occurrence: now?.occurrence ?? null, resolved: now?.history.resolved ?? [] }, sf["Gate stage"] ?? null);
       const existing = items.find((i) => i.id === id);
-      if (existing && existing.status === "open" && existing.request?.revision === request.revision) {
-        // The same request: keep its answer and snooze, and keep whose it is current.
+      // The same request is the same occurrence, whatever its text. A gate with no occurrence has only its text, and
+      // that is the same request only while this run has watched it: one carried over a restart can't be shown to be
+      // the gate open now, so it starts again as a new request.
+      const same = existing?.status === "open" && existing.request?.revision === request.revision && (request.occurrence !== null || this.watched.has(request.revision));
+      this.watched.add(request.revision);
+      requests.add(request.revision);
+      if (existing && same) {
+        // Keep its answer and snooze, and keep whose it is current.
         if (JSON.stringify(existing.request) !== JSON.stringify(request)) {
           existing.request = request;
           existing.fromId = request.owner ?? COORDINATOR_ID;
@@ -1158,31 +1242,33 @@ export class PathfinderRun {
         }
         continue;
       }
-      // A changed request: the replaced question is no longer open, so the reports behind it are spent.
-      if (existing?.status === "open" && !sameQuestion(existing.details, text)) this.consumeGate(row.key, existing.details);
-      // A new or changed request: never another session's, never an older request's answer.
+      // A new request (a new occurrence, or a changed gate): never another session's, never an earlier request's
+      // answer or snooze. An answer this kitchen delivered for this very occurrence before a restart is its own.
       const item: ActionItem = {
         id, fromId: request.owner ?? COORDINATOR_ID, taskId: row.key, title: `${row.key} needs your decision`,
         details: text,
         waiting: true, status: "open", note: null, at: new Date().toISOString(), closedAt: null,
-        request, answer: null, snoozedUntil: null,
+        request, answer: (request.occurrence && this.answerBook()[request.revision]) || null, snoozedUntil: null,
       };
       hub.snap.actionItems = [item, ...items.filter((i) => i.id !== id)];
       hub.emit({ type: "action.updated", item });
       hub.activity("agent.needs-input", item.fromId, `${row.key} needs your decision: ${clip(text, 60)}`);
     }
+    this.settledGates = settled;
+    this.pruneAnswers(requests);
     for (const item of hub.snap.actionItems ?? []) {
       if (item.id.startsWith("gate-") && item.status === "open" && !open.has(item.id)) {
-        // Resolved only when Pathfinder shows it: the engine no longer reports the gate.
+        // Resolved only when Pathfinder shows it: the engine no longer reports the gate, or its history records
+        // this occurrence resolved.
         const key = item.taskId ?? item.id.replace(/^gate-/, "");
         const now = this.rows.find((r) => r.key === key)?.state ?? "no longer listed";
+        const occurrence = settled.get(key);
+        const recorded = occurrence && item.request?.occurrence === occurrence ? `Pathfinder's gate history records this request resolved (occurrence ${occurrence})` : `Pathfinder: ${key} is now ${now}`;
         item.status = "done";
         item.closedAt = new Date().toISOString();
-        item.note = `Pathfinder: ${key} is now ${now}`;
-        // Resolved: the GATE reports that raised it credit no later request, even the same question asked again.
-        this.consumeGate(key, item.details);
+        item.note = recorded;
         if (item.answer && item.request && item.answer.revision === item.request.revision && item.answer.state === "delivered") {
-          item.answer = { ...item.answer, state: "recorded", at: item.closedAt, detail: `Pathfinder recorded it: ${key} is now ${now}` };
+          item.answer = { ...item.answer, state: "recorded", at: item.closedAt, detail: occurrence ? recorded : `Pathfinder recorded it: ${key} is now ${now}` };
         }
         hub.emit({ type: "action.updated", item });
       }
@@ -1190,31 +1276,44 @@ export class PathfinderRun {
     this.applyAttention();
   }
 
+  /** An occurrence that isn't open now never opens again, so its saved answer has nothing left to restore. */
+  private pruneAnswers(open: Set<string>) {
+    const book = this.answerBook();
+    const kept = Object.fromEntries(Object.entries(book).filter(([revision]) => open.has(revision)));
+    if (Object.keys(kept).length !== Object.keys(book).length) this.answerBook(kept);
+  }
+
   /**
-   * Who raised a ticket's gate: only a session whose own report raised this exact question (gateOwner). Anything
-   * else, including a gate the coordinator recorded, is unidentified and says why (never a guess from timing).
+   * Who raised a ticket's gate: only a session whose own report raised this question in this very occurrence
+   * (gateOwner). Anything else, including a gate the coordinator recorded and any gate with no occurrence, is
+   * unidentified and says why (never a guess from timing or from the question's words).
    */
-  private gateRequest(key: string, text: string, gateStage: string | null): ActionRequest {
-    const revision = createRevision(key, text);
-    const base = { kind: "gate" as const, key, revision };
+  private gateRequest(key: string, gate: { text: string; occurrence: string | null; resolved: string[] }, gateStage: string | null): ActionRequest {
+    const base = { kind: "gate" as const, key, revision: gateRevision(key, gate.text, gate.occurrence), occurrence: gate.occurrence };
     const ws = [...this.workers.values()].filter((w) => w.key === key);
     const book = this.endBook();
-    const candidates = ws.map((w): GateCandidate & { w: Worker } => ({ w, ...this.gateCandidate(w, !!book[w.agentId]?.consumed) }));
-    const { owner, diagnostic } = gateOwner(key, text, candidates);
+    const candidates = ws.map((w): GateCandidate & { w: Worker } => ({ w, ...this.gateCandidate(w, book[w.agentId]) }));
+    const { owner, diagnostic } = gateOwner(key, gate, candidates);
     if (!owner) return { ...base, stage: gateStage, owner: null, session: null, diagnostic };
     const w = (owner as GateCandidate & { w: Worker }).w;
     return { ...base, stage: gateStage ?? w.session, owner: w.hqId, session: w.session, diagnostic: null };
   }
 
-  /** A session as the gate-owner decision sees it: its own report, whether a resolved gate consumed it, and when it ended (to order reporters only). */
-  private gateCandidate(w: Worker, consumed: boolean): GateCandidate {
+  /** A session as the gate-owner decision sees it: its own report, the occurrence that report was made in, and when it ended (to order reporters only). */
+  private gateCandidate(w: Worker, saved: BookEntry | undefined): GateCandidate {
     const at = w.ended ? Date.parse(w.ended.at) : NaN;
     const end = !w.live && Number.isFinite(at) ? at : null;
     const report = w.ended?.verdict ? { verdict: w.ended.verdict, text: w.ended.result ?? "" } : null;
-    return { id: w.hqId, name: this.hub.name(w.hqId), session: w.session, live: w.live, end, report, outcome: w.ended?.outcome ?? null, consumed };
+    const occurrence = saved?.key === w.key && isGateOccurrence(saved.occurrence) ? saved.occurrence : null;
+    return { id: w.hqId, name: this.hub.name(w.hqId), session: w.session, live: w.live, end, report, outcome: w.ended?.outcome ?? null, occurrence };
   }
 
-  /** The human answered a gate in the UI: hand the text to the coordinator, verbatim, exactly once per request. */
+  /**
+   * The human answered a gate in the UI: hand the text to the coordinator, verbatim, exactly once per gate
+   * occurrence. The answer must name the request it is for, and that request must be the gate open in Pathfinder's
+   * record at this moment: an answer to a resolved or replaced occurrence is refused and nothing is typed, so it
+   * can never be recorded against a later one.
+   */
   async answerGate(itemId: string, note: string, revision?: string) {
     const item = this.hub.snap.actionItems?.find((i) => i.id === itemId);
     if (!item || item.status !== "open") {
@@ -1222,23 +1321,46 @@ export class PathfinderRun {
       return;
     }
     const key = item.taskId ?? itemId.replace(/^gate-/, "");
-    const current = item.request?.revision ?? createRevision(key, item.details);
+    const occurrence = item.request?.occurrence ?? null;
+    const shown = item.request?.revision ?? gateRevision(key, item.details, null);
     const text = note.trim();
-    const answer = (state: ActionAnswer["state"], detail: string | null, rev = current): ActionAnswer => ({ state, text, revision: rev, at: new Date().toISOString(), detail });
+    const answer = (state: ActionAnswer["state"], detail: string | null, rev = shown): ActionAnswer => ({ state, text, revision: rev, at: new Date().toISOString(), detail });
     const publish = (a: ActionAnswer) => {
       item.answer = a;
-      this.hub.emit({ type: "action.updated", item: { ...item } });
+      if (occurrence && a.revision === shown && a.state === "delivered") this.answerBook({ ...this.answerBook(), [shown]: a });
+      // The request may have been replaced while the answer was on its way: then there is nothing of it left to show.
+      if (this.hub.snap.actionItems?.includes(item)) this.hub.emit({ type: "action.updated", item: { ...item } });
     };
-    if (revision && revision !== current) {
-      publish(answer("rejected", "Not sent: this request changed since you read it. Read the current request and answer that.", revision));
+    const sent = item.answer && item.answer.revision === shown ? item.answer.state : null;
+    // A refusal never replaces an answer already sent for the request that is open now.
+    const refuse = (detail: string, rev = shown) => {
+      if (sent === "sending" || sent === "delivered") this.hub.activity("agent.answered", COORDINATOR_ID, `An answer for ${key} wasn't sent. ${detail.replace(/^Not sent: /, "")}`);
+      else publish(answer("rejected", detail, rev));
+    };
+    // Pathfinder's record, read now (not as of the last refresh): only the gate occurrence open at this moment is answered.
+    const sf = this.stateFile(key);
+    const now = this.gateNow(key, sf);
+    if (sf.State && (!now || now.resolved)) {
+      refuse(`Not sent: Pathfinder's record shows this gate on ${key} is no longer open (it was resolved, or closed by a state change), so there is nothing to answer.`);
+      this.queueRefresh(0);
+      return;
+    }
+    if (now && gateRevision(key, sf.Gate ?? item.details, now.occurrence) !== shown) {
+      refuse(`Not sent: Pathfinder closed this request and opened a new one on ${key} since it was shown. Read the current request and answer that.`);
+      this.queueRefresh(0);
+      return;
+    }
+    if (revision ? revision !== shown : occurrence !== null) {
+      refuse(revision ? "Not sent: this request changed since you read it. Read the current request and answer that." : "Not sent: the answer didn't say which request it is for.", revision ?? shown);
       return;
     }
     if (!text) {
-      publish(answer("rejected", "Not sent: write an answer first. Snooze puts a request aside without sending anything."));
+      refuse("Not sent: write an answer first. Snooze puts a request aside without sending anything.");
       return;
     }
-    const prior = item.answer;
-    if (prior && prior.revision === current && (prior.state === "sending" || prior.state === "delivered" || prior.state === "recorded")) {
+    // Sent once per occurrence. A gate with no occurrence can't show that an answer delivered earlier was for the gate
+    // open now, so only an answer still on its way holds another one back.
+    if (sent === "sending" || (occurrence && (sent === "delivered" || sent === "recorded"))) {
       this.hub.activity("agent.answered", COORDINATOR_ID, `Your answer for ${key} was already sent; it wasn't sent again`);
       return;
     }
@@ -1248,7 +1370,7 @@ export class PathfinderRun {
     }
     publish(answer("sending", null));
     const who = item.request?.owner ? `${this.hub.name(item.request.owner)}'s ${item.request.session ?? ""} session`.replace(/\s+session$/, " session") : "an unidentified session";
-    const message = `Human answer for the ${key} gate (from Tin & Thyme, raised by ${who}): ${text}`;
+    const message = `Human answer for the ${key} gate (from Tin & Thyme${occurrence ? `, gate occurrence ${occurrence}` : ""}, raised by ${who}): ${text}`;
     const ok = await this.sessions.typeInto(COORDINATOR_ID, message.replace(/\s+/g, " "));
     publish(ok ? answer("delivered", "Typed into the coordinator's session. Resolved once Pathfinder records it.") : answer("failed", "Couldn't reach the coordinator's terminal; nothing was delivered. Send it again."));
     this.hub.activity("agent.answered", COORDINATOR_ID, ok ? `Your answer for ${key} went to the coordinator` : `Couldn't reach the coordinator's terminal for ${key}`);
@@ -1262,11 +1384,4 @@ export class PathfinderRun {
     item.snoozedUntil = new Date(Date.now() + minutes * 60_000).toISOString();
     this.hub.emit({ type: "action.updated", item: { ...item } });
   }
-}
-
-/** A request's revision: its ticket and its exact text. A changed gate is a new request. */
-function createRevision(key: string, text: string): string {
-  let h = 2166136261;
-  for (const ch of `${key}\n${text}`) h = Math.imul(h ^ ch.codePointAt(0)!, 16777619) >>> 0;
-  return `${key}:${h.toString(36)}`;
 }

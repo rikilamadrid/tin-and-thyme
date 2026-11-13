@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ActionItem, OfficeSnapshot } from "../../data/types";
 import { requestsByShelf } from "../../data/requests";
 import { officeActions, selectAttention, useOffice } from "../../store/office";
@@ -143,8 +143,10 @@ function Row({ text, color, onOpen }: { text: string; color?: string; onOpen: ()
 }
 
 function Item({ item, from, now, snap }: { item: ActionItem; from?: { id: string; name: string; color: string }; now: number; snap: OfficeSnapshot }) {
-  // Keyed by kind as well, so a request never reuses an agent item's hooks.
-  return item.request ? <GateRequest key={`gate:${item.request.revision}`} item={item} now={now} snap={snap} /> : <AgentItem item={item} from={from} now={now} />;
+  // Keyed by kind as well, so a request never reuses an agent item's hooks. A gate keeps its card (and an answer
+  // being typed) while its ticket and question stay the same, as when Pathfinder gives it its occurrence a moment
+  // after it appears; what is sent always names the request shown at that moment.
+  return item.request ? <GateRequest key={`gate:${item.request.key}:${item.details}`} item={item} now={now} snap={snap} /> : <AgentItem item={item} from={from} now={now} />;
 }
 
 function AgentItem({ item, from, now }: { item: ActionItem; from?: { id: string; name: string; color: string }; now: number }) {
@@ -210,11 +212,29 @@ function GateRequest({ item, now, snap }: { item: ActionItem; now: number; snap:
   const owner = r.owner ? snap.config.team.find((a) => a.id === r.owner) : null;
   const a = item.answer && item.answer.revision === r.revision ? item.answer : null;
   const stale = item.answer && item.answer.revision !== r.revision ? item.answer : null;
-  const inFlight = a?.state === "sending" || a?.state === "delivered" || a?.state === "recorded";
+  const [again, setAgain] = useState(false);
+  // A gate with no occurrence can't show that a delivered answer was for the gate open now, so it can be answered again.
+  const repeatable = !r.occurrence && a?.state === "delivered";
+  const inFlight = (a?.state === "sending" || a?.state === "delivered" || a?.state === "recorded") && !(repeatable && again);
   const snoozed = item.snoozedUntil && Date.parse(item.snoozedUntil) > now;
+  // What is typed belongs to one request. It is cleared once it is delivered, and when Pathfinder replaces this
+  // occurrence with another (the same question raised again); a gate that only just got its occurrence keeps it.
+  const shown = useRef(r);
+  const deliveredAt = a?.state === "delivered" ? a.at : null;
+  useEffect(() => {
+    if (deliveredAt) setText("");
+  }, [deliveredAt]);
+  useEffect(() => {
+    const replaced = shown.current.revision !== r.revision && !!shown.current.occurrence;
+    shown.current = r;
+    if (!replaced) return;
+    setText("");
+    setAgain(false);
+  }, [r]);
   const send = () => {
     if (!text.trim() || inFlight) return;
     officeActions.resolveActionItem(item.id, "done", text, r.revision);
+    setAgain(false);
   };
   return (
     <li className={`border-[3px] border-line bg-card px-3 py-2 shadow-[0_3px_0_rgba(36,26,46,0.35)] ${!inFlight && !snoozed ? "outline outline-[3px] outline-[#ff4f7b]" : ""}`}>
@@ -238,6 +258,8 @@ function GateRequest({ item, now, snap }: { item: ActionItem; now: number; snap:
           )}
           {!owner && r.diagnostic && <div>{r.diagnostic}</div>}
         </dd>
+        <dt>Request</dt>
+        <dd>{r.occurrence ? `gate occurrence ${r.occurrence}` : "no occurrence ID in Pathfinder's record"}</dd>
         <dt>Raised</dt>
         <dd>{ago(item.at, now)} ago</dd>
       </dl>
@@ -251,6 +273,14 @@ function GateRequest({ item, now, snap }: { item: ActionItem; now: number; snap:
         </div>
       )}
       {stale && <div className="mt-1 text-[12px] text-[#c0392b]">{stale.detail}</div>}
+      {repeatable && !again && (
+        <div className="mt-1 text-[12px] text-muted">
+          This gate has no occurrence ID, so Tin & Thyme can't tell whether it was closed and raised again since you answered.{" "}
+          <button className="underline" onClick={() => setAgain(true)}>
+            Send another answer
+          </button>
+        </div>
+      )}
       {!inFlight && (
         <div className="mt-2 flex items-end gap-2">
           <textarea

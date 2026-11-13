@@ -81,13 +81,26 @@ export interface GateCandidate {
   name: string;
   session: string;
   live: boolean;
-  /** When it stopped (epoch ms); null while live or not known. Only orders sessions that each reported the gate. */
+  /** When it stopped (epoch ms); null while live or not known. Only orders sessions that each reported the same occurrence. */
   end: number | null;
   /** Its own report, once it ended with one. */
   report: { verdict: string; text: string } | null;
   outcome: SessionEnd["outcome"] | null;
-  /** Its GATE report was consumed: Pathfinder recorded that gate resolved after the report, so it credits no later gate. */
-  consumed: boolean;
+  /**
+   * The gate occurrence its GATE report was made in: the occurrence the kitchen saw open on its ticket while the
+   * session was running and still open when it stopped. Null when that wasn't seen. A report counts for this
+   * occurrence only, so once it is resolved the report credits nothing, whatever is asked later.
+   */
+  occurrence: string | null;
+}
+
+/** The gate a request is for: Pathfinder's text and, when its record has one, its occurrence. */
+export interface OpenGate {
+  text: string;
+  /** Null for a gate with no occurrence in Pathfinder's record (set by hand, or by a kit from before occurrences). */
+  occurrence: string | null;
+  /** Occurrences Pathfinder's gate history records resolved on this ticket (empty when it can't be read). */
+  resolved?: string[];
 }
 
 /** The same question, ignoring case, emphasis, spacing and closing punctuation (never a partial match). */
@@ -97,22 +110,30 @@ export function sameQuestion(a: string, b: string): boolean {
 }
 
 /**
- * Who raised a ticket's gate, credited only on positive evidence: a session whose own report says
- * `GATE: <this question>` (sameQuestion; the latest such session) and whose report no resolved gate has consumed.
- * Nothing else credits a session: not when it ran or when Pathfinder recorded the gate, not being the only live
- * one, not being the latest, not having stopped at some earlier gate, not having asked the same question before
- * that gate was resolved. A gate the coordinator recorded, or one a session raised without reporting it, stays
- * unidentified, with a diagnostic saying why.
+ * Who raised a ticket's gate, credited only on positive evidence tied to this gate's occurrence: a session whose
+ * own report says `GATE: <this question>` (sameQuestion) and was made in this very occurrence (the latest such
+ * session). Nothing else credits a session: not the same words reported in an earlier occurrence or before this
+ * one was recorded, not when it ran, not being the only live one, not being the latest. A gate with no occurrence
+ * has no identity to tie a report to, so it is never credited. Everything uncredited stays unidentified, with a
+ * diagnostic saying why.
  */
-export function gateOwner(key: string, gate: string, sessions: GateCandidate[]): { owner: GateCandidate | null; diagnostic: string | null } {
-  const asked = sessions.filter((s) => s.report?.verdict === "GATE" && sameQuestion(s.report.text, gate));
-  const reported = asked.filter((s) => !s.consumed);
-  if (reported.length) return { owner: reported.reduce((a, b) => ((b.end ?? Infinity) >= (a.end ?? Infinity) ? b : a)), diagnostic: null };
-  if (!sessions.length) return { owner: null, diagnostic: `No session on ${key} was seen by this kitchen, so none reported this gate (it may predate the kitchen's start, or the coordinator recorded it).` };
+export function gateOwner(key: string, gate: OpenGate, sessions: GateCandidate[]): { owner: GateCandidate | null; diagnostic: string | null } {
+  const asked = sessions.filter((s) => s.report?.verdict === "GATE" && sameQuestion(s.report.text, gate.text));
+  const made = gate.occurrence ? asked.filter((s) => s.occurrence === gate.occurrence) : [];
+  if (made.length) return { owner: made.reduce((a, b) => ((b.end ?? Infinity) >= (a.end ?? Infinity) ? b : a)), diagnostic: null };
   const who = (s: GateCandidate) => `${s.name} (${s.session})`;
-  if (asked.length) {
-    const prev = asked.at(-1)!;
-    return { owner: null, diagnostic: `No session on ${key} reported this gate since it was last resolved: ${who(prev)} asked the same question before, but Pathfinder recorded that gate resolved, so its report can't be credited for this one (the coordinator may have raised it again).` };
+  const prev = asked.at(-1);
+  if (!gate.occurrence) {
+    const same = prev ? ` ${who(prev)} reported the same question, which doesn't show it raised this gate.` : "";
+    return { owner: null, diagnostic: `Pathfinder's record gives this gate on ${key} no occurrence ID (it was set by hand, or by a Pathfinder kit from before gate occurrences), so no session can be tied to it.${same}` };
+  }
+  if (!sessions.length) return { owner: null, diagnostic: `No session on ${key} was seen by this kitchen, so none reported this gate (it may predate the kitchen's start, or the coordinator recorded it).` };
+  if (prev?.occurrence) {
+    const done = gate.resolved?.includes(prev.occurrence) ? ", which Pathfinder recorded resolved" : "";
+    return { owner: null, diagnostic: `No session on ${key} reported this gate occurrence: ${who(prev)} asked the same question in an earlier occurrence (${prev.occurrence})${done}, and a report counts only for the occurrence it was made in (the coordinator may have raised it again).` };
+  }
+  if (prev) {
+    return { owner: null, diagnostic: `No session on ${key} can be tied to this gate occurrence: ${who(prev)} reported the same question, but this kitchen didn't see this occurrence open while that session was running (Pathfinder recorded it after the session stopped, or the kitchen wasn't watching), so the report doesn't show which occurrence it was for.` };
   }
   const last = sessions.at(-1)!;
   const how = last.live ? `is still running and hasn't reported` : `ended ${last.outcome ?? "without a recorded outcome"}${last.report?.verdict === "GATE" ? ` at a different gate ("${last.report.text}")` : ""}`;

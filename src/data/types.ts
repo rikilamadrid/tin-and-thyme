@@ -513,7 +513,13 @@ export interface ActionRequest {
   session: string | null;
   /** Why the session can't be identified (shown as "Unable to identify session"); null when it can. */
   diagnostic: string | null;
-  /** Changes whenever the request changes: an answer to an older revision is rejected. */
+  /**
+   * The gate occurrence this request is, from Pathfinder's own record (the state file's `Gate-Id`). The same
+   * question opened again is a different occurrence, so a different request. Null when the record gives the
+   * gate no occurrence: then it has no identity, and its session is never identified.
+   */
+  occurrence: string | null;
+  /** Names this request: the occurrence when there is one, else the ticket and the exact text. An answer to any other revision is rejected. */
   revision: string;
 }
 
@@ -524,7 +530,7 @@ export interface ActionAnswer {
    */
   state: "sending" | "delivered" | "recorded" | "failed" | "rejected";
   text: string;
-  /** The request revision it answers. */
+  /** The request revision it answers (so, for a gate with an occurrence, that occurrence). */
   revision: string;
   at: string;
   detail: string | null;

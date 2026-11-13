@@ -95,12 +95,14 @@ export function attentionSnapshot(waiting: boolean): OfficeSnapshot {
       pf: { state, lifecycle, role: null, gate, recorded, view },
     };
   });
+  // Each request is one gate occurrence (Pathfinder's `Gate-Id`).
+  const OCCURRENCE: Record<string, string> = { "31.1": "9d2e41c07a5b", "31.5": "4b7f03e1c6aa" };
   const gateItem = (key: string, details: string, owner: string | null, session: string | null, diagnostic: string | null): ActionItem => ({
     id: `gate-${key}`, fromId: owner ?? "coordinator", taskId: key, title: `${key} needs your decision`, details,
     waiting: true, status: waiting ? "done" : "open", note: waiting ? `Pathfinder: ${key} is now ${key === "31.1" ? "working" : "done"}` : null,
     at: ago(9), closedAt: waiting ? ago(1) : null,
-    request: { kind: "gate", key, stage: session ?? "review", owner, session, diagnostic, revision: `fixture-${key}` },
-    answer: waiting ? { state: "recorded", text: "Use the work account (fixture)", revision: `fixture-${key}`, at: ago(1), detail: `Pathfinder recorded it: ${key} is now working` } : null,
+    request: { kind: "gate", key, stage: session ?? "review", owner, session, diagnostic, occurrence: OCCURRENCE[key], revision: `${key}#${OCCURRENCE[key]}` },
+    answer: waiting ? { state: "recorded", text: "Use the work account (fixture)", revision: `${key}#${OCCURRENCE[key]}`, at: ago(1), detail: `Pathfinder recorded it: ${key} is now working` } : null,
     snoozedUntil: null,
   });
   const actionItems: ActionItem[] = [

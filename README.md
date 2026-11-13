@@ -144,7 +144,11 @@ A card also tells you when something needs a person:
   **Send answer** types your reply into the coordinator's session once; the
   request then shows **Sending**, **Delivered**, and **Recorded** only when
   Pathfinder shows the gate resolved. **Snooze** sends nothing and leaves the gate
-  open.
+  open. Each request is one gate occurrence in Pathfinder's own record (its
+  `Gate-Id`): the same question raised again is a new request, an answer to an
+  earlier one is refused, and a session is named only when its own report was
+  made in that occurrence. A gate with no occurrence in the record never names a
+  session, and stays answerable.
 - **Ready to deliver** when the review passed (Pathfinder `done`), **In review**
   only while a review is underway, **Awaiting merge** once a pull request is open,
   and **Done / Served** when the ticket is integrated and complete. The board, the

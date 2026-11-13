@@ -1,14 +1,18 @@
 // Ticket 06.1: worker-to-ticket attribution, the coordinator's attention state, review-session outcomes and
 // distinct board states. Drives a real PathfinderRun with synthetic hook payloads (shaped as Claude Code sends
 // them), fixture transcripts, a fake engine and a temporary HOME. Nothing touches a live kitchen.
+// The gate-occurrence sections at the end (review 4) run this repository's own engine instead, on throwaway
+// projects with real claims, so the durable gate record is the one Pathfinder really writes.
 //
 //   npx tsx scripts/coordinator-attention-test.ts
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const tmp = mkdtempSync(join(tmpdir(), "tt-attention-"));
+const tmp = realpathSync(mkdtempSync(join(tmpdir(), "tt-attention-")));
 // Every ~/.controlroom write lands here.
 Object.assign(process.env, { HOME: tmp, USERPROFILE: tmp });
 
@@ -21,6 +25,7 @@ const { buildGalley } = await import("../src/galley/model");
 const { needsYou, requestShelf } = await import("../src/data/requests");
 const { Hub } = await import("../server/hub");
 const { COORDINATOR_ID, PathfinderRun, parseBrief } = await import("../server/pathfinder");
+const { gateHistory, gateRevision, isGateOccurrence, parseGateMarker, readGateHistory } = await import("../server/gateRecord");
 type Run = InstanceType<typeof PathfinderRun>;
 
 let failures = 0;
@@ -69,11 +74,13 @@ function makeRepo(name: string) {
   return { root, coord, engine: join(engineDir, "orchestrate.mjs") };
 }
 
-function boot(repo: { root: string; coord: string; engine: string }, slug: string, rows: Record<string, unknown>[] = []): World {
-  writeFileSync(join(repo.root, "rows.json"), JSON.stringify(rows));
+/** `saved`: the action items a restarted kitchen loads from its own disk (action-items.json), when it had saved them. */
+function boot(repo: { root: string; coord: string; engine: string; real?: boolean }, slug: string, rows: Record<string, unknown>[] = [], saved?: unknown): World {
+  if (!repo.real) writeFileSync(join(repo.root, "rows.json"), JSON.stringify(rows));
   const config = { project: { id: slug, name: slug, path: repo.root }, team: [PathfinderRun.coordinatorConfig(repo.root)], workflow: {} } as never;
   const hub = new Hub({ root: repo.root, name: slug, originUrl: null, github: null, hasCodeRabbit: false, hasInsta: false }, slug, config, { boards: [], tasks: [] }, {} as never);
   hub.persist = false;
+  if (saved) hub.snap.actionItems = JSON.parse(JSON.stringify(saved));
   hub.setSession(COORDINATOR_ID, { state: "running" });
   const typed: string[] = [];
   const link = { up: true, delayMs: 0 };
@@ -136,6 +143,10 @@ const postAgent = (w: World, toolUseId: string, prompt: string, agentId: string,
 const subStart = (w: World, agentId: string) => hook(w, "SubagentStart", { agent_id: agentId, agent_type: "general-purpose" });
 const subStop = (w: World, agentId: string, last = "") => hook(w, "SubagentStop", { agent_id: agentId, agent_type: "general-purpose", agent_transcript_path: join(subDir(w), `agent-${agentId}.jsonl`), last_assistant_message: last, stop_hook_active: false });
 const stopTurn = (w: World) => hook(w, "Stop", { stop_hook_active: false, last_assistant_message: "Waiting." });
+/** A tool call from a worker session itself: proof it is running at that moment. */
+const toolEvent = (w: World, agentId: string, command = "git status") => hook(w, "PostToolUse", { agent_id: agentId, agent_type: "general-purpose", tool_name: "Bash", tool_use_id: `tu_${agentId}_${Math.random().toString(36).slice(2, 8)}`, tool_input: { command }, tool_response: { stdout: "" } });
+/** A gate occurrence as the engine writes one (12 hex characters). The tests name them; the engine draws them at random. */
+const occ = (n: number) => n.toString(16).padStart(12, "0");
 
 type WorkerView = { key: string; session: string; live: boolean; hqId: string; ended: { outcome: string; verdict?: string | null; result: string | null } | null };
 const workers = (w: World) => (w.run as unknown as { workers: Map<string, WorkerView> }).workers;
@@ -189,21 +200,32 @@ const helpers = (w: World) => w.hub.snap.workflow?.helpers ?? [];
   eq("unit: GATE report", sessionEnding("implementation", "GATE: sign in", { state: "working", last: null, gate: null }).outcome, "gate");
 }
 {
-  // Who raised a gate: only a session's own matching GATE report. Never timing, never being the one live session.
-  const cand = (id: string, o: Partial<Parameters<typeof gateOwner>[2][number]> = {}) => ({ id, name: id, session: "implementation", live: false, end: 2000, report: null, outcome: null, consumed: false, ...o });
+  // Who raised a gate: only a session's own matching GATE report, made in this very gate occurrence. Never the
+  // words alone, never timing, never being the one live session.
+  const X = "0000000000a1";
+  const Y = "0000000000a2";
+  const cand = (id: string, o: Partial<Parameters<typeof gateOwner>[2][number]> = {}) => ({ id, name: id, session: "implementation", live: false, end: 2000, report: null, outcome: null, occurrence: null, ...o });
+  const gate = (text: string, occurrence: string | null = X) => ({ text, occurrence });
+  const asked = (text = "Q", occurrence: string | null = X) => ({ report: { verdict: "GATE", text }, outcome: "gate" as const, occurrence });
   eq("unit: same question ignores case, emphasis and closing punctuation", sameQuestion("**Which account** should we use?", "which account should we use"), true);
   eq("unit: a different question never matches, even as a prefix", sameQuestion("Which account should we use?", "Which account should we use (2)?"), false);
-  eq("unit: a session whose own report raised this gate owns it", gateOwner("02.1", "Q?", [cand("s1", { report: { verdict: "GATE", text: "Q" }, outcome: "gate" })]).owner?.id, "s1");
-  eq("unit: of two sessions that reported the same gate, the later one owns it", gateOwner("02.1", "Q?", [cand("s1", { report: { verdict: "GATE", text: "Q" }, outcome: "gate", end: 3000 }), cand("s2", { report: { verdict: "GATE", text: "q." }, outcome: "gate", end: 2000 })]).owner?.id, "s1");
-  const lone = gateOwner("02.1", "Q?", [cand("s1", { live: true, end: null })]);
+  eq("unit: a session whose own report raised this gate, in this occurrence, owns it", gateOwner("02.1", gate("Q?"), [cand("s1", asked())]).owner?.id, "s1");
+  eq("unit: of two sessions that reported the same occurrence, the later one owns it", gateOwner("02.1", gate("Q?"), [cand("s1", { ...asked(), end: 3000 }), cand("s2", { ...asked("q."), end: 2000 })]).owner?.id, "s1");
+  const lone = gateOwner("02.1", gate("Q?"), [cand("s1", { live: true, end: null })]);
   eq("unit: the one live session doesn't own a gate it never reported", lone.owner, null);
   check("…the diagnostic says no session reported it and the latest is still running", /reported this gate in its own GATE line.*still running and hasn't reported/.test(lone.diagnostic ?? ""), lone.diagnostic);
-  eq("unit: a finished session that reported something else never owns it", gateOwner("02.1", "Q?", [cand("s1", { report: { verdict: "DONE", text: "abc" }, outcome: "handed-off" })]).owner, null);
-  eq("unit: an earlier gate session never owns a later gate", gateOwner("02.1", "Q2?", [cand("s1", { report: { verdict: "GATE", text: "Q1" }, outcome: "gate" })]).owner, null);
-  eq("unit: a prefix of the question is not the question", gateOwner("02.1", "Q (2)?", [cand("s1", { report: { verdict: "GATE", text: "Q" }, outcome: "gate" })]).owner, null);
-  const spent = gateOwner("02.1", "Q?", [cand("s1", { report: { verdict: "GATE", text: "Q" }, outcome: "gate", consumed: true })]);
-  check("unit: a GATE report consumed by a resolved gate never owns the same question again", spent.owner === null && /since it was last resolved/.test(spent.diagnostic ?? ""), spent);
-  check("unit: no session at all: unidentified, and it says so", /No session on 02\.1 was seen/.test(gateOwner("02.1", "Q?", []).diagnostic ?? ""));
+  eq("unit: a finished session that reported something else never owns it", gateOwner("02.1", gate("Q?"), [cand("s1", { report: { verdict: "DONE", text: "abc" }, outcome: "handed-off" })]).owner, null);
+  eq("unit: an earlier gate session never owns a later gate", gateOwner("02.1", gate("Q2?"), [cand("s1", asked("Q1"))]).owner, null);
+  eq("unit: a prefix of the question is not the question", gateOwner("02.1", gate("Q (2)?"), [cand("s1", asked())]).owner, null);
+  // Occurrences: the identical question in another occurrence is another gate.
+  const earlier = gateOwner("02.1", { text: "Q?", occurrence: Y, resolved: [X] }, [cand("s1", asked("Q", X))]);
+  check("unit: a report made in an earlier occurrence never owns the identical question's next occurrence", earlier.owner === null && new RegExp(`earlier occurrence \\(${X}\\), which Pathfinder recorded resolved`).test(earlier.diagnostic ?? ""), earlier);
+  const unseen = gateOwner("02.1", gate("Q?", Y), [cand("s1", asked("Q", null))]);
+  check("unit: the same words with no occurrence behind them own nothing", unseen.owner === null && /reported the same question, but this kitchen didn't see this occurrence open while that session was running/.test(unseen.diagnostic ?? ""), unseen);
+  eq("unit: a later session that reported this occurrence owns it, the earlier occurrence's doesn't", gateOwner("02.1", gate("Q?", Y), [cand("s1", { ...asked("Q", X), end: 9000 }), cand("s2", { ...asked("Q", Y), end: 5000 })]).owner?.id, "s2");
+  const noId = gateOwner("02.1", gate("Q?", null), [cand("s1", asked("Q", X)), cand("s2", asked("Q", null))]);
+  check("unit: a gate with no occurrence is never owned, whatever was reported", noId.owner === null && /no occurrence ID.*reported the same question, which doesn't show it raised this gate/.test(noId.diagnostic ?? ""), noId);
+  check("unit: no session at all: unidentified, and it says so", /No session on 02\.1 was seen/.test(gateOwner("02.1", gate("Q?"), []).diagnostic ?? ""));
   const base = { turnEnded: true, liveWorkers: 0, openGates: [] as string[], asking: null };
   eq("unit: turn ended with live workers → waiting", coordinatorAttention({ ...base, liveWorkers: 2 })?.state, "waiting");
   eq("unit: open gate → needs you even while workers run", coordinatorAttention({ ...base, liveWorkers: 2, openGates: ["02.1"] })?.state, "needs-input");
@@ -462,8 +484,8 @@ w.run.deliveryOf = () => null;
   writeSub(wa, "ah1", { prompt: brief("03.1", "review", "tester"), report: "VERDICT: PASS" });
   subStop(wa, "ah1");
   // 02.1's gate is recorded while ag1 is the one session live on it (no report yet); 03.1's after its only session ended.
-  stateFile(wa, "02.1", { State: "human-gate", Gate: "Which account should the live check use?", "Gate stage": "implementation", Updated: at() });
-  stateFile(wa, "03.1", { State: "human-gate", Gate: "Approve the copy change?", Updated: at(5_000) });
+  stateFile(wa, "02.1", { State: "human-gate", Gate: "Which account should the live check use?", "Gate-Id": occ(0x21), "Gate stage": "implementation", Updated: at() });
+  stateFile(wa, "03.1", { State: "human-gate", Gate: "Approve the copy change?", "Gate-Id": occ(0x31), Updated: at(5_000) });
   setRows(wa, [row("02.1", "human-gate", { gate: "Which account should the live check use?" }), row("03.1", "human-gate", { gate: "Approve the copy change?" })]);
   coordinatorTurn(wa, true);
   stopTurn(wa);
@@ -473,6 +495,7 @@ w.run.deliveryOf = () => null;
   eq("pending decision: its own ticket and stage; no session credited without its own report", [g1.request?.key, g1.request?.stage, g1.request?.session, g1.request?.owner, g1.fromId], ["02.1", "implementation", null, null, COORDINATOR_ID]);
   check("…unidentified, and it says why", /No session on 02\.1 reported this gate.*still running/.test(g1.request?.diagnostic ?? ""), g1.request?.diagnostic);
   eq("pending decision: the question is Pathfinder's gate, verbatim", g1.details, "Which account should the live check use?");
+  eq("pending decision: the request is Pathfinder's gate occurrence", [g1.request?.occurrence, g1.request?.revision], [occ(0x21), `02.1#${occ(0x21)}`]);
   const g3 = gateItem("03.1");
   eq("a historical session never inherits a later gate", [g3.request?.owner, g3.fromId], [null, COORDINATOR_ID]);
   check("…and the request says it can't identify the session, and why", /No session on 03\.1 reported this gate.*ended handed-off/.test(g3.request?.diagnostic ?? ""), g3.request?.diagnostic);
@@ -508,6 +531,7 @@ w.run.deliveryOf = () => null;
   wa.link.delayMs = 0;
   eq("double click: typed into the coordinator exactly once", wa.typed.length, 1);
   check("the answer to an unidentified gate goes through the coordinator, naming the ticket and no session", wa.typed[0].includes("02.1 gate") && wa.typed[0].includes("raised by an unidentified session") && !wa.typed[0].includes(wa.hub.name(workers(wa).get("ag1")!.hqId)), wa.typed[0]);
+  check("the answer names the gate occurrence it is for", wa.typed[0].includes(`gate occurrence ${occ(0x21)}`), wa.typed[0]);
   eq("the answer shows Sending → Delivered", states, ["sending", "delivered"]);
   eq("delivered is not resolved: the gate stays open until Pathfinder records it", gateItem("02.1").status, "open");
   eq("delivered: no longer counted as Needs you", counted().items, []);
@@ -519,8 +543,8 @@ w.run.deliveryOf = () => null;
   await refresh(wa);
   eq("reconnect: the answer and its state are kept, nothing re-sent", [gateItem("02.1").answer?.state, wa.typed.length], ["delivered", 1]);
 
-  // A superseded request: Pathfinder recorded a new gate text; an answer to the old one is rejected.
-  stateFile(wa, "03.1", { State: "human-gate", Gate: "Approve the revised copy change?" });
+  // A superseded request: Pathfinder recorded a new gate (a new text is a new occurrence); an answer to the old one is rejected.
+  stateFile(wa, "03.1", { State: "human-gate", Gate: "Approve the revised copy change?", "Gate-Id": occ(0x32) });
   setRows(wa, [row("02.1", "human-gate", { gate: "Which account should the live check use?" }), row("03.1", "human-gate", { gate: "Approve the revised copy change?" })]);
   const oldRevision = g3.request!.revision;
   await refresh(wa);
@@ -536,15 +560,17 @@ w.run.deliveryOf = () => null;
   eq("answered gate: Pathfinder recorded it, so it's resolved", [gateItem("02.1").status, gateItem("02.1").answer?.state], ["done", "recorded"]);
   check("answered gate: it says what Pathfinder recorded", /02\.1 is now working/.test(gateItem("02.1").answer?.detail ?? ""), gateItem("02.1").answer);
 
-  // A finished worker whose own report raised the gate still owns it; the coordinator's ended turn with live workers waits.
+  // A finished worker whose own report raised the gate, in the occurrence it saw open while it ran, still owns it;
+  // the coordinator's ended turn with live workers waits.
+  stateFile(wa, "02.1", { State: "human-gate", Gate: "Which account should the live check use (2)?", "Gate-Id": occ(0x22), "Gate stage": "implementation", Updated: at() });
+  toolEvent(wa, "ag1");
   writeSub(wa, "ag1", { prompt: brief("02.1"), report: "GATE: Which account should the live check use (2)?" });
-  stateFile(wa, "02.1", { State: "human-gate", Gate: "Which account should the live check use (2)?", "Gate stage": "implementation", Updated: at() });
   subStop(wa, "ag1");
   setRows(wa, [row("02.1", "human-gate", { gate: "Which account should the live check use (2)?" }), row("03.1", "integrated", { lifecycle: "Complete" })]);
   await refresh(wa);
   eq("matching report: a finished worker's own gate keeps its identity", gateItem("02.1").request?.owner, workers(wa).get("ag1")?.hqId);
   // A new gate recorded later, with no new session: never credited to the session that stopped at the old one.
-  stateFile(wa, "02.1", { State: "human-gate", Gate: "Which branch should the fix go on?", "Gate stage": "implementation", Updated: at(5_000) });
+  stateFile(wa, "02.1", { State: "human-gate", Gate: "Which branch should the fix go on?", "Gate-Id": occ(0x23), "Gate stage": "implementation", Updated: at(5_000) });
   setRows(wa, [row("02.1", "human-gate", { gate: "Which branch should the fix go on?" }), row("03.1", "integrated", { lifecycle: "Complete" })]);
   await refresh(wa);
   eq("a later gate with no new session is not credited to the old gate session", [gateItem("02.1").request?.owner, gateItem("02.1").fromId], [null, COORDINATOR_ID]);
@@ -568,7 +594,7 @@ w.run.deliveryOf = () => null;
   const gateItem = (key: string) => (wr.hub.snap.actionItems ?? []).find((i) => i.id === `gate-${key}`)!;
   const q = "Approve the second account for the live check?";
   // The gate was recorded before this kitchen saw any session on the ticket.
-  stateFile(wr, "02.1", { State: "human-gate", Gate: q, Updated: new Date(Date.now() - 60_000).toISOString() });
+  stateFile(wr, "02.1", { State: "human-gate", Gate: q, "Gate-Id": occ(0x41), Updated: new Date(Date.now() - 60_000).toISOString() });
   setRows(wr, [row("02.1", "human-gate", { gate: q })]);
   preAgent(wr, "tu_r1", brief("02.1", "resume"), "02.1 resume");
   postAgent(wr, "tu_r1", brief("02.1", "resume"), "ar1");
@@ -577,10 +603,10 @@ w.run.deliveryOf = () => null;
   eq("resume dispatched while a gate is open: not its owner", [gateItem("02.1").request?.owner, gateItem("02.1").request?.session], [null, null]);
   check("…the diagnostic says no session reported it", /No session on 02\.1 reported this gate.*still running and hasn't reported/.test(gateItem("02.1").request?.diagnostic ?? ""), gateItem("02.1").request?.diagnostic);
   // The resume loads the ticket and rewrites Updated while the same gate stays open: still not its gate.
-  stateFile(wr, "02.1", { State: "human-gate", Gate: q, Updated: new Date().toISOString() });
+  stateFile(wr, "02.1", { State: "human-gate", Gate: q, "Gate-Id": occ(0x41), Updated: new Date().toISOString() });
   await refresh(wr);
   eq("a rewritten Updated doesn't credit the resume", gateItem("02.1").request?.owner, null);
-  // Its own report raises that gate: now it is the owner.
+  // Its own report raises that gate, in the occurrence it saw open while it ran: now it is the owner.
   writeSub(wr, "ar1", { prompt: brief("02.1", "resume"), toolUseId: "tu_r1", report: `GATE: ${q}` });
   subStop(wr, "ar1");
   await refresh(wr);
@@ -605,14 +631,14 @@ w.run.deliveryOf = () => null;
     const repo = makeRepo("repo-m1-restart");
     const w = boot(repo, "tt-m1-restart");
     const q = "Approve the second account for the live check?";
-    stateFile(w, "02.1", { State: "human-gate", Gate: q, Updated: new Date(Date.now() - 120_000).toISOString() });
+    stateFile(w, "02.1", { State: "human-gate", Gate: q, "Gate-Id": occ(0x51), Updated: new Date(Date.now() - 120_000).toISOString() });
     setRows(w, [row("02.1", "human-gate", { gate: q })]);
     preAgent(w, "tu_r1", brief("02.1", "resume"), "02.1 resume");
     postAgent(w, "tu_r1", brief("02.1", "resume"), "ar1");
     writeSub(w, "ar1", { prompt: brief("02.1", "resume"), toolUseId: "tu_r1" });
     subStart(w, "ar1");
     await refresh(w);
-    stateFile(w, "02.1", { State: "human-gate", Gate: q, Updated: new Date().toISOString() });
+    stateFile(w, "02.1", { State: "human-gate", Gate: q, "Gate-Id": occ(0x51), Updated: new Date().toISOString() });
     await refresh(w);
     unidentified(w, "02.1", q, "M1 restart: before the restart, Updated rewritten");
     const w2 = boot(repo, "tt-m1-restart", w.rows);
@@ -634,7 +660,7 @@ w.run.deliveryOf = () => null;
     postAgent(w, "tu_1", brief("02.1"), "a1");
     writeSub(w, "a1", { prompt: brief("02.1"), toolUseId: "tu_1" });
     subStart(w, "a1");
-    stateFile(w, "02.1", { State: "human-gate", Gate: q, Updated: new Date().toISOString() });
+    stateFile(w, "02.1", { State: "human-gate", Gate: q, "Gate-Id": occ(0x61), Updated: new Date().toISOString() });
     setRows(w, [row("02.1", "human-gate", { gate: q })]);
     await refresh(w);
     unidentified(w, "02.1", q, "M1 repeat: first raise while a1 is live and hasn't reported");
@@ -649,7 +675,7 @@ w.run.deliveryOf = () => null;
     subStart(w, "a2");
     writeSub(w, "a2", { prompt: brief("02.1", "review", "tester"), toolUseId: "tu_2", report: "VERDICT: FINDINGS", finished: true });
     subStop(w, "a2");
-    stateFile(w, "02.1", { State: "human-gate", Gate: q, Updated: new Date().toISOString() });
+    stateFile(w, "02.1", { State: "human-gate", Gate: q, "Gate-Id": occ(0x62), Updated: new Date().toISOString() });
     setRows(w, [row("02.1", "human-gate", { gate: q })]);
     await refresh(w);
     const it = unidentified(w, "02.1", q, "M1 repeat: the same question raised again later");
@@ -667,12 +693,14 @@ w.run.deliveryOf = () => null;
     subStart(w, "ad");
     await refresh(w);
     const q = "Coordinator: 02.1 conflicts with 05.1 on server/pathfinder.ts; serialize?";
-    stateFile(w, "02.1", { State: "human-gate", Gate: q, Updated: new Date().toISOString() });
+    stateFile(w, "02.1", { State: "human-gate", Gate: q, "Gate-Id": occ(0x71), Updated: new Date().toISOString() });
     setRows(w, [row("02.1", "human-gate", { gate: q })]);
     await refresh(w);
     eq("M1 coordinator gate: the one live worker is still live", workers(w).get("ad")?.live, true);
     unidentified(w, "02.1", q, "M1 coordinator gate: the one live worker isn't credited");
-    // The matching-report case is still credited: once the worker's own report raises this question, it owns it.
+    // The matching-report case is still credited: once the worker, still running while this occurrence is open,
+    // raises this question in its own report, it owns it.
+    toolEvent(w, "ad");
     writeSub(w, "ad", { prompt: brief("02.1"), toolUseId: "tu_d", report: `GATE: **${q.toLowerCase()}**`, finished: true });
     subStop(w, "ad");
     await refresh(w);
@@ -681,63 +709,69 @@ w.run.deliveryOf = () => null;
   }
 }
 
-// ================================================================ review 3: a resolved gate consumes the reports behind it
+// ================================================================ review 3: a report counts only for the gate occurrence it was made in
 
 {
-  // Session A raises Q in its own GATE report → the human answers and Pathfinder records Q resolved → another
-  // session runs → the identical Q is raised again → restart. A is credited for the first request only.
+  // Session A raises Q in its own GATE report, in occurrence X → the human answers and Pathfinder records X resolved
+  // → another session runs → the identical Q is raised again, as occurrence Y → restart. A is credited for X only.
   const repo = makeRepo("repo-r3-consumed");
   const w = boot(repo, "tt-r3-consumed");
   const q = "Repair budget exhausted: accept, repair again, or drop?";
+  const [X, Y, Z] = [occ(0x81), occ(0x82), occ(0x83)];
   const gateItem = (x: World) => (x.hub.snap.actionItems ?? []).find((i) => i.id === "gate-02.1");
   preAgent(w, "tu_a", brief("02.1"), "02.1 dev");
   postAgent(w, "tu_a", brief("02.1"), "aA");
   writeSub(w, "aA", { prompt: brief("02.1"), toolUseId: "tu_a" });
   subStart(w, "aA");
-  stateFile(w, "02.1", { State: "human-gate", Gate: q, Updated: new Date().toISOString() });
+  stateFile(w, "02.1", { State: "human-gate", Gate: q, "Gate-Id": X, Updated: new Date().toISOString() });
   setRows(w, [row("02.1", "human-gate", { gate: q })]);
+  toolEvent(w, "aA");
   writeSub(w, "aA", { prompt: brief("02.1"), toolUseId: "tu_a", report: `GATE: ${q}`, finished: true });
   subStop(w, "aA");
   await refresh(w);
   const aHq = workers(w).get("aA")?.hqId;
   const first = gateItem(w)!;
-  eq("R3: A's own unconsumed GATE report owns the open gate", [first.request?.owner, first.request?.diagnostic], [aHq, null]);
+  eq("R3: A's own GATE report, made in this occurrence, owns the open gate", [first.request?.owner, first.request?.diagnostic, first.request?.occurrence], [aHq, null, X]);
   await w.run.answerGate("gate-02.1", "repair again", first.request!.revision);
   stateFile(w, "02.1", { State: "working", Updated: new Date().toISOString() });
   setRows(w, [row("02.1", "working")]);
   await refresh(w);
   eq("R3: the answer is Recorded once Pathfinder shows Q resolved", [first.status, first.answer?.state], ["done", "recorded"]);
-  const book = () => JSON.parse(readFileSync(join(tmp, ".controlroom", "tt-r3-consumed", "sessions.json"), "utf8")) as Record<string, { consumed?: string }>;
-  eq("R3: the resolution consumes A's report in sessions.json", book().aA?.consumed, q);
-  // Another session runs and finishes; then the coordinator raises the identical question.
+  const book = () => JSON.parse(readFileSync(join(tmp, ".controlroom", "tt-r3-consumed", "sessions.json"), "utf8")) as Record<string, { occurrence?: string }>;
+  eq("R3: A's report is kept with the occurrence it was made in", book().aA?.occurrence, X);
+  // Another session runs and finishes; then the coordinator raises the identical question: a new occurrence.
   preAgent(w, "tu_b", brief("02.1"), "02.1 dev 2");
   postAgent(w, "tu_b", brief("02.1"), "aB");
   writeSub(w, "aB", { prompt: brief("02.1"), toolUseId: "tu_b" });
   subStart(w, "aB");
   writeSub(w, "aB", { prompt: brief("02.1"), toolUseId: "tu_b", report: "DONE: def", finished: true });
   subStop(w, "aB");
-  stateFile(w, "02.1", { State: "human-gate", Gate: q, Updated: new Date().toISOString() });
+  stateFile(w, "02.1", { State: "human-gate", Gate: q, "Gate-Id": Y, Updated: new Date().toISOString() });
   setRows(w, [row("02.1", "human-gate", { gate: q })]);
   await refresh(w);
   const again = gateItem(w)!;
-  check("R3: a new request opens for the identical question", again !== first && again.status === "open" && again.answer === null, again);
+  check("R3: a new request opens for the identical question", again !== first && again.status === "open" && again.answer === null && again.request?.occurrence === Y, again);
   eq("R3: before the restart, A isn't credited for the new gate", [again.request?.owner, again.request?.session, again.fromId], [null, null, COORDINATOR_ID]);
-  check("R3: …and the diagnostic says its report was spent on the resolved gate", /No session on 02\.1 reported this gate since it was last resolved/.test(again.request?.diagnostic ?? ""), again.request?.diagnostic);
-  // A repeated stop for A (its transcript still ends with the old report) keeps the report consumed.
+  check("R3: …and the diagnostic says its report was for the earlier occurrence", new RegExp(`asked the same question in an earlier occurrence \\(${X}\\)`).test(again.request?.diagnostic ?? ""), again.request?.diagnostic);
+  // A is resumed under the same subagent id while Y is open, and stops with its old report still the last one in
+  // its transcript: that report stays X's, it is never moved to the occurrence open now.
+  subStart(w, "aA");
+  toolEvent(w, "aA");
   subStop(w, "aA");
-  eq("R3: settling A's old report again keeps it consumed", book().aA?.consumed, q);
+  await refresh(w);
+  eq("R3: A resumed and stopped on its old report: the report stays the earlier occurrence's", [book().aA?.occurrence, gateItem(w)?.request?.owner], [X, null]);
   // Restart: the kitchen rebuilds every session from transcripts and sessions.json.
   const w2 = boot(repo, "tt-r3-consumed", w.rows);
   await refresh(w2);
   const after = gateItem(w2)!;
   eq("R3: after the restart, A is rebuilt finished at its gate", [workers(w2).get("aA")?.live, workers(w2).get("aA")?.ended?.outcome], [false, "gate"]);
   eq("R3: after the restart, A still isn't credited for the new gate", [after.request?.owner, after.request?.session, after.fromId], [null, null, COORDINATOR_ID]);
-  check("R3: after the restart, the diagnostic still says why", /since it was last resolved/.test(after.request?.diagnostic ?? ""), after.request?.diagnostic);
+  check("R3: after the restart, the diagnostic still says why", new RegExp(`earlier occurrence \\(${X}\\)`).test(after.request?.diagnostic ?? ""), after.request?.diagnostic);
   eq("R3: the ticket and the question are kept", [after.request?.key, after.details, after.status], ["02.1", q, "open"]);
   await w2.run.answerGate("gate-02.1", "drop it", after.request!.revision);
   eq("R3: Send answer still reaches the coordinator", [after.answer?.state, w2.typed.length], ["delivered", 1]);
   check("R3: …saying an unidentified session raised it", (w2.typed[0] ?? "").includes("raised by an unidentified session"), w2.typed[0]);
-  // A new session that raises Q in its own report, after the resolution, is credited (the positive case holds).
+  // A new session that raises Q in its own report while this occurrence is open is credited (the positive case holds).
   preAgent(w2, "tu_c", brief("02.1"), "02.1 dev 3");
   postAgent(w2, "tu_c", brief("02.1"), "aC");
   writeSub(w2, "aC", { prompt: brief("02.1"), toolUseId: "tu_c" });
@@ -745,13 +779,415 @@ w.run.deliveryOf = () => null;
   writeSub(w2, "aC", { prompt: brief("02.1"), toolUseId: "tu_c", report: `GATE: ${q}`, finished: true });
   subStop(w2, "aC");
   await refresh(w2);
-  eq("R3: a later session's own unconsumed GATE report for Q is credited", gateItem(w2)?.request?.owner, workers(w2).get("aC")?.hqId);
-  // Q replaced by a different question: the replaced question's reports are spent too.
+  eq("R3: a later session's own GATE report, made in this occurrence, is credited", [gateItem(w2)?.request?.owner, book().aC?.occurrence], [workers(w2).get("aC")?.hqId, Y]);
+  eq("R3: crediting the session doesn't make it a new request or drop the answer", [gateItem(w2) === after, gateItem(w2)?.answer?.state], [true, "delivered"]);
+  // Q replaced by a different question: a new occurrence, which the reports of the old one don't own.
   const q2 = "Accept the partial fix?";
-  stateFile(w2, "02.1", { State: "human-gate", Gate: q2, Updated: new Date().toISOString() });
+  stateFile(w2, "02.1", { State: "human-gate", Gate: q2, "Gate-Id": Z, Updated: new Date().toISOString() });
   setRows(w2, [row("02.1", "human-gate", { gate: q2 })]);
   await refresh(w2);
-  eq("R3: a replaced question consumes the reports behind it", book().aC?.consumed, q);
+  eq("R3: a replaced question is a new occurrence, which no earlier report owns", [gateItem(w2)?.request?.occurrence, gateItem(w2)?.request?.owner, book().aC?.occurrence], [Z, null, Y]);
+}
+
+// ================================================================ review 4: gate occurrences, from Pathfinder's durable record
+//
+// Everything below runs this repository's own engine (skills/orchestrate/engine) on throwaway local-Markdown
+// projects with real claims. The engine writes the state files and the gate notes; the kitchen only reads them.
+
+const ENGINE_BIN = join(dirname(fileURLToPath(import.meta.url)), "..", "skills", "orchestrate", "engine", "bin", "orchestrate.mjs");
+const GIT_ENV = { ...process.env, GIT_AUTHOR_NAME: "test", GIT_AUTHOR_EMAIL: "test@example.invalid", GIT_COMMITTER_NAME: "test", GIT_COMMITTER_EMAIL: "test@example.invalid", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
+type EngineRepo = { root: string; coord: string; engine: string; real: true };
+
+const engineRun = (repo: EngineRepo, ...args: string[]) => spawnSync(process.execPath, [ENGINE_BIN, ...args, "--root", repo.root], { cwd: repo.root, env: GIT_ENV, encoding: "utf8" });
+function engine(repo: EngineRepo, ...args: string[]) {
+  const r = engineRun(repo, ...args);
+  if (r.status !== 0) throw new Error(`orchestrate ${args.join(" ")} exited ${r.status}: ${r.stderr}`);
+  return r;
+}
+
+function makeEngineRepo(name: string, keys: string[]): EngineRepo {
+  const root = join(tmp, name);
+  mkdirSync(join(root, "context", "tickets"), { recursive: true });
+  mkdirSync(join(root, "roles"), { recursive: true });
+  const git = (...args: string[]) => {
+    const r = spawnSync("git", args, { cwd: root, env: GIT_ENV, encoding: "utf8" });
+    if (r.status !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr}`);
+  };
+  git("init", "--quiet", "--initial-branch=main");
+  for (const role of ["planner", "orchestrator", "developer", "tester", "integrator"]) writeFileSync(join(root, "roles", `${role}.md`), `---\nname: ${role}\ndescription: ${role}\n---\n`);
+  writeFileSync(join(root, ".gitignore"), "/context/current-ticket.md\n/.pathfinder/\n");
+  writeFileSync(join(root, "context", "execution-mode.md"), "# Execution Mode\n\n<!-- pathfinder:execution-mode orchestrator -->\n");
+  for (const key of keys)
+    writeFileSync(join(root, "context", "tickets", `${key}-t.md`), `# Ticket ${key}\n\n## Status\n\nProposed\n\n## Parent Feature\n\n\`${key.split(".")[0]}-x.md\`\n\n## Blocked by\n\nNone\n\n## Goal\n\nSomething.\n\n## Notes / Decisions\n\n- Existing note.\n`);
+  git("add", "-A");
+  git("commit", "--quiet", "-m", "initial");
+  const coord = join(tmp, `${name}-session.jsonl`);
+  writeFileSync(coord, "");
+  mkdirSync(join(coord.replace(/\.jsonl$/, ""), "subagents"), { recursive: true });
+  const repo: EngineRepo = { root, coord, engine: ENGINE_BIN, real: true };
+  for (const key of keys) engine(repo, "claim", key);
+  return repo;
+}
+
+const claimDir = (repo: EngineRepo, key: string) => join(repo.root, ".pathfinder", "worktrees", key);
+const statePath = (repo: EngineRepo, key: string) => join(claimDir(repo, key), "context", "current-ticket.md");
+const ticketPath = (repo: EngineRepo, key: string) => join(claimDir(repo, key), "context", "tickets", `${key}-t.md`);
+/** The open gate's occurrence, as the engine recorded it in the state file. */
+const gateId = (repo: EngineRepo, key: string) => /^-\s*Gate-Id:\s*(\S+)\s*$/m.exec(readFileSync(statePath(repo, key), "utf8"))?.[1] ?? null;
+const history = (repo: EngineRepo, key: string) => readGateHistory(claimDir(repo, key), key, null);
+/** What Pathfinder's record holds for a ticket, byte for byte: the kitchen must never change it. */
+const record = (repo: EngineRepo, key: string) => [readFileSync(statePath(repo, key), "utf8"), readFileSync(ticketPath(repo, key), "utf8")];
+/** A worker sets its gate by hand, as its brief says: `State: human-gate` and `Gate: <question>`, and no Gate-Id. */
+function handGate(repo: EngineRepo, key: string, question: string) {
+  const text = readFileSync(statePath(repo, key), "utf8");
+  if (!/^- State: working$/m.test(text)) throw new Error(`${key} isn't working: ${text}`);
+  writeFileSync(statePath(repo, key), text.replace(/^- State: working$/m, `- State: human-gate\n- Gate: ${question}`));
+}
+/** A kitchen on an engine project. Only the refreshes a test asks for run, so each step reads the record once, in order. */
+function kitchen(repo: EngineRepo, slug: string, saved?: unknown): World {
+  const w = boot(repo, slug, [], saved);
+  (w.run as unknown as { queueRefresh(ms: number): void }).queueRefresh = () => {};
+  return w;
+}
+const item = (w: World, key: string) => (w.hub.snap.actionItems ?? []).find((i) => i.id === `gate-${key}`);
+const gateItems = (w: World, key: string) => (w.hub.snap.actionItems ?? []).filter((i) => i.taskId === key && i.request);
+const asked = (w: World, key: string) => w.hub.snap.activity.filter((e) => e.text.startsWith(`${key} needs your decision`)).length;
+/** A worker session starts on `key` (its launch, its transcript, its SubagentStart). */
+function launch(w: World, agentId: string, key: string, session = "implementation") {
+  const p = brief(key, session);
+  preAgent(w, `tu_${agentId}`, p, `${key} ${session}`);
+  postAgent(w, `tu_${agentId}`, p, agentId);
+  writeSub(w, agentId, { prompt: p, toolUseId: `tu_${agentId}` });
+  subStart(w, agentId);
+}
+/** It stops with `report` as its last word (its transcript and its SubagentStop hook both carry it). */
+function stopWith(w: World, agentId: string, key: string, report: string, session = "implementation") {
+  writeSub(w, agentId, { prompt: brief(key, session), toolUseId: `tu_${agentId}`, report, finished: true });
+  subStop(w, agentId, report);
+}
+/** A worker opens its own gate through the engine while it runs, then reports it and stops. */
+function raiseThroughEngine(w: World, repo: EngineRepo, agentId: string, key: string, question: string) {
+  engine(repo, "state", key, "--set", "human-gate", "--gate", question);
+  toolEvent(w, agentId, `node skills/orchestrate/engine/bin/orchestrate.mjs state ${key} --set human-gate --gate "…"`);
+  stopWith(w, agentId, key, `GATE: ${question}`);
+  return gateId(repo, key)!;
+}
+
+// ---- 0. The durable record tells occurrences apart, and the kitchen reads it as the engine wrote it.
+{
+  const repo = makeEngineRepo("repo-r4-record", ["80.1", "80.2"]);
+  const Q = "Authorize repair?";
+  engine(repo, "gate", "80.1", "open", "--question", Q);
+  const X = gateId(repo, "80.1");
+  check("record: a new opening has an occurrence in the state file", isGateOccurrence(X), X);
+  eq("record: the kitchen reads that occurrence from the ticket's notes", history(repo, "80.1"), { readable: true, opened: [X], resolved: [], unidentified: 0 });
+  engine(repo, "gate", "80.1", "open", "--question", Q, "--now", "2027-01-01T00:00:00Z");
+  eq("record: a retried opening reuses its occurrence and writes no second note", [gateId(repo, "80.1"), history(repo, "80.1").opened], [X, [X]]);
+  engine(repo, "gate", "80.1", "resolve", "--answer", "yes");
+  eq("record: a resolution names its exact occurrence, and the state file drops it", [gateId(repo, "80.1"), history(repo, "80.1").resolved], [null, [X]]);
+  engine(repo, "gate", "80.1", "open", "--question", Q);
+  const Y = gateId(repo, "80.1");
+  check("record: the identical question opened again is a different occurrence", isGateOccurrence(Y) && Y !== X, [X, Y]);
+  eq("record: both openings are in the history, only the first resolved", [history(repo, "80.1").opened, history(repo, "80.1").resolved], [[X, Y], [X]]);
+  check("record: the two openings are two requests; a retry is the same one", gateRevision("80.1", Q, X) !== gateRevision("80.1", Q, Y) && gateRevision("80.1", Q, Y) === gateRevision("80.1", `${Q} `, Y));
+  engine(repo, "state", "80.1", "--set", "working");
+  eq("record: a gate closed by a state change is resolved under its occurrence too", history(repo, "80.1").resolved, [X, Y]);
+  engine(repo, "state", "80.1", "--set", "human-gate", "--gate", Q);
+  const Z = gateId(repo, "80.1");
+  check("record: a gate opened through `state` has an occurrence of its own", isGateOccurrence(Z) && Z !== X && Z !== Y && history(repo, "80.1").opened.join() === [X, Y, Z].join(), [X, Y, Z]);
+  // No identity: a gate set by hand, and notes written before occurrences existed. None is made up for them.
+  handGate(repo, "80.2", Q);
+  const old = ["<!-- pathfinder:orchestrate gate-opened 80.2 c1ce7ac69e62 -->", "<!-- pathfinder:orchestrate gate-resolved 80.2 c1ce7ac69e62 -->"];
+  appendFileSync(ticketPath(repo, "80.2"), `\n${old[0]}\n**Human gate opened** on 2026-11-12.\n\n${old[1]}\n**Human gate resolved** on 2026-11-12.\n`);
+  eq("record: a hand-set gate and old notes carry no occurrence", [gateId(repo, "80.2"), history(repo, "80.2")], [null, { readable: true, opened: [], resolved: [], unidentified: 2 }]);
+  eq("record: an old marker parses with no occurrence, a new one with its own", [parseGateMarker(old[0])?.occurrence, parseGateMarker(`<!-- pathfinder:orchestrate gate-opened 80.1 c1ce7ac69e62 ${X} -->`)?.occurrence], [null, X]);
+  eq("record: another ticket's notes are not this ticket's history", gateHistory(readFileSync(ticketPath(repo, "80.1"), "utf8"), "80.2"), { readable: true, opened: [], resolved: [], unidentified: 0 });
+  check("record: without an occurrence a request is only its ticket and its text", gateRevision("80.2", Q, null) === gateRevision("80.2", Q, null) && gateRevision("80.2", Q, null) !== gateRevision("80.2", `${Q} (2)`, null) && gateRevision("80.2", Q, null) !== gateRevision("80.1", Q, null));
+  eq("record: notes that aren't a file in the claim's worktree are unreadable, never empty", readGateHistory(join(repo.root, "nowhere"), "80.1", null).readable, false);
+}
+
+// ---- 1. The kitchen is offline while Q is resolved and the identical Q is raised again; then it restarts.
+{
+  const repo = makeEngineRepo("repo-r4-offline", ["70.1"]);
+  const Q = "Repair budget exhausted: accept, repair again, or drop?";
+  const w = kitchen(repo, "tt-r4-offline");
+  launch(w, "aA", "70.1");
+  const X = raiseThroughEngine(w, repo, "aA", "70.1", Q);
+  await refresh(w);
+  const aHq = workers(w).get("aA")!.hqId;
+  const first = item(w, "70.1")!;
+  eq("offline: A raised this occurrence while it ran, so A owns it", [first.request?.owner, first.request?.occurrence, first.request?.revision, first.request?.diagnostic], [aHq, X, `70.1#${X}`, null]);
+  await w.run.answerGate("gate-70.1", "one more round", first.request!.revision);
+  eq("offline: the answer for X is delivered", [first.answer?.state, w.typed.length], ["delivered", 1]);
+  check("offline: …naming A and the occurrence", w.typed[0].includes(`gate occurrence ${X}`) && w.typed[0].includes(`raised by ${w.hub.name(aHq)}'s implementation session`), w.typed[0]);
+  // A restart while X is still open: the same request, A still its owner, its answer kept, nothing sent again.
+  const wx = kitchen(repo, "tt-r4-offline");
+  await refresh(wx);
+  eq("restart, same occurrence: the owner and the delivered answer are kept", [item(wx, "70.1")?.request?.owner, item(wx, "70.1")?.request?.occurrence, item(wx, "70.1")?.answer?.state], [workers(wx).get("aA")?.hqId, X, "delivered"]);
+  await wx.run.answerGate("gate-70.1", "one more round", `70.1#${X}`);
+  eq("restart, same occurrence: nothing is sent twice, and there is one request", [wx.typed.length, gateItems(wx, "70.1").length], [0, 1]);
+  // The kitchen is down. Pathfinder records X resolved; the coordinator raises the identical question again.
+  const saved = JSON.parse(JSON.stringify(w.hub.snap.actionItems));
+  engine(repo, "gate", "70.1", "resolve", "--answer", "one more round");
+  engine(repo, "gate", "70.1", "open", "--question", Q);
+  const Y = gateId(repo, "70.1")!;
+  eq("offline: Pathfinder's record holds X resolved and Y open", [Y !== X, history(repo, "70.1").opened, history(repo, "70.1").resolved], [true, [X, Y], [X]]);
+  const before = record(repo, "70.1");
+  // Restart, with the old request (X, answered) still on the kitchen's disk.
+  const w2 = kitchen(repo, "tt-r4-offline", saved);
+  await refresh(w2);
+  const second = item(w2, "70.1")!;
+  eq("offline: after the restart A is rebuilt finished at its gate", [workers(w2).get("aA")?.live, workers(w2).get("aA")?.ended?.outcome], [false, "gate"]);
+  eq("offline: after the restart the old session isn't credited for the new occurrence", [second.request?.owner, second.request?.session, second.fromId, second.request?.occurrence], [null, null, COORDINATOR_ID, Y]);
+  check("offline: …and the diagnostic says its report was for the resolved occurrence", new RegExp(`asked the same question in an earlier occurrence \\(${X}\\), which Pathfinder recorded resolved`).test(second.request?.diagnostic ?? ""), second.request?.diagnostic);
+  eq("offline: the new request doesn't reuse the old one's answer", [second.answer, requestShelf(second), second.details, gateItems(w2, "70.1").length], [null, "actionable", Q, 1]);
+  await w2.run.answerGate("gate-70.1", "one more round", `70.1#${X}`);
+  eq("offline: an answer aimed at the superseded occurrence is rejected, nothing sent", [second.answer?.state, w2.typed.length, requestShelf(second)], ["rejected", 0, "actionable"]);
+  await w2.run.answerGate("gate-70.1", "stop here");
+  eq("offline: an answer that names no request is rejected, nothing sent", [second.answer?.state, w2.typed.length], ["rejected", 0]);
+  await w2.run.answerGate("gate-70.1", "stop here", second.request!.revision);
+  eq("offline: the new request is answerable", [second.answer?.state, w2.typed.length], ["delivered", 1]);
+  check("offline: …naming the new occurrence and no session", w2.typed[0].includes(`gate occurrence ${Y}`) && w2.typed[0].includes("raised by an unidentified session") && !w2.typed[0].includes(X), w2.typed[0]);
+  eq("offline: the kitchen changed nothing in Pathfinder's record", record(repo, "70.1"), before);
+  // Restart again, with nothing saved but the kitchen's own gate-answers.json: the same result, no second request.
+  const w3 = kitchen(repo, "tt-r4-offline");
+  await refresh(w3);
+  await refresh(w3);
+  const third = item(w3, "70.1")!;
+  eq("restart: the same occurrence, still unidentified, its delivered answer kept", [third.request?.occurrence, third.request?.owner, third.answer?.state, third.answer?.text, requestShelf(third)], [Y, null, "delivered", "stop here", "awaiting"]);
+  await w3.run.answerGate("gate-70.1", "stop here", third.request!.revision);
+  eq("restart: nothing is sent again, and there is one request", [w3.typed.length, gateItems(w3, "70.1").length], [0, 1]);
+  // Pathfinder records the answer: the request closes as recorded, under the new occurrence only.
+  engine(repo, "gate", "70.1", "resolve", "--answer", "stop here");
+  await refresh(w3);
+  eq("offline: Pathfinder records the new answer", [third.status, third.answer?.state, history(repo, "70.1").resolved], ["done", "recorded", [X, Y]]);
+  const notes = readFileSync(ticketPath(repo, "70.1"), "utf8");
+  const fromY = notes.slice(notes.indexOf(Y));
+  eq("offline: no answer stays saved for an occurrence that is closed", JSON.parse(readFileSync(join(tmp, ".controlroom", "tt-r4-offline", "gate-answers.json"), "utf8")), {});
+  check("offline: the old answer is recorded under X only, the new one under Y", notes.slice(0, notes.indexOf(Y)).includes("> one more round") && fromY.includes("> stop here") && !fromY.includes("one more round"), fromY);
+}
+
+// ---- 2. X is resolved and the identical Q raised again between two polls (no restart).
+{
+  const repo = makeEngineRepo("repo-r4-polls", ["70.2", "70.3", "70.8"]);
+  const Q = "Repair budget exhausted: accept, repair again, or drop?";
+  const w = kitchen(repo, "tt-r4-polls");
+  launch(w, "aB", "70.2");
+  const X = raiseThroughEngine(w, repo, "aB", "70.2", Q);
+  await refresh(w);
+  const first = item(w, "70.2")!;
+  eq("between polls: B owns the occurrence it raised", [first.request?.owner, first.request?.occurrence], [workers(w).get("aB")?.hqId, X]);
+  await w.run.answerGate("gate-70.2", "the old answer", first.request!.revision);
+  eq("between polls: the answer for X is delivered", [first.answer?.state, w.typed.length], ["delivered", 1]);
+  // Before the next poll: Pathfinder closes X and the coordinator raises the identical question again.
+  engine(repo, "state", "70.2", "--set", "working");
+  engine(repo, "gate", "70.2", "open", "--question", Q);
+  const Y = gateId(repo, "70.2")!;
+  eq("between polls: Pathfinder's record holds X resolved and Y open", [Y !== X, history(repo, "70.2").resolved], [true, [X]]);
+  // The kitchen still shows X. An answer sent from that card is checked against the record first: nothing is typed.
+  await w.run.answerGate("gate-70.2", "the old answer, again", first.request!.revision);
+  eq("between polls: an answer from the stale card is refused, nothing sent", [w.typed.length, item(w, "70.2") === first], [1, true]);
+  await refresh(w);
+  const second = item(w, "70.2")!;
+  eq("between polls: the next poll shows a new request for the new occurrence", [second !== first, second.request?.occurrence, second.status, gateItems(w, "70.2").length], [true, Y, "open", 1]);
+  eq("between polls: the old session isn't credited for it", [second.request?.owner, second.request?.session, second.fromId], [null, null, COORDINATOR_ID]);
+  check("between polls: …and the diagnostic says why", new RegExp(`earlier occurrence \\(${X}\\), which Pathfinder recorded resolved`).test(second.request?.diagnostic ?? ""), second.request?.diagnostic);
+  eq("between polls: the old answer state isn't reused", [second.answer, requestShelf(second)], [null, "actionable"]);
+  await w.run.answerGate("gate-70.2", "the old answer", `70.2#${X}`);
+  eq("between polls: the old answer can't be sent to the new occurrence", [second.answer?.state, second.answer?.revision, w.typed.length, requestShelf(second)], ["rejected", `70.2#${X}`, 1, "actionable"]);
+  await w.run.answerGate("gate-70.2", "the new answer", second.request!.revision);
+  eq("between polls: the new occurrence is answered", [second.answer?.state, w.typed.length], ["delivered", 2]);
+  check("between polls: …under its own occurrence", w.typed[1].includes(`gate occurrence ${Y}`) && w.typed[1].includes("the new answer"), w.typed[1]);
+  // A late answer for X arriving after Y was answered doesn't disturb Y's answer.
+  await w.run.answerGate("gate-70.2", "the old answer", `70.2#${X}`);
+  eq("between polls: a late answer for X leaves Y's delivered answer alone", [second.answer?.state, second.answer?.text, w.typed.length], ["delivered", "the new answer", 2]);
+  engine(repo, "gate", "70.2", "resolve", "--answer", "the new answer");
+  await refresh(w);
+  eq("between polls: Pathfinder records it under Y", [second.status, second.answer?.state, history(repo, "70.2").resolved], ["done", "recorded", [X, Y]]);
+  check("between polls: the old answer was never recorded anywhere", !readFileSync(ticketPath(repo, "70.2"), "utf8").includes("the old answer"));
+
+  // The same swap under a request nobody has answered yet: the answer typed into the stale card would otherwise
+  // go to the coordinator and be recorded against the new occurrence.
+  engine(repo, "gate", "70.8", "open", "--question", Q);
+  const X8 = gateId(repo, "70.8")!;
+  await refresh(w);
+  const stale = item(w, "70.8")!;
+  engine(repo, "state", "70.8", "--set", "working");
+  engine(repo, "gate", "70.8", "open", "--question", Q);
+  const Y8 = gateId(repo, "70.8")!;
+  const typedBefore = w.typed.length;
+  await w.run.answerGate("gate-70.8", "meant for the first one", stale.request!.revision);
+  eq("stale card: the card still shows X, and its answer is rejected against the record, nothing sent", [stale.request?.occurrence, stale.answer?.state, w.typed.length - typedBefore], [X8, "rejected", 0]);
+  check("stale card: …saying a new request replaced it", /closed this request and opened a new one on 70\.8/.test(stale.answer?.detail ?? ""), stale.answer?.detail);
+  await refresh(w);
+  eq("stale card: the next poll shows the new occurrence, unanswered", [item(w, "70.8") !== stale, item(w, "70.8")?.request?.occurrence, item(w, "70.8")?.answer, requestShelf(item(w, "70.8")!)], [true, Y8, null, "actionable"]);
+  // The gate is closed in the record (no new one) before the poll: an answer for it is refused too.
+  engine(repo, "state", "70.8", "--set", "working");
+  await w.run.answerGate("gate-70.8", "too late", item(w, "70.8")!.request!.revision);
+  eq("closed between polls: an answer for a gate the record no longer holds is rejected, nothing sent", [item(w, "70.8")?.answer?.state, /no longer open/.test(item(w, "70.8")?.answer?.detail ?? ""), w.typed.length - typedBefore], ["rejected", true, 0]);
+  await refresh(w);
+  eq("closed between polls: the request closes without a recorded answer", [item(w, "70.8")?.status, item(w, "70.8")?.answer?.state, history(repo, "70.8").resolved], ["done", "rejected", [X8, Y8]]);
+  check("closed between polls: nothing typed in the kitchen reached Pathfinder's notes", !/meant for the first one|too late/.test(readFileSync(ticketPath(repo, "70.8"), "utf8")));
+
+  // The session's stop hook is lost, and X is replaced by Y (the identical Q) before the poll that finds it
+  // finished: its report can't be shown to be for Y, so it owns nothing.
+  launch(w, "aL", "70.3");
+  engine(repo, "state", "70.3", "--set", "human-gate", "--gate", Q);
+  const X3 = gateId(repo, "70.3")!;
+  toolEvent(w, "aL");
+  writeSub(w, "aL", { prompt: brief("70.3"), toolUseId: "tu_aL", report: `GATE: ${Q}`, finished: true });
+  engine(repo, "state", "70.3", "--set", "working");
+  engine(repo, "gate", "70.3", "open", "--question", Q);
+  const Y3 = gateId(repo, "70.3")!;
+  await refresh(w);
+  const lost = item(w, "70.3")!;
+  eq("lost stop hook: the session is found finished at its gate", [workers(w).get("aL")?.live, workers(w).get("aL")?.ended?.verdict], [false, "GATE"]);
+  eq("lost stop hook: its report isn't credited to the occurrence that replaced the one it saw", [X3 !== Y3, lost.request?.occurrence, lost.request?.owner], [true, Y3, null]);
+  check("lost stop hook: …and the diagnostic says the occurrence wasn't seen open while it ran", /reported the same question, but this kitchen didn't see this occurrence open while that session was running/.test(lost.request?.diagnostic ?? ""), lost.request?.diagnostic);
+}
+
+// ---- 3. Duplicate retries of one opening; refresh, reconnect and restart keep one request and its result.
+{
+  const repo = makeEngineRepo("repo-r4-retry", ["70.4"]);
+  const Q = "Review found issues after two repair rounds. How should this ticket proceed?";
+  const w = kitchen(repo, "tt-r4-retry");
+  engine(repo, "gate", "70.4", "open", "--question", Q);
+  const X = gateId(repo, "70.4")!;
+  await refresh(w);
+  const first = item(w, "70.4")!;
+  eq("retries: the opening is one request, raised by no session", [first.request?.occurrence, first.request?.owner, gateItems(w, "70.4").length, asked(w, "70.4")], [X, null, 1, 1]);
+  await w.run.answerGate("gate-70.4", "one more repair round", first.request!.revision);
+  const raisedAt = first.at;
+  // The coordinator retries the same opening (a later clock, the label step repeated): the same occurrence.
+  engine(repo, "gate", "70.4", "open", "--question", Q, "--now", "2027-01-01T00:00:00Z");
+  await refresh(w);
+  engine(repo, "gate", "70.4", "open", "--question", Q, "--now", "2027-02-01T00:00:00Z");
+  engine(repo, "state", "70.4", "--set", "human-gate", "--gate", Q);
+  await refresh(w);
+  await refresh(w);
+  eq("retries: Pathfinder kept one occurrence and one note", [gateId(repo, "70.4"), history(repo, "70.4").opened], [X, [X]]);
+  eq("retries: still the same single request, asked once", [item(w, "70.4") === first, first.request?.revision, first.at === raisedAt, gateItems(w, "70.4").length, asked(w, "70.4")], [true, `70.4#${X}`, true, 1, 1]);
+  eq("retries: its delivered answer is kept and wasn't sent again", [first.answer?.state, w.typed.length, requestShelf(first)], ["delivered", 1, "awaiting"]);
+  await w.run.answerGate("gate-70.4", "one more repair round", first.request!.revision);
+  eq("refresh: a repeated send for the same occurrence is refused", w.typed.length, 1);
+  // Restart, once with the kitchen's saved action items and once without: the same request, the same result.
+  for (const [label, saved] of [["with its saved items", JSON.parse(JSON.stringify(w.hub.snap.actionItems))], ["with no saved items", undefined]] as const) {
+    const w2 = kitchen(repo, "tt-r4-retry", saved);
+    await refresh(w2);
+    await refresh(w2);
+    const it = item(w2, "70.4")!;
+    eq(`restart ${label}: one request for the same occurrence, its answer still delivered`, [it.request?.occurrence, it.answer?.state, it.answer?.text, gateItems(w2, "70.4").length, requestShelf(it)], [X, "delivered", "one more repair round", 1, "awaiting"]);
+    await w2.run.answerGate("gate-70.4", "one more repair round", it.request!.revision);
+    eq(`restart ${label}: nothing is sent again`, w2.typed.length, 0);
+  }
+}
+
+// ---- 4. Records with no occurrence: owner unknown, the gate open now always answerable.
+{
+  const repo = makeEngineRepo("repo-r4-legacy", ["70.5"]);
+  const Q = "Which account should the live check use?";
+  const w = kitchen(repo, "tt-r4-legacy");
+  // The ticket's notes hold an earlier gate with the same question, opened and resolved by a kit from before occurrences.
+  appendFileSync(ticketPath(repo, "70.5"), `\n<!-- pathfinder:orchestrate gate-opened 70.5 3f1c0a9e72b4 -->\n**Human gate opened** on 2026-11-10.\n\n> ${Q}\n\n<!-- pathfinder:orchestrate gate-resolved 70.5 3f1c0a9e72b4 -->\n**Human gate resolved** on 2026-11-10.\n`);
+  launch(w, "aD", "70.5");
+  // The worker sets its gate by hand, as its brief says, and reports it: the state file holds no Gate-Id.
+  handGate(repo, "70.5", Q);
+  toolEvent(w, "aD");
+  stopWith(w, "aD", "70.5", `GATE: ${Q}`);
+  await refresh(w);
+  const first = item(w, "70.5")!;
+  eq("no occurrence: the record has none, and the kitchen makes none up", [gateId(repo, "70.5"), first.request?.occurrence, history(repo, "70.5").unidentified], [null, null, 2]);
+  eq("no occurrence: the owner is unknown, even though a session reported these words", [first.request?.owner, first.request?.session, first.fromId, first.details, first.status], [null, null, COORDINATOR_ID, Q, "open"]);
+  check("no occurrence: …and the diagnostic says why", new RegExp(`no occurrence ID.*${w.hub.name(workers(w).get("aD")!.hqId)} \\(implementation\\) reported the same question, which doesn't show it raised this gate`).test(first.request?.diagnostic ?? ""), first.request?.diagnostic);
+  await w.run.answerGate("gate-70.5", "the work account", first.request!.revision);
+  eq("no occurrence: the gate is answerable through the coordinator", [first.answer?.state, w.typed.length], ["delivered", 1]);
+  check("no occurrence: …naming no session and no occurrence", w.typed[0].includes("70.5 gate") && w.typed[0].includes("raised by an unidentified session") && !w.typed[0].includes("gate occurrence"), w.typed[0]);
+  await refresh(w);
+  eq("no occurrence: a refresh keeps the one request and its answer", [item(w, "70.5") === first, first.answer?.state, gateItems(w, "70.5").length, asked(w, "70.5")], [true, "delivered", 1, 1]);
+  // Nothing shows that the delivered answer was for the gate open now, so the gate can be answered again.
+  await w.run.answerGate("gate-70.5", "the work account, please", first.request!.revision);
+  eq("no occurrence: the gate open now stays answerable after an earlier answer", [first.answer?.state, first.answer?.text, w.typed.length], ["delivered", "the work account, please", 2]);
+  // A restart with that request saved: it can't be shown to be the gate open now, so it is asked afresh.
+  const w2 = kitchen(repo, "tt-r4-legacy", JSON.parse(JSON.stringify(w.hub.snap.actionItems)));
+  await refresh(w2);
+  const again = item(w2, "70.5")!;
+  eq("no occurrence, restart: the saved answer isn't taken as this gate's", [again.answer, requestShelf(again), again.request?.owner, gateItems(w2, "70.5").length], [null, "actionable", null, 1]);
+  await w2.run.answerGate("gate-70.5", "the work account", again.request!.revision);
+  eq("no occurrence, restart: it is answerable", [again.answer?.state, w2.typed.length], ["delivered", 1]);
+  // The coordinator now opens the gate through the engine: the record gives it an occurrence, after the session stopped.
+  const before = record(repo, "70.5");
+  engine(repo, "gate", "70.5", "open", "--question", Q);
+  const X = gateId(repo, "70.5")!;
+  check("first occurrence: the engine recorded one for the hand-set gate, and rewrote no old note", isGateOccurrence(X) && readFileSync(ticketPath(repo, "70.5"), "utf8").startsWith(before[1].trimEnd()) && history(repo, "70.5").unidentified === 2, X);
+  await refresh(w);
+  const opened = item(w, "70.5")!;
+  eq("first occurrence: it is a new request, and the earlier answer isn't reused", [opened !== first, opened.request?.occurrence, opened.answer, requestShelf(opened), gateItems(w, "70.5").length], [true, X, null, "actionable", 1]);
+  eq("first occurrence: a report made before the occurrence existed isn't credited to it", [opened.request?.owner, opened.request?.session], [null, null]);
+  check("first occurrence: …and the diagnostic says the occurrence wasn't seen open while the session ran", /reported the same question, but this kitchen didn't see this occurrence open while that session was running/.test(opened.request?.diagnostic ?? ""), opened.request?.diagnostic);
+  await w.run.answerGate("gate-70.5", "the work account", opened.request!.revision);
+  eq("first occurrence: it is answerable, once", [opened.answer?.state, w.typed.length], ["delivered", 3]);
+  await w.run.answerGate("gate-70.5", "the work account", opened.request!.revision);
+  eq("first occurrence: …and not twice", w.typed.length, 3);
+
+  // A session outcome saved by an earlier kitchen (no occurrence, the old `consumed` flag or none) credits nothing.
+  const repo2 = makeRepo("repo-r4-oldbook");
+  const q = "Approve the second account for the live check?";
+  for (const id of ["aOld", "aSpent"]) writeSub({ coord: repo2.coord } as World, id, { prompt: brief("02.1"), toolUseId: `tu_${id}`, report: `GATE: ${q}`, finished: true });
+  mkdirSync(join(tmp, ".controlroom", "tt-r4-oldbook"), { recursive: true });
+  const at = new Date().toISOString();
+  writeFileSync(join(tmp, ".controlroom", "tt-r4-oldbook", "coordinator.json"), JSON.stringify({ transcript: repo2.coord, at }));
+  writeFileSync(join(tmp, ".controlroom", "tt-r4-oldbook", "sessions.json"), JSON.stringify({ aOld: { outcome: "gate", next: null, result: q, verdict: "GATE", at, key: "02.1", session: "implementation" }, aSpent: { outcome: "gate", next: null, result: q, verdict: "GATE", at, key: "02.1", session: "implementation", consumed: q } }));
+  const wo = boot(repo2, "tt-r4-oldbook");
+  stateFile(wo, "02.1", { State: "human-gate", Gate: q, "Gate-Id": occ(0x91) });
+  setRows(wo, [row("02.1", "human-gate", { gate: q })]);
+  await refresh(wo);
+  eq("old sessions.json: both sessions are rebuilt at their gate", [workers(wo).get("aOld")?.ended?.verdict, workers(wo).get("aSpent")?.ended?.verdict], ["GATE", "GATE"]);
+  eq("old sessions.json: a report saved with no occurrence owns no occurrence", [item(wo, "02.1")?.request?.owner, item(wo, "02.1")?.request?.occurrence], [null, occ(0x91)]);
+}
+
+// ---- 5. A state change the engine refuses writes nothing, and the kitchen keeps the same request and its answer.
+{
+  const repo = makeEngineRepo("repo-r4-invalid", ["70.6", "70.7"]);
+  const Q = "Authorize the repair?";
+  const w = kitchen(repo, "tt-r4-invalid");
+  engine(repo, "gate", "70.6", "open", "--question", Q);
+  const X = gateId(repo, "70.6")!;
+  await refresh(w);
+  const first = item(w, "70.6")!;
+  await w.run.answerGate("gate-70.6", "yes, repair it", first.request!.revision);
+  eq("invalid change: the answer is delivered for the open occurrence", [first.request?.occurrence, first.answer?.state, w.typed.length], [X, "delivered", 1]);
+  const before = record(repo, "70.6");
+  eq("invalid change: the engine refuses an unknown state and a blank value", [engineRun(repo, "state", "70.6", "--set", "wroking").status, engineRun(repo, "state", "70.6", "--set", "working", "--last", " ").status], [2, 2]);
+  eq("invalid change: Pathfinder's record is byte-identical", record(repo, "70.6"), before);
+  await refresh(w);
+  await refresh(w);
+  eq("invalid change: the kitchen shows the same request, its answer still delivered", [item(w, "70.6") === first, first.request?.revision, first.status, first.answer?.state, gateItems(w, "70.6").length, asked(w, "70.6")], [true, `70.6#${X}`, "open", "delivered", 1, 1]);
+  await w.run.answerGate("gate-70.6", "yes, repair it", first.request!.revision);
+  eq("invalid change: nothing is sent again, and the kitchen wrote nothing to the record", [w.typed.length, record(repo, "70.6")], [1, before]);
+  // The human's answer, recorded afterwards, lands on that same occurrence.
+  engine(repo, "gate", "70.6", "resolve", "--answer", "yes, repair it");
+  await refresh(w);
+  eq("invalid change: the later valid answer is recorded under the same occurrence", [first.status, first.answer?.state, history(repo, "70.6").resolved, gateId(repo, "70.6")], ["done", "recorded", [X], null]);
+  check("invalid change: …with the decision in Pathfinder's note", readFileSync(ticketPath(repo, "70.6"), "utf8").includes("> yes, repair it"));
+
+  // Pathfinder's history records an occurrence resolved before the state file drops it (a resolve stopped half
+  // way). The history is the truth: the request isn't open, and an answer for it is refused.
+  engine(repo, "gate", "70.7", "open", "--question", Q);
+  const X7 = gateId(repo, "70.7")!;
+  coordinatorTurn(w, true);
+  stopTurn(w);
+  await refresh(w);
+  const open = item(w, "70.7")!;
+  eq("half-resolved: the open occurrence needs the human", [open.status, open.request?.occurrence, coordinator(w).state, coordinator(w).relaying], ["open", X7, "needs-input", ["70.7"]]);
+  appendFileSync(ticketPath(repo, "70.7"), `\n<!-- pathfinder:orchestrate gate-resolved 70.7 ${"0".repeat(12)} ${X7} -->\n**Human gate resolved** on 2026-11-13. Worker \`70.7\` resumes.\n`);
+  eq("half-resolved: the history says resolved while the state file still shows the gate", [history(repo, "70.7").resolved, gateId(repo, "70.7")], [[X7], X7]);
+  await w.run.answerGate("gate-70.7", "too late", open.request!.revision);
+  eq("half-resolved: an answer for the resolved occurrence is rejected before the next poll, nothing sent", [open.answer?.state, w.typed.length], ["rejected", 1]);
+  await refresh(w);
+  eq("half-resolved: the request closes on Pathfinder's history", [open.status, /gate history records this request resolved/.test(open.note ?? ""), gateItems(w, "70.7").filter((i) => i.status === "open").length], ["done", true, 0]);
+  check("half-resolved: the coordinator no longer needs you for it", coordinator(w).state !== "needs-input" || !(coordinator(w).relaying ?? []).includes("70.7"), coordinator(w));
+  await w.run.answerGate("gate-70.7", "too late", open.request!.revision);
+  eq("half-resolved: nothing can be sent for it afterwards", w.typed.length, 1);
 }
 
 console.log(`\n${passes} passed, ${failures} failed`);
