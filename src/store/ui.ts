@@ -7,6 +7,7 @@ export type DrawerState =
   | { kind: "env"; name: string }
   | { kind: "actions" }
   | { kind: "terminal" }
+  | { kind: "delivery"; key: string }
   | null;
 
 export type AgentTab = "terminal" | "shell" | "task" | "sandbox" | "messages";
@@ -92,6 +93,9 @@ export const ui = {
   },
   openActions() {
     useUi.setState({ drawer: { kind: "actions" } });
+  },
+  openDelivery(key: string) {
+    useUi.setState({ drawer: { kind: "delivery", key } });
   },
   openPrs() {
     useUi.setState({ drawer: { kind: "prs" } });

@@ -31,6 +31,8 @@ import { Sessions } from "./sessions";
 import { runSetupChecks } from "./setup";
 import { loadConfig, loadPlan } from "./store";
 import { COORDINATOR_ID, detectPathfinder, PathfinderRun } from "./pathfinder";
+import { attachDelivery } from "./delivery/preview";
+import { unavailableBoard, unavailableRpc } from "./delivery/service";
 import { adoptLegacyState, APP, canonicalRoot, claimStateDir, clearRecord, kitchenKey, writeRecord } from "./kitchen";
 import { runPreview } from "./preview/server";
 
@@ -133,6 +135,12 @@ async function main() {
     pfRun.start();
   }
 
+  // In-app delivery (Feature 10): Pathfinder projects with a GitHub origin. Its state is kept in
+  // ~/.controlroom/<kitchen>/deliveries/, and it runs only on a request from this kitchen's browser page.
+  const delivery = pf ? attachDelivery({ hub, root: repo.root, github: repo.github, kitchenKey: slug }) : null;
+  const noDelivery = "Delivery works in Pathfinder projects only.";
+  if (!delivery) hub.snap.delivery = unavailableBoard(noDelivery);
+
   const root = dirname(dirname(fileURLToPath(import.meta.url)));
   const distDir = join(root, "dist");
   const uiPort = Number(process.env.HQ_UI_PORT ?? 5173);
@@ -149,11 +157,13 @@ async function main() {
     distDir: dev ? null : distDir,
     allowedOrigins: [uiOrigin, `http://127.0.0.1:${uiPort}`, `http://localhost:${port}`, `http://127.0.0.1:${port}`],
     commands,
+    rpc: delivery?.rpc ?? { delivery: unavailableRpc(noDelivery) },
     hookRouter: pfRun ? { agentId: COORDINATOR_ID, handle: (e, b) => pfRun!.onHook(e, b) } : undefined,
     health: pf ? { app: APP, key: slug, instance } : undefined,
   });
   sessions.startPolling();
   sbx.startApprovalPolling();
+  delivery?.start();
   const github = new GitHubSync(hub, planner, pf ? null : repo.github);
   if (!pf) github.start();
 
@@ -173,6 +183,7 @@ async function main() {
     log.info(sessions.backend.persistent ? "stopping HQ — agent sessions keep running in tmux" : "stopping HQ and its agents — sandboxes and folders are kept");
     sessions.shutdown();
     sbx.stopApprovalPolling();
+    delivery?.stop();
     github.stop();
     if (kitchen) clearRecord(slug, instance);
     process.exit(0);

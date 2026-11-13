@@ -100,3 +100,24 @@ Investigation 2026-11-12, read-only, at `7b3eda3`:
   
   Ticket 10.3 implements (a) unless the human chooses otherwise.
 - **Bootstrap (ticket 10.4).** The running kitchen (see `~/.controlroom/kitchens/` for its pid and port) runs `main`'s code and has no restart control. Before 10.4 starts, its first step checks whether a reviewed local build can be served separately while the current coordinator and worker sessions stay intact. If that isn't feasible, it reports the exact blocker and the minimum one-time activation.
+- **Stacked-branch exception (human, 2026-11-12).**
+  - 10.2 and 10.3 may build on the exact independently reviewed 10.1 commit before 10.1 merges. The dependency SHAs are recorded here when they exist; 10.1's reviewed SHA is still pending.
+  - Prerequisites are never marked Complete to make the engine dispatch.
+  - If a parent changes, the combined stack is re-tested and the affected changes are re-reviewed.
+  - The 10.4 preview uses the minimal reviewed stack.
+- **Engine limitation (stated, not worked around by falsifying state).**
+  - `orchestrate claim` refuses a ticket whose blockers are not Complete.
+  - It always branches from the default branch, and has no `--base`.
+  - So it cannot represent a stacked claim. Under the exception, 10.2 and 10.3 keep `Blocked by 10.1`. Their worktrees and branches are created on the reviewed 10.1 SHA, with the same claim structure the engine uses (`refs/pathfinder/claims/<key>`, `.pathfinder/worktrees/<key>`, `ticket/<key>-<slug>`), and the board keeps showing them as blocked by 10.1.
+- **Preview rules (human, 2026-11-12).**
+  - No restart from the dirty main checkout, and never the old run-policy draft.
+  - A clean, identified build with isolated state; never two backends mutating the same kitchen state.
+  - Session attribution is verified (06.1's fix) before its ticket controls are trusted.
+  - The in-app activation step is presented only after independent verification.
+- **Reviewed-head record (orchestrator decision, 2026-11-12, compatible with this spec; no product conflict).** The engine has no structured reviewed-head field. The "engine-recorded reviewed head" is therefore the claim state file's `Last:` line, in one strict form only: `review PASS on <full 40-hex sha>`. The orchestrator writes it only after an independent tester's PASS. Any other wording, a short SHA, or wording that includes FINDINGS, FAIL or "not" is refused. The detailed review evidence stays in the machine-local transfer folder. A same-user worker could still write that line, which is within the accepted same-user risk, and the human sees the evidence before approving each merge. The real records for 05.1, 05.2, 09.1, 01.1 and 10.4 were rewritten to this form (no state change).
+- **Stack dependency recorded (2026-11-12).**
+  - 10.1 passed its independent review on `c8544b8367dac3b7f1fe76ab9bc47d23d221bcd7` (review 5; evidence in the transfer folder, `10.1/review-5-pass.md`).
+  - 10.2 is claimed on that exact commit under the stacked-branch exception. The claim ref and branch `ticket/10.2-delivery-in-the-kitchen-ready-to-deliver` were created with the engine's claim layout and its `seedStateFile`, because `orchestrate claim` refuses unmerged blockers.
+  - 10.1 is not Complete. The board still shows 10.2 as blocked by 10.1.
+- **Stack dependency (2026-11-12).** 10.2 passed independent review on `12f632d2357262946803d79c58946782f79d0bc1` (on 10.1's `c8544b83`). 10.3 is claimed on `12f632d2357262946803d79c58946782f79d0bc1` under the same exception, since 10.3 needs 10.2's drawer and approval. Nothing is marked Complete.
+- **Combined preview build (orchestrator, 2026-11-12).** Ticket 10.5 is the bounded "combine the minimal reviewed stack for the labelled preview" step. It covers 10.1 + 10.2 (`12f632d2357262946803d79c58946782f79d0bc1`) + 10.4 (`cca0378a`), the documented glue, and 10.4's L1/L3 follow-ups, followed by a build-identity check and tests. No new feature scope.

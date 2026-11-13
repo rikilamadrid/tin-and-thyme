@@ -4,9 +4,12 @@
 //   node <checkout>/dist-server/main.mjs --preview --port 7520 --reviewed <sha> [--repo <path>] [--no-open]
 //
 // A preview is delivery only. It attaches to no agent session and starts no coordinator:
-// no tmux backend, no Pathfinder run, no sandbox or GitHub polling, no hook token. It writes
-// nothing to disk: no kitchen record, no lock, nothing in ~/.controlroom or ~/.jsmhq. Its
-// browser and hook tokens live in memory only. It serves only on its own port, outside the
+// no tmux backend, no Pathfinder run, no sandbox or GitHub polling, no hook token. The one
+// place it writes is ~/.controlroom/<repoKey>/deliveries/ (each ticket's delivery state and
+// its lock files), the folder the kitchen uses for the same tickets; the core's cross-process
+// locks guard it. It writes no kitchen record, no kitchen lock, nothing else in ~/.controlroom
+// and nothing in ~/.jsmhq. Its browser and hook tokens live in memory only (the browser URL,
+// token included, is printed to its own terminal). It serves only on its own port, outside the
 // kitchens' range, and only a build whose identity checks out.
 
 import { randomBytes } from "node:crypto";
@@ -14,6 +17,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { cpus, totalmem } from "node:os";
 import { join, resolve } from "node:path";
 import type { OfficeSnapshot, PreviewInfo, SetupState } from "../../src/data/types";
+import { attachDelivery, PREVIEW_COMMANDS_NONE } from "../delivery/preview";
 import { startHttp } from "../http";
 import { Hub } from "../hub";
 import { Inbox } from "../inbox";
@@ -30,10 +34,10 @@ export const PREVIEW_APP = "tin-and-thyme-preview";
 export const KITCHEN_PORTS = { first: 7420, last: 7499 };
 
 /**
- * The commands a preview accepts from its browser. None yet: the delivery operations
- * (Feature 10) register here as named, typed functions. Anything else is refused.
+ * The plain commands a preview accepts from its browser: none, ever. Delivery reaches the
+ * preview only as the `delivery` rpc (server/delivery/preview.ts); anything else is refused.
  */
-export const PREVIEW_COMMANDS: Record<string, (...args: unknown[]) => unknown> = {};
+export const PREVIEW_COMMANDS = PREVIEW_COMMANDS_NONE;
 
 export interface PreviewOptions {
   /** The checkout whose dist/ and dist-server/ are served. */
@@ -96,8 +100,9 @@ export async function runPreview(o: PreviewOptions) {
   if (!existsSync(join(distDir, "index.html"))) throw new Error(`No built UI at ${distDir}. Rebuild with \`pnpm build:preview\`.`);
 
   const repo = await detectRepo(resolve(o.repo ?? process.cwd()));
-  // The kitchen key of the repository it serves, for display only: a preview never reads or
-  // writes that kitchen's record, lock, state folder, token or tmux sessions.
+  // The kitchen key of the repository it serves: shown, and the name of the one folder it writes,
+  // ~/.controlroom/<repoKey>/deliveries/. A preview never reads or writes that kitchen's record,
+  // lock, other state, token or tmux sessions.
   const repoKey = kitchenKey(canonicalRoot(repo.root));
   const instance = randomBytes(12).toString("hex");
   const browserToken = randomBytes(24).toString("hex");
@@ -115,6 +120,7 @@ export async function runPreview(o: PreviewOptions) {
   (hub.snap as OfficeSnapshot).preview = preview;
   const inbox = new Inbox(hub, { type: async () => false, enter: async () => false });
   const planner = new Planner(hub, inbox);
+  const delivery = attachDelivery({ hub, root: repo.root, github: repo.github, kitchenKey: repoKey });
 
   const origin = `http://127.0.0.1:${port}`;
   let server: Awaited<ReturnType<typeof startHttp>>;
@@ -129,12 +135,14 @@ export async function runPreview(o: PreviewOptions) {
       distDir,
       allowedOrigins: [origin, `http://localhost:${port}`],
       commands: PREVIEW_COMMANDS,
+      rpc: delivery.rpc,
       health: { app: PREVIEW_APP, repoKey, instance, sha: build.sha, tree: build.tree, builtAt: build.builtAt },
     });
   } catch (err) {
     if ((err as NodeJS.ErrnoException)?.code === "EADDRINUSE") throw new Error(`Port ${port} is in use. Pick another free port outside ${KITCHEN_PORTS.first}-${KITCHEN_PORTS.last}.`);
     throw err;
   }
+  delivery.start();
 
   const url = `${origin}/?token=${browserToken}`;
   log.info(`repo     ${repo.root}`);
@@ -147,7 +155,8 @@ export async function runPreview(o: PreviewOptions) {
   }
 
   const quit = () => {
-    log.info("stopping the preview (it held no sessions and wrote no state)");
+    log.info("stopping the preview (it held no sessions; its only state is the deliveries folder)");
+    delivery.stop();
     inbox.stop();
     server.close();
     process.exit(0);
