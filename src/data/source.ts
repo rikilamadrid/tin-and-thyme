@@ -123,6 +123,8 @@ export interface OfficeDataSource {
   setContextAlert?(pct: number): void;
   /** The human saw this agent's context alert. */
   ackContextAlert?(agentId: string): void;
+  /** Ask an idle agent to write a short summary of its work. */
+  summariseAgent?(agentId: string): void;
   /** Checkpoint this worker and ask Pathfinder for a fresh session. */
   checkpointFresh?(agentId: string): void;
   /** Retry a failed handoff without creating a second worker. */
