@@ -28,6 +28,8 @@ jobs:
         run: npx tsx scripts/session-backend-test.ts
       - name: Agent clones (line endings)
         run: npx tsx scripts/workspace-test.ts
+      - name: Coordinator attention, attribution and requests (fixtures)
+        run: npx tsx scripts/coordinator-attention-test.ts
       - name: Pack
         shell: bash
         run: mkdir -p pack && npm pack --ignore-scripts --pack-destination pack

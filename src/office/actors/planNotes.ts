@@ -6,7 +6,8 @@ import { C } from "../engine/palette";
 import type { Pen } from "../engine/pen";
 import type { PxRect } from "../layout/layout";
 
-const COLS: Record<TaskStatus, number> = { todo: 0, blocked: 0, "in-progress": 1, "in-review": 2, done: 3 };
+// Reviewed (ready to deliver) shares the review column but never its mark.
+const COLS: Record<TaskStatus, number> = { todo: 0, blocked: 0, "in-progress": 1, "in-review": 2, reviewed: 2, done: 3 };
 
 interface Note {
   x: number;
@@ -73,6 +74,7 @@ export class PlanNotes {
         p.rect(x, y, 7, 1, shade(color, 0.5));
         p.rect(x + 1, y + 3, 4, 1, shade(color, -0.3));
         if (task.status === "in-review") p.rect(x + 5, y + 4, 1, 1, C.ink);
+        if (task.status === "reviewed") p.rect(x + 4, y + 4, 2, 1, C.green);
         if (task.status === "blocked") p.rect(x + 5, y + 1, 2, 2, C.red);
       }
       if (t - n.born < 0.6 && Math.floor(t * 10) % 2) {

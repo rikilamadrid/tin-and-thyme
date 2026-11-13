@@ -12,11 +12,13 @@
 // Empty stations stay empty: a ticket is only "ready for next round" when the coordinator's plan says so.
 
 import { assignCharacter, CHARACTERS, characterForRole, type CharacterId } from "../data/crew";
-import type { AgentConfig, AgentStatus, OfficeSnapshot, SessionEnd, SessionTelemetry, Task, WorkflowHelper } from "../data/types";
+import type { AgentConfig, AgentStatus, OfficeSnapshot, SessionEnd, SessionTelemetry, Task, TaskStatus, WorkflowHelper } from "../data/types";
 import { usableAccent, type IconKind } from "./robots";
 import { selectAttention } from "../store/office";
+import { ticketView } from "../data/ticketStage";
 
-export type CrewState = "needs" | "work" | "review" | "idle" | "off";
+/** `wait`: the coordinator's turn ended while workers it dispatched run (not asking you). */
+export type CrewState = "needs" | "work" | "review" | "wait" | "idle" | "off";
 /** "gone" = a finished workflow session: it has beamed out and lives only in its ticket's history. */
 export type Place = "island" | "pod" | "pass" | "lounge" | "gone";
 
@@ -77,6 +79,9 @@ export interface TicketCard {
   gate: string | null;
   /** True whenever a human gate is open on the ticket (it stays after the worker leaves). */
   needsYou: boolean;
+  /** The verified next step and any real blocker (src/data/ticketStage.ts), when the workflow reports them. */
+  next: string | null;
+  blocker: string | null;
 }
 
 export interface RoleInfo {
@@ -119,8 +124,6 @@ export interface GalleyModel {
 
 export const POD_COUNT = 5;
 
-/** Who a pending stage waits for, in the card's words. */
-const WAITS_FOR: Record<string, string> = { working: "developer", implementation: "developer", adversary: "adversary", review: "tester", repair: "developer (repair)" };
 /** What a live session is doing, by Pathfinder session kind. */
 const DOING: Record<string, string> = { implementation: "Developing", resume: "Developing (resume)", adversary: "Adversary", review: "Testing", repair: "Repairing" };
 export const stageWords = (session: string | null) => (session ? DOING[session] ?? session[0].toUpperCase() + session.slice(1) : "Working");
@@ -133,6 +136,7 @@ function effState(t: Task): string | undefined {
   return s;
 }
 const COLS = ["New", "Cooking", "At the pass", "Served"] as const;
+const COLUMN_OF: Record<TaskStatus, number> = { todo: 0, blocked: 0, "in-progress": 1, "in-review": 2, reviewed: 2, done: 3 };
 export const COLUMN_NAMES = COLS;
 
 const keyNum = (k: string) => k.split(/[.-]/).map((n) => Number(n.replace(/\D/g, "")) || 0);
@@ -164,6 +168,8 @@ export function crewIdentity(snap: OfficeSnapshot, config: AgentConfig): { chara
 export const agentColor = (config: AgentConfig): string | null => (config.crew ? null : usableAccent(config.color));
 
 function column(t: Task): number {
+  // The shared mapping decides the column (reviewed tickets wait at the pass, never as "in review").
+  if (t.pf?.view) return COLUMN_OF[t.pf.view.column];
   const s = effState(t);
   if (s) {
     if (s === "ready" || s === "blocked") return 0;
@@ -171,7 +177,7 @@ function column(t: Task): number {
     if (s === "integrated") return 3;
     return 1; // working, repair, stale, failed, human-gate, unknown words
   }
-  return { todo: 0, blocked: 0, "in-progress": 1, "in-review": 2, done: 3 }[t.status];
+  return COLUMN_OF[t.status];
 }
 
 export function buildGalley(snap: OfficeSnapshot, podOf?: Map<string, number>): GalleyModel {
@@ -191,8 +197,8 @@ export function buildGalley(snap: OfficeSnapshot, podOf?: Map<string, number>): 
     let place: Place;
     if (isLead) {
       place = "island";
-      state = !running ? "off" : agent.state === "needs-input" ? "needs" : agent.state === "working" ? "work" : "idle";
-      status = !running ? "not running" : state === "needs" ? "Needs you" : state === "work" ? "running the pass" : "on watch";
+      state = !running ? "off" : agent.state === "needs-input" ? "needs" : agent.state === "working" ? "work" : agent.state === "waiting" ? "wait" : "idle";
+      status = !running ? "not running" : state === "needs" ? "Needs you" : state === "work" ? "running the pass" : state === "wait" ? "waiting on workers" : "on watch";
     } else if (running) {
       place = reviewRole ? "pass" : "pod";
       state = agent.state === "needs-input" ? "needs" : reviewRole ? "review" : "work";
@@ -202,7 +208,7 @@ export function buildGalley(snap: OfficeSnapshot, podOf?: Map<string, number>): 
       place = "gone";
       state = "off";
       const o = agent.ended?.outcome;
-      status = o === "handed-off" ? "handed off" : o === "gate" ? "stopped at a human gate" : o === "failed" ? "failed" : o === "interrupted" ? "interrupted" : "finished";
+      status = agent.session.state === "unknown" ? "session liveness unknown" : o === "handed-off" ? "handed off" : o === "gate" ? "stopped at a human gate" : o === "failed" ? "failed" : o === "interrupted" ? "interrupted" : "finished";
     } else {
       place = "lounge";
       state = "off";
@@ -210,7 +216,7 @@ export function buildGalley(snap: OfficeSnapshot, podOf?: Map<string, number>): 
     }
     crew.push({
       id: config.id, character: id.character, name: id.name, job: id.job, role: id.role, color: agentColor(config), session: config.crew?.session ?? null, ticket,
-      worktree: config.crew?.worktree ?? agent.session.workspace, state, status, running, finished: !running && workflowSession,
+      worktree: config.crew?.worktree ?? agent.session.workspace, state, status, running, finished: !running && workflowSession && agent.session.state !== "unknown",
       context: agent.context ?? null, telemetry: agent.telemetry ?? null, ended: agent.ended ?? null, place, isLead, config, agent,
     });
   }
@@ -253,7 +259,7 @@ export function buildGalley(snap: OfficeSnapshot, podOf?: Map<string, number>): 
         atPass.push(t.id);
       }
     } else {
-      mark = t.status === "in-progress" ? (live ? "work" : "idle") : t.status === "in-review" ? "review" : t.status === "blocked" ? "lock" : null;
+      mark = t.status === "in-progress" ? (live ? "work" : "idle") : t.status === "in-review" ? "review" : t.status === "reviewed" ? "done" : t.status === "blocked" ? "lock" : null;
       if (t.status === "in-review") atPass.push(t.id);
     }
     columns[column(t)].push({ id: t.id, boardId: t.boardId, title: t.title, mark, dim });
@@ -301,37 +307,33 @@ export function buildGalley(snap: OfficeSnapshot, podOf?: Map<string, number>): 
     let phase: TicketPhase | null = null;
     let label = "";
     let stage: string | null = null;
+    const view = t.pf?.view ?? null;
     if (current) {
       stage = current.session;
       phase = current.state === "needs" || s === "human-gate" ? "needs" : "live";
-      label = phase === "needs" ? `Needs you · ${stageWords(stage)}` : stageWords(stage);
+      const doing = view && view.stage !== "needs-you" ? view.label : stageWords(stage);
+      label = phase === "needs" ? `Needs you · ${doing}` : doing;
     } else if (s === "human-gate") {
       phase = "needs";
       label = "Needs you";
-    } else if (s === "failed") {
-      phase = "failed";
-      label = "Failed · a human decides";
-    } else if (last?.ended?.outcome === "interrupted" && (s === "stale" || s === "working")) {
-      phase = "interrupted";
-      label = "Interrupted";
-      stage = last.session;
-    } else if (s === "stale" || PENDING.has(s ?? "")) {
-      const pending = s === "stale" ? rec : s;
-      if (pending && PENDING.has(pending)) {
+    } else if (s === "failed" || s === "stale" || PENDING.has(s ?? "") || (s === "working" && last?.ended?.outcome === "interrupted")) {
+      // No live session: the shared mapping's words, the same as the Boards card and the worker drawer.
+      const shared = ticketView({ state: s ?? "", recorded: rec, liveSession: null, lastEnded: last?.ended?.outcome ?? null });
+      label = shared.label;
+      if (shared.stage === "failed") phase = "failed";
+      else if (shared.stage === "interrupted") {
+        phase = "interrupted";
+        stage = last?.session ?? null;
+      } else if (shared.stage === "stale") phase = "stale";
+      else {
+        // Waiting for the session its pending stage needs (review, adversary, repair).
         phase = "waiting";
-        stage = pending;
-        label = `Waiting for ${WAITS_FOR[pending]}`;
-      } else if (!pending) {
-        phase = "waiting";
-        stage = "implementation";
-        label = "Waiting for developer";
-      } else {
-        phase = "stale";
-        label = "Claimed · no live session";
+        stage = s === "stale" ? rec : s;
       }
-    } else if (s === "done") {
+    } else if (s === "done" || view?.stage === "completing") {
+      // Ready to deliver, awaiting merge, or integrated with completion pending: the shared mapping's words.
       phase = "done";
-      label = "Done · ready to integrate";
+      label = view?.label ?? "Ready to deliver";
     } else if (s === "ready" && planned.has(t.id)) {
       phase = "next-round";
       label = "Ready for next round";
@@ -341,7 +343,7 @@ export function buildGalley(snap: OfficeSnapshot, podOf?: Map<string, number>): 
       label = "No live session";
     }
     if (!phase) continue;
-    tickets.push({ key: t.id, title: t.title, phase, label, stage, current, history, gate, needsYou: s === "human-gate" || current?.state === "needs" });
+    tickets.push({ key: t.id, title: t.title, phase, label, stage, current, history, gate, needsYou: s === "human-gate" || current?.state === "needs", next: view?.next ?? null, blocker: view && view.blocker !== gate ? view.blocker : null });
   }
   const order: Record<TicketPhase, number> = { needs: 0, failed: 1, interrupted: 2, live: 3, waiting: 4, done: 5, stale: 6, "next-round": 7 };
   tickets.sort((a, b) => order[a.phase] - order[b.phase] || byKey(a.key, b.key));

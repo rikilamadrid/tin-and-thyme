@@ -138,7 +138,7 @@ export function drawRacks(
   for (const r of racks) {
     const env = envs.find((e) => e.name === r.name);
     const st = stateOf(r.agentId);
-    const activity = env?.status === "sleeping" ? 0.03 : st ? { working: 0.8, "in-review": 0.45, "review-passed": 0.6, "needs-input": 0.12, idle: 0.1 }[st] : 0.35;
+    const activity = env?.status === "sleeping" ? 0.03 : st ? { working: 0.8, "in-review": 0.45, "review-passed": 0.6, "needs-input": 0.12, waiting: 0.2, idle: 0.1 }[st] : 0.35;
     const seedT = Math.floor(t * 10);
     const pz = pulse(r.name);
     for (let i = 0; i < 8; i++)
@@ -178,7 +178,7 @@ export function drawCables(
 ) {
   for (const cb of l.cables) {
     const st = stateOf(cb.agentId) ?? "idle";
-    const speed = { working: 60, "in-review": 24, "review-passed": 40, "needs-input": 4, idle: 8 }[st];
+    const speed = { working: 60, "in-review": 24, "review-passed": 40, "needs-input": 4, waiting: 12, idle: 8 }[st];
     const phase = (t * speed) % 14;
     let acc = 0;
     for (let i = 0; i < cb.pts.length - 1; i++) {

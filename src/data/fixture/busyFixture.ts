@@ -11,14 +11,15 @@ import { assignCharacter, type CharacterId } from "../crew";
 import { presets } from "../mock/presets";
 import { World } from "../mock/world";
 import type { OfficeDataSource } from "../source";
+import { attentionSnapshot } from "./attentionFixture";
 import { handoffScript } from "./handoffFixture";
 import type { ActionItem, ActivityEvent, AgentConfig, AgentStatus, OfficeSnapshot, Task } from "../types";
 
-export const FIXTURES = ["busy", "sounds", "handoff"] as const;
+export const FIXTURES = ["busy", "sounds", "handoff", "attention"] as const;
 export type FixtureName = (typeof FIXTURES)[number];
 
 /** How the toolbar names each fixture. */
-export const FIXTURE_LABEL: Record<FixtureName, string> = { busy: "busy layout", sounds: "sound audition", handoff: "crew transporter handoff" };
+export const FIXTURE_LABEL: Record<FixtureName, string> = { busy: "busy layout", sounds: "sound audition", handoff: "crew transporter handoff", attention: "truthful attention" };
 
 const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
 
@@ -256,6 +257,11 @@ export function createFixtureSource(name: FixtureName): OfficeDataSource {
     connect(onEvent: Emit, onStatus?: Status) {
       if (name === "sounds") return soundScript(onEvent, onStatus ?? (() => {}));
       if (name === "handoff") return handoffScript(onEvent, onStatus ?? (() => {}));
+      if (name === "attention") {
+        onEvent({ type: "snapshot", snapshot: attentionSnapshot(new URL(location.href).searchParams.get("phase") === "waiting") });
+        onStatus?.("open");
+        return () => {};
+      }
       onEvent({ type: "snapshot", snapshot: busySnapshot() });
       onStatus?.("open");
       return () => {};

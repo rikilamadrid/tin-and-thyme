@@ -130,12 +130,15 @@ export interface AccessRequest {
 
 export type AccessDecision = "agent" | "everyone" | "deny";
 
+import type { TicketView } from "./ticketStage";
+
 // ---------------------------------------------------------------- Live state
 
-export type AgentState = "idle" | "working" | "needs-input" | "in-review" | "review-passed";
+/** `waiting`: a workflow coordinator whose turn ended while workers it dispatched are still running (not asking you). */
+export type AgentState = "idle" | "working" | "needs-input" | "waiting" | "in-review" | "review-passed";
 
 /** The agent's process: its tmux session running `sbx run` (Sandbox) or `claude` (Local). */
-export type SessionState = "stopped" | "starting" | "running" | "failed";
+export type SessionState = "stopped" | "starting" | "running" | "failed" | "unknown";
 
 export interface SessionInfo {
   state: SessionState;
@@ -167,6 +170,8 @@ export interface AgentStatus {
    * call in its transcript; "configured" = only what was requested for it (no call seen yet). Never another agent's values.
    */
   telemetry?: SessionTelemetry | null;
+  /** Ticket keys of open gates this "needs input" is relaying (each is its own action item, so it isn't counted twice). */
+  relaying?: string[] | null;
   /** A worker's own context crossed the project's alert threshold (advisory; once per crossing). */
   contextAlert?: { pct: number; threshold: number } | null;
   /** Whether Tin & Thyme can checkpoint this worker and start it fresh through Pathfinder, and why not. */
@@ -183,8 +188,10 @@ export interface SessionEnd {
   outcome: "handed-off" | "gate" | "failed" | "interrupted";
   /** The stage Pathfinder recorded next (adversary, review, repair, done, integrated), when handed off. */
   next: string | null;
-  /** The session's last recorded result (Pathfinder `Last`), verbatim. */
+  /** The session's last recorded result (Pathfinder `Last`), verbatim; or its own report's headline. */
   result: string | null;
+  /** The verdict the session itself reported (DONE, PASS, FINDINGS, GATE, FAILED), when it reported one. */
+  verdict?: "DONE" | "PASS" | "FINDINGS" | "GATE" | "FAILED" | null;
   at: string;
 }
 
@@ -227,7 +234,11 @@ export interface Board {
   order: number;
 }
 
-export type TaskStatus = "todo" | "in-progress" | "in-review" | "done" | "blocked";
+/** `reviewed`: review passed, ready to deliver (a workflow ticket waiting for its PR or merge). */
+export type TaskStatus = "todo" | "in-progress" | "in-review" | "reviewed" | "done" | "blocked";
+
+/** A reviewed ticket's delivery, from its delivery record (Feature 10): a PR is open, or it was merged. */
+export type DeliveryStage = "pr-open" | "merged";
 
 export interface Task {
   id: string; // "P3-T02"
@@ -249,6 +260,10 @@ export interface Task {
     gate: string | null;
     /** The state the claim's checkpoint records (e.g. "adversary" while the engine shows a pending stage as stale). */
     recorded?: string | null;
+    /** Delivery input for a reviewed ticket (PR open, merged); null until a delivery record says so (Feature 10). */
+    delivery?: DeliveryStage | null;
+    /** What every surface shows for this ticket: label, column, next step, blocker (src/data/ticketStage.ts). */
+    view?: TicketView;
   };
 }
 
@@ -481,6 +496,8 @@ export interface WorkflowHelper {
   /** HQ id of the session that launched it (the coordinator unless a worker did). */
   parent?: string;
   finished?: boolean;
+  /** Seen through its hooks, but which session it is can't be established yet: shown as unknown, never guessed. */
+  unknown?: boolean;
 }
 
 export interface PlanSeen {
@@ -503,6 +520,47 @@ export interface ActionItem {
   note: string | null; // the user's note when closing it
   at: string;
   closedAt: string | null;
+  /** A workflow request (a Pathfinder human gate): whose it is, exactly, or why that can't be said. */
+  request?: ActionRequest | null;
+  /** The human's answer to `request`, and how far it got. */
+  answer?: ActionAnswer | null;
+  /** Snoozed until then: hidden from "Needs you", nothing sent, nothing resolved. */
+  snoozedUntil?: string | null;
+}
+
+export interface ActionRequest {
+  kind: "gate";
+  /** The ticket the gate is on (from the engine and the ticket's state file). */
+  key: string;
+  /** The stage it was raised in (Pathfinder's `Gate stage`, else the raising session's). */
+  stage: string | null;
+  /** HQ id of the session that raised it; null when that can't be established. */
+  owner: string | null;
+  /** That session's kind (implementation, review, …). */
+  session: string | null;
+  /** Why the session can't be identified (shown as "Unable to identify session"); null when it can. */
+  diagnostic: string | null;
+  /**
+   * The gate occurrence this request is, from Pathfinder's own record (the state file's `Gate-Id`). The same
+   * question opened again is a different occurrence, so a different request. Null when the record gives the
+   * gate no occurrence: then it has no identity, and its session is never identified.
+   */
+  occurrence: string | null;
+  /** Names this request: the occurrence when there is one, else the ticket and the exact text. An answer to any other revision is rejected. */
+  revision: string;
+}
+
+export interface ActionAnswer {
+  /**
+   * sending → delivered (typed into the coordinator's session) → recorded (Pathfinder shows the gate resolved);
+   * failed: it never reached the coordinator; rejected: not sent (an empty or superseded answer).
+   */
+  state: "sending" | "delivered" | "recorded" | "failed" | "rejected";
+  text: string;
+  /** The request revision it answers (so, for a gate with an occurrence, that occurrence). */
+  revision: string;
+  at: string;
+  detail: string | null;
 }
 
 // ---------------------------------------------------------------- Inputs
