@@ -18,6 +18,7 @@ import { startHttp } from "./http";
 import { Hub } from "./hub";
 import { GitHubSync } from "./githubSync";
 import { Inbox } from "./inbox";
+import { AgentSummaries } from "./agentSummary";
 import { Planner } from "./planner";
 import { ActionItems } from "./actionItems";
 import { Sbx } from "./sbx";
@@ -113,6 +114,8 @@ async function main() {
 
   let pfRun: PathfinderRun | null = null;
   const commands = makeCommands(hub, sessions, planner, inbox, sbx, mcp);
+  const summaries = new AgentSummaries(hub, inbox);
+  commands.summariseAgent = (id) => typeof id === "string" && summaries.start(id);
   if (pf) {
     const prompt = arg("pf-prompt") ?? "/orchestrate start";
     pfRun = new PathfinderRun(hub, inbox, sessions, pf, port, token, prompt);

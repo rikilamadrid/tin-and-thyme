@@ -7,10 +7,12 @@ import { CrewHeader } from "./CrewHeader";
 import { DrawerHeader } from "./Drawer";
 import { PortBanner, PortsRow } from "./Ports";
 import { TerminalView } from "./TerminalView";
+import { AgentSummary } from "./AgentSummary";
 
 
 export function AgentDrawer({ id, initialTab }: { id: string; initialTab?: AgentTab }) {
   const snap = useOffice((s) => s.snap);
+  const connected = useOffice((s) => s.live && s.connection === "open");
   const [tab, setTab] = useState<AgentTab>(initialTab ?? "terminal");
   const agent = snap?.config.team.find((a) => a.id === id);
   const status = snap?.agents.find((a) => a.agentId === id);
@@ -46,6 +48,7 @@ export function AgentDrawer({ id, initialTab }: { id: string; initialTab?: Agent
       </DrawerHeader>
       <CrewHeader id={id} />
       <SessionBar agent={agent} status={status} />
+      <AgentSummary agent={agent} status={status} connected={connected} onRequest={() => officeActions.summariseAgent(id)} />
       {access ? (
         <AccessCard request={access} agent={agent} />
       ) : (
