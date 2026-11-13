@@ -113,12 +113,17 @@ interface Typed {
   beforeConfirm?: () => Promise<void>;
 }
 
-async function kitchen(name: string, opts: { coordinator?: boolean; records?: boolean } = {}) {
+async function kitchen(name: string, opts: { coordinator?: boolean; records?: boolean; board?: boolean } = {}) {
   const s = makeScenario(tmp, name);
   if (opts.records) addRecordsFixture(s);
   const snap: { delivery?: DeliveryBoard } = {};
   const events: OfficeEvent[] = [];
-  const hub = { snap, emit: (e: OfficeEvent) => void events.push(e) };
+  const hub = opts.board
+    ? new Hub({ root: s.repo, name, originUrl: "https://github.com/owner/project", github: "owner/project", hasCodeRabbit: false, hasInsta: false }, name,
+        { project: { id: name, name, path: s.repo }, team: [PathfinderRun.coordinatorConfig(s.repo)], workflow: {} } as never,
+        { boards: [], tasks: [] }, {} as never)
+    : { snap, emit: (e: OfficeEvent) => void events.push(e) };
+  if (hub instanceof Hub) { hub.persist = false; hub.subscribe((e) => events.push(e)); }
   const kitchenKey = `kitchen-${name}`;
   const plan: { current: PlanFixture | null } = {
     current: { dispatch: [], deferred: [], blocked: [{ key: "10.2", title: "Next ticket", reason: "blocked by 10.1", waiting: ["10.1"] }] },
@@ -1079,9 +1084,82 @@ async function planAlone() {
   check("readPlan: a refusal throws", threw);
 }
 
+// Real production components: no injected deliveryOf or test-only board mapping.
+const { Hub } = await import("../server/hub");
+const { PathfinderRun } = await import("../server/pathfinder");
+async function deliveryBoard() {
+  for (const uncertain of [false, true]) {
+    const k = await kitchen(`board-${uncertain}`, { board: true });
+    const hub = k.hub as InstanceType<typeof Hub>;
+    const rows = [{ worker: "10.1", key: "10.1", lifecycle: "In Progress", state: "done", where: "—", gate: "—", last: "—", title: "Delivery ticket" }];
+    const engine = join(k.repo, "board-engine.mjs");
+    const writeRows = () => writeFileSync(engine, `process.stdout.write(${JSON.stringify(JSON.stringify({ ok: true, rows }))});`);
+    writeRows();
+    const boot = () => new PathfinderRun(hub, { noteHook() {}, finishTurn() {}, takeForStop: () => null } as never,
+      { typeInto: async () => true } as never, { mode: "orchestrator", engine }, 7999, "fixture", "/orchestrate start");
+    let pf = boot();
+    const refresh = () => (pf as unknown as { refresh(): Promise<void> }).refresh();
+    const stage = () => hub.snap.tasks.find((t) => t.id === "10.1")?.pf?.view.stage;
+    pf.start();
+    try {
+      await refresh();
+      eq("board: initially ready", stage(), "ready-to-deliver");
+      okReply("board inspect", await k.call("inspect", { key: "10.1" }));
+      const i = k.view().inspection!;
+      const t = { key: "10.1", head: i.head, base: i.base, tree: i.tree };
+      okReply("board approve", await k.call("approve", t));
+      okReply("board push", await k.call("push", { key: "10.1", head: i.head }));
+      okReply("board PR", await k.call("ensurePr", { key: "10.1" }));
+      // Must change before any engine poll; delivery events alone drive the board.
+      eq("board: PR publication immediately awaits merge", stage(), "awaiting-merge");
+      okReply("board status", await k.call("status", { key: "10.1" }));
+      await refresh();
+      eq("board: engine refresh retains open PR", stage(), "awaiting-merge");
+      okReply("board acknowledge", await k.call("acknowledgeNoChecks", t));
+      if (uncertain) k.world.ghVia.merge = async () => result("", 1, "ETIMEDOUT");
+      const merged = await k.call("merge", t);
+      if (uncertain) {
+        check("board: uncertain merge refused", !merged.ok);
+        eq("board: service records uncertainty", k.view().outcome, "unknown");
+        eq("board: uncertain merge remains awaiting", stage(), "awaiting-merge");
+      } else {
+        okReply("board merge", merged);
+        check("board: merge independently verified", k.view().verified);
+        eq("board: merged event immediately awaits completion", stage(), "completing");
+      }
+      check("board: neither merge outcome fabricates completion", stage() !== "done");
+      pf.stop();
+      pf = boot();
+      pf.start();
+      const restored = k.make();
+      await restored.refresh();
+      await refresh();
+      eq("board: service and run restart recover published delivery", stage(), uncertain ? "awaiting-merge" : "completing");
+      if (!uncertain) {
+        rows[0].state = "integrated";
+        writeRows();
+        await refresh();
+        eq("board: integration alone still pending records", stage(), "completing");
+        rows[0].lifecycle = "Complete";
+        writeRows();
+        await refresh();
+        eq("board: verified integration and lifecycle show done", stage(), "done");
+      }
+      pf.stop();
+      const emitted = k.events.filter((e) => e.type === "task.updated").length;
+      // Alter the published fact so a leaked listener would visibly change the unfinished ticket.
+      hub.snap.delivery!.byKey["10.1"] = { ...k.view(), outcome: "merged" };
+      hub.emit({ type: "delivery.updated", view: hub.snap.delivery!.byKey["10.1"] });
+      eq("board: stopped run unsubscribes", k.events.filter((e) => e.type === "task.updated").length, emitted);
+    } finally { pf.stop(); }
+  }
+}
+
 // ---------------------------------------------------------------- run
 
 async function main() {
+  if (process.argv.includes("--board-only")) return deliveryBoard();
+  await deliveryBoard();
   pureRules();
   await reconcilePreserves();
   await reconcileIgnoredAndIdentical();

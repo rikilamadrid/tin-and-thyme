@@ -43,6 +43,7 @@ import { gateRevision, isGateOccurrence, readGateHistory, type GateHistory } fro
 import { subagentMeta, subagentPrompt, subagentReport, subagentTerminalRevision, subagentToolIds, transcriptRevision } from "./transcripts";
 import type { ActionAnswer, ActionRequest, DeliveryStage } from "../src/data/types";
 import { requestShelf } from "../src/data/requests";
+import { deliveryStageOf } from "../src/data/delivery";
 
 export const COORDINATOR_ID = "coordinator";
 const ENGINE = join("skills", "orchestrate", "engine", "bin", "orchestrate.mjs");
@@ -303,6 +304,7 @@ export class PathfinderRun {
   private rows: StatusRow[] = [];
   private polling: NodeJS.Timeout | null = null;
   private refreshQueued = false;
+  private unsubscribeDelivery: (() => void) | null = null;
   private engineError: string | null = null;
   private seq = 0;
   /** The coordinator's Claude Code transcript (from its hooks, or found once at start-up). */
@@ -1009,10 +1011,10 @@ export class PathfinderRun {
   // ---------------------------------------------------------------- engine → board
 
   /**
-   * A ticket's delivery stage (PR open, merged), from its delivery record. Feature 10 sets this; until then no
-   * ticket has one, and the board shows reviewed tickets as ready to deliver.
+   * Read the delivery service's published view using its shared adapter. The snapshot also restores this
+   * fact on restart; absent delivery remains null. Injectable for isolated workflow tests.
    */
-  deliveryOf: (key: string) => DeliveryStage | null = () => null;
+  deliveryOf: (key: string) => DeliveryStage | null = (key) => deliveryStageOf(this.hub.snap.delivery?.byKey[key]);
 
   liveKeys(): string[] {
     return [...new Set([...this.workers.values()].filter((w) => w.live).map((w) => w.key))];
@@ -1037,6 +1039,12 @@ export class PathfinderRun {
   }
 
   start() {
+    // Delivery publishes its snapshot before this event. Re-map the existing engine rows immediately;
+    // do not start another engine read, or turn a delivery fact into a lifecycle completion.
+    this.unsubscribeDelivery?.();
+    this.unsubscribeDelivery = this.hub.subscribe((event) => {
+      if (event.type === "delivery.updated") this.applyBoard();
+    });
     this.hub.snap.workflow = { kind: "pathfinder", mode: this.info.mode, store: "", roles: PathfinderRun.readRoles(this.root), contextAlertPct: this.loadSettings().contextAlertPct, handoffs: {}, plan: this.savedPlan() };
     void this.refresh();
     this.polling = setInterval(() => void this.refresh(), 5000);
@@ -1044,6 +1052,8 @@ export class PathfinderRun {
 
   stop() {
     if (this.polling) clearInterval(this.polling);
+    this.unsubscribeDelivery?.();
+    this.unsubscribeDelivery = null;
   }
 
   private queueRefresh(ms: number) {
