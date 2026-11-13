@@ -6,6 +6,8 @@ import type { Inbox } from "./inbox";
 
 interface HookPayload {
   prompt?: string;
+  session_id?: string;
+  source?: string;
   tool_name?: string;
   message?: string;
   notification_type?: string;
@@ -30,7 +32,7 @@ export function handleHook(hub: Hub, inbox: Inbox, agentId: string, event: strin
   const st = hub.status(agentId);
   const name = hub.name(agentId);
   if (!st) return { ok: false };
-  inbox.noteHook(agentId, event, body.prompt);
+  inbox.noteHook(agentId, event, body.prompt, body);
 
   switch (event) {
     case "SessionStart":
