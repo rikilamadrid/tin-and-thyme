@@ -18,6 +18,7 @@ import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync,
 import { request } from "node:http";
 import { homedir } from "node:os";
 import { basename, join, resolve, sep } from "node:path";
+import { describePolicy, originRepo, POLICY_LIMITS, readPolicy, repoFromUrl, writePolicy, type RunPolicy } from "./runPolicy";
 
 export const APP = "tin-and-thyme";
 
@@ -161,7 +162,7 @@ export function adoptLegacyState(root: string, key: string): string | null {
   const ownProjects = join(homedir(), ".claude", "projects", root.replace(/[^a-zA-Z0-9]/g, "-")) + sep;
   if (!transcript.startsWith(ownProjects)) return null;
   // The hook settings and guard name the old port, token and folder; the next coordinator start rewrites them.
-  cpSync(oldCr, newCr, { recursive: true, filter: (src) => !/coordinator-settings\.json$|no-push-guard\.mjs$/.test(src) });
+  cpSync(oldCr, newCr, { recursive: true, filter: (src) => !/coordinator-settings\.json$|no-push-guard\.mjs$|run-policy-guard\.mjs$|active-policy\.json$/.test(src) });
   const oldHq = join(homedir(), ".jsmhq", legacy);
   const newHq = join(homedir(), ".jsmhq", key);
   if (existsSync(oldHq) && !existsSync(newHq)) {
@@ -205,3 +206,13 @@ export function claimStateDir(root: string, key: string) {
   }
   if (!existsSync(file)) writeFileSync(file, JSON.stringify({ root, key }, null, 2));
 }
+
+// ---------------------------------------------------------------- run policy (for `tin-and-thyme policy`)
+
+/** originRepo: every push URL of origin must be github.com/<owner>/<name> (anchored; see repoFromUrl). */
+export { describePolicy, originRepo, POLICY_LIMITS, repoFromUrl, type RunPolicy };
+
+/** The kitchen state folder holding run-policy.json. */
+export const policyDir = (key: string) => join(controlroomHome(), key);
+export const readRunPolicy = (key: string) => readPolicy(policyDir(key));
+export const writeRunPolicy = (key: string, policy: RunPolicy) => writePolicy(policyDir(key), policy);
