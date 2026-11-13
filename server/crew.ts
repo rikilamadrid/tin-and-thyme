@@ -16,6 +16,48 @@ export type EndingEvidence = SessionEnd & { key?: string; session?: string; occu
 const record = (v: unknown): v is Record<string, any> => !!v && typeof v === "object" && !Array.isArray(v);
 const nullableString = (v: unknown) => v === null || typeof v === "string";
 
+/** A missing file is an empty input. Unreadable storage is never evidence of corrupt data. */
+function readOptional(file: string): string | null {
+  try { return readFileSync(file, "utf8"); }
+  catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return null;
+    throw new Error(`Cannot read crew storage (${code ?? "I/O error"}): ${file}; existing files left unchanged`, { cause: error });
+  }
+}
+
+function endingProblem(value: unknown, legacy = false): string | null {
+  if (!record(value)) return "ending must be an object";
+  if (!["handed-off", "interrupted", "failed", "gate"].includes(value.outcome)) return "outcome must be handed-off, interrupted, failed or gate";
+  if (typeof value.at !== "string" || !Number.isFinite(Date.parse(value.at))) return "at must be a valid timestamp";
+  for (const field of ["next", "result"])
+    if (!nullableString(value[field]) && !(legacy && value[field] === undefined)) return `${field} must be a string or null`;
+  if (value.verdict !== undefined && value.verdict !== null && !["DONE", "PASS", "FINDINGS", "GATE", "FAILED"].includes(value.verdict)) return "verdict is invalid";
+  for (const field of ["key", "session", "occurrence", "consumed"])
+    if (value[field] !== undefined && typeof value[field] !== "string") return `${field} must be a string when present`;
+  return null;
+}
+
+function readLegacy(directory: string, name: "crew.json" | "sessions.json"): Record<string, any> {
+  const file = join(directory, name);
+  const text = readOptional(file);
+  if (text === null) return {};
+  let value: unknown;
+  try { value = JSON.parse(text); }
+  catch (error) { throw new Error(`Invalid legacy JSON: ${file}; original bytes and crew book left unchanged`, { cause: error }); }
+  if (!record(value)) throw new Error(`Invalid legacy input: ${file}; expected an object; original bytes and crew book left unchanged`);
+  for (const [id, entry] of Object.entries(value)) {
+    const problem = !id ? "session id is empty" : name === "sessions.json" ? endingProblem(entry, true)
+      : !record(entry) || ["id", "name", "job"].some((field) => typeof entry[field] !== "string")
+        ? "crew entry requires string id, name and job" : null;
+    if (problem) throw new Error(`Invalid legacy entry ${JSON.stringify(id)} in ${file}: ${problem}; original bytes and crew book left unchanged`);
+    // Older outcomes omitted these optional details. Keep all other fields verbatim.
+    if (name === "sessions.json") value[id] = { ...entry, next: entry.next ?? null, result: entry.result ?? null };
+  }
+  return value;
+}
+
+
 /** Refuse an invalid book before mutation. Unknown future versions are handled separately, read-only. */
 function validBook(v: unknown, kitchen: string): v is CrewBook {
   if (!record(v) || v.schema !== CREW_BOOK_SCHEMA || v.version !== CREW_BOOK_VERSION || v.kitchen !== kitchen ||
@@ -31,7 +73,7 @@ function validBook(v: unknown, kitchen: string): v is CrewBook {
       !["live", "ended"].includes(s.phase) || !Number.isInteger(s.seq) || s.seq < 0 || seqs.has(s.seq) ||
       ![s.hqId, s.role, s.stage, s.ticket, s.title, s.worktree, s.parent, s.startedAt, s.endedAt, s.transcript].every(nullableString) ||
       (s.characterId !== null && !isCrewCharacterId(s.characterId)) || (s.reassignedFrom !== null && !isCrewCharacterId(s.reassignedFrom)) ||
-      (s.end !== null && (!record(s.end) || typeof s.end.at !== "string" || !["handed-off", "interrupted", "failed", "gate"].includes(s.end.outcome))) ||
+      (s.end !== null && endingProblem(s.end) !== null) ||
       (s.telemetry !== null && !record(s.telemetry)) || (s.legacy !== null && !record(s.legacy))) return false;
     seqs.add(s.seq);
   }
@@ -48,28 +90,22 @@ export class CrewRegistry {
     mkdirSync(directory, { recursive: true });
     const file = join(directory, CREW_BOOK_FILE);
     let existing: CrewBook | null = null;
-    if (existsSync(file)) {
+    const text = readOptional(file);
+    let corrupt = false;
+    if (text !== null) {
       let raw: unknown;
-      try { raw = JSON.parse(readFileSync(file, "utf8")); } catch { /* quarantine below */ }
+      try { raw = JSON.parse(text); } catch { /* actual JSON corruption, quarantine after validating inputs */ }
       if (record(raw) && typeof raw.version === "number" && raw.version > CREW_BOOK_VERSION)
         throw new Error(`Crew book version ${raw.version} is newer than supported ${CREW_BOOK_VERSION}; left read-only: ${file}`);
       if (record(raw) && typeof raw.kitchen === "string" && raw.kitchen !== kitchen)
         throw new Error(`Crew book belongs to ${raw.kitchen}, not ${kitchen}; left read-only: ${file}`);
       if (validBook(raw, kitchen)) existing = raw;
-      else {
-        mkdirSync(join(directory, "backups"), { recursive: true });
-        renameSync(file, join(directory, "backups", `crew-book.corrupt-${now.replace(/[:.]/g, "-")}-${randomUUID()}.json`));
-      }
+      else corrupt = true;
     }
-    const readLegacy = <T>(name: string): T => {
-      const path = join(directory, name);
-      if (!existsSync(path)) return {} as T;
-      const raw: unknown = JSON.parse(readFileSync(path, "utf8"));
-      if (!record(raw)) throw new Error(`Invalid legacy crew input; left unchanged: ${path}`);
-      return raw as T;
-    };
-    const crew = readLegacy<LegacyCrewJson>("crew.json");
-    const endings = readLegacy<Record<string, EndingEvidence>>("sessions.json");
+    // Validate every source before quarantine, backup or adoption. A malformed legacy record
+    // cannot poison the replacement book or cause an existing book to be moved out of the way.
+    const crew = readLegacy(directory, "crew.json") as LegacyCrewJson;
+    const endings = readLegacy(directory, "sessions.json") as Record<string, EndingEvidence>;
     const backup = join(directory, "backups", `crew-${now.replace(/[:.]/g, "-")}-${randomUUID()}`);
     this.book = migrateLegacy(crew, endings as LegacySessionsJson, existing, { kitchen, now, backup });
     // Older contract data kept only the basic outcome. Preserve all legacy outcome facts and links,
@@ -77,8 +113,13 @@ export class CrewRegistry {
     for (const [id, ending] of Object.entries(endings)) {
       const session = this.book.sessions[id];
       if (!session || !record(ending)) continue;
-      if (!existing?.sessions[id] && session.end) session.end = { ...ending };
+      if (existing?.sessions[id]?.end == null && session.end) session.end = { ...ending };
       restoreSession(this.book, id, { phase: session.phase, ticket: typeof ending.key === "string" ? ending.key : null, stage: typeof ending.session === "string" ? ending.session : null }, now);
+    }
+    if (!validBook(this.book, kitchen)) throw new Error(`Crew migration produced an invalid book; existing files left unchanged: ${file}`);
+    if (corrupt) {
+      mkdirSync(join(directory, "backups"), { recursive: true });
+      renameSync(file, join(directory, "backups", `crew-book.corrupt-${now.replace(/[:.]/g, "-")}-${randomUUID()}.json`));
     }
     if (this.book.migrations.length > (existing?.migrations.length ?? 0)) {
       mkdirSync(backup, { recursive: true });
@@ -135,6 +176,7 @@ export class CrewRegistry {
 
   save() {
     if (this.book.restorePass) return;
+    if (!validBook(this.book, this.kitchen)) throw new Error(`Refusing to persist an invalid crew book; existing file left unchanged: ${join(this.directory, CREW_BOOK_FILE)}`);
     const text = JSON.stringify(this.book, null, 2) + "\n";
     if (text === this.saved) return;
     const file = join(this.directory, CREW_BOOK_FILE);

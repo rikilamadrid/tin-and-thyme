@@ -1,6 +1,6 @@
 // 09.3: production disk registry and snapshot, isolated copies only. No process or native harness is launched.
 import assert from "node:assert/strict";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CrewRegistry } from "../server/crew";
@@ -102,6 +102,81 @@ test("projection keeps every character in catalogue order; available readings cl
   assert.equal(a.characters[0].state, "available"); assert.equal(a.characters[0].stateSince, b.characters[0].stateSince);
   assert.equal(a.characters[0].sessionId, null); assert.equal(a.characters[0].role, null); assert.equal(a.characters[0].telemetry, null);
   assert.deepEqual(crewSnapshotProblems(a, r.book), []);
+});
+
+test("unreadable valid book fails closed without quarantine or replacement (M1)", () => {
+  const r = fresh("unreadable"); r.start("retained", facts("09.3"), t()); r.save();
+  const file = join(r.directory, "crew-book.json"); const original = readFileSync(file, "utf8");
+  chmodSync(file, 0);
+  try {
+    // Exercise real filesystem denial; a privileged test runner must not silently claim this case passed.
+    assert.throws(() => readFileSync(file, "utf8"), { code: "EACCES" }, "Run this permissions regression as an unprivileged user");
+    assert.throws(() => new CrewRegistry(r.directory, "unreadable", t(1)), /Cannot read crew storage \(EACCES\).*crew-book\.json.*unchanged/);
+    assert.equal(existsSync(file), true); assert.equal(existsSync(join(r.directory, "backups")), false);
+  } finally { chmodSync(file, 0o600); }
+  assert.equal(readFileSync(file, "utf8"), original);
+  const recovered = new CrewRegistry(r.directory, "unreadable", t(2)); recovered.reconcile(["retained"], t(3));
+  assert.equal(recovered.book.sessions.retained.ticket, "09.3"); assert.equal(recovered.book.sessions.retained.phase, "live");
+});
+
+test("malformed legacy entries fail before touching existing history or source bytes (M2)", () => {
+  const cases: { file: "crew.json" | "sessions.json"; value: unknown; reason: RegExp }[] = [
+    { file: "sessions.json", value: { ...ending(), outcome: "bogus" }, reason: /outcome/ },
+    { file: "sessions.json", value: { ...ending(), at: "not-a-time" }, reason: /at must/ },
+    { file: "sessions.json", value: { ...ending(), at: null }, reason: /at must/ },
+    { file: "sessions.json", value: { ...ending(), next: [] }, reason: /next must/ },
+    { file: "sessions.json", value: { ...ending(), result: {} }, reason: /result must/ },
+    { file: "sessions.json", value: { ...ending(), verdict: "MAYBE" }, reason: /verdict/ },
+    { file: "sessions.json", value: { ...ending(), occurrence: false }, reason: /occurrence must/ },
+    { file: "sessions.json", value: null, reason: /object/ },
+    { file: "crew.json", value: { id: "pepper", name: "Pepper" }, reason: /id, name and job/ },
+    { file: "crew.json", value: { id: 2, name: "Pepper", job: "Saucier" }, reason: /id, name and job/ },
+  ];
+  for (const [index, bad] of cases.entries()) {
+    const r = fresh(`invalid-${index}`); r.start("retained", facts("09.3"), t()); r.save();
+    const file = join(r.directory, "crew-book.json"); const before = readFileSync(file, "utf8");
+    const legacy = join(r.directory, bad.file); const bytes = JSON.stringify({ old: bad.value }); writeFileSync(legacy, bytes);
+    assert.throws(() => new CrewRegistry(r.directory, r.kitchen, t(2)), (error: unknown) => error instanceof Error && error.message.includes(legacy) && error.message.includes('"old"') && bad.reason.test(error.message));
+    assert.equal(readFileSync(file, "utf8"), before); assert.equal(readFileSync(legacy, "utf8"), bytes);
+    assert.equal(existsSync(join(r.directory, "backups")), false);
+    // Even a corrupt active file is not moved before all legacy inputs have validated.
+    writeFileSync(file, "{corrupt"); assert.throws(() => new CrewRegistry(r.directory, r.kitchen, t(3)), bad.reason);
+    assert.equal(readFileSync(file, "utf8"), "{corrupt"); assert.equal(existsSync(join(r.directory, "backups")), false);
+  }
+  const path = dir("invalid-first-start"); const legacy = join(path, "sessions.json");
+  writeFileSync(legacy, JSON.stringify({ old: { outcome: "bogus", at: t() } }));
+  assert.throws(() => new CrewRegistry(path, "invalid-first-start", t()), /outcome/);
+  assert.equal(existsSync(join(path, "crew-book.json")), false); assert.equal(existsSync(join(path, "backups")), false);
+});
+
+test("validated migration reloads and retains post-migration sessions; save refuses invalid endings (M2)", () => {
+  const path = dir("valid-reload");
+  // Older versions omitted next/result; they become null while all other metadata survives.
+  writeFileSync(join(path, "sessions.json"), JSON.stringify({ old: { outcome: "handed-off", at: t(), verdict: "PASS", extraEvidence: { source: "legacy" } } }));
+  const r = new CrewRegistry(path, "valid-reload", t(1)); r.reconcile([], t(2));
+  assert.equal(r.book.sessions.old.end?.next, null); assert.equal(r.book.sessions.old.end?.result, null);
+  r.start("post-migration", facts("09.3"), t(3)); r.save(); const before = structuredClone(r.book);
+  const next = new CrewRegistry(path, "valid-reload", t(4)); next.reconcile(["post-migration"], t(5));
+  assert.deepEqual(crewHistoryProblems(before, next.book), []); assert.deepEqual(Object.keys(next.book.sessions).sort(), ["old", "post-migration"]);
+  assert.equal(readdirSync(join(path, "backups")).length, 1);
+  const file = join(path, "crew-book.json"); const bytes = readFileSync(file, "utf8");
+  next.book.sessions.old.end = { ...ending(), outcome: "bogus" } as never;
+  assert.throws(() => next.save(), /Refusing to persist an invalid crew book/); assert.equal(readFileSync(file, "utf8"), bytes);
+});
+
+test("filling unknown ending keeps all verdict/gate metadata and never overwrites a known outcome (M3)", () => {
+  const r = fresh("fill-ending"); r.start("unknown", facts("09.3", "tester"), t()); r.end("unknown", null, t(1));
+  r.start("known", facts("09.4"), t()); r.end("known", ending(1), t(1)); r.save();
+  const known = structuredClone(r.book.sessions.known.end);
+  const full = { ...ending(2), verdict: "PASS", key: "09.3", session: "review", occurrence: "recorded-gate", consumed: "yes", extraEvidence: { terminal: "record-id" } };
+  writeFileSync(join(r.directory, "sessions.json"), JSON.stringify({ unknown: full, known: { ...full, verdict: "FAILED" } }));
+  const next = new CrewRegistry(r.directory, r.kitchen, t(3)); next.reconcile([], t(4));
+  assert.deepEqual(next.book.sessions.unknown.end, full); assert.equal(next.book.sessions.unknown.endedAt, t(1));
+  assert.deepEqual(next.book.sessions.known.end, known);
+  const again = new CrewRegistry(r.directory, r.kitchen, t(5)); again.reconcile([], t(6));
+  assert.deepEqual(again.book.sessions.unknown.end, full); assert.deepEqual(again.book.sessions.known.end, known);
+  assert.equal(again.book.migrations.length, next.book.migrations.length);
+  assert.deepEqual(crewHistoryProblems(next.book, again.book), []);
 });
 
 // Optional evidence from a real kitchen's frozen legacy inputs. Read-only source; all mutation is in temp.
