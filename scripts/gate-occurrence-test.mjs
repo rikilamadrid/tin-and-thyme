@@ -16,6 +16,10 @@
 // refuses; leaving a gate through `state` writes the resolved marker of its
 // occurrence; a gate an earlier engine left behind, opened again, gets an
 // occurrence; and each path's retry hint names that same path.
+//
+// Review repair 2 adds: a state change the engine refuses (an unknown state,
+// a blank value) writes nothing, so it cannot close a gate it never left, and
+// the human's later answer is recorded against that same occurrence.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -83,7 +87,7 @@ const local = (key) => ({
 
 // --- the scratch project -----------------------------------------------------
 
-const KEYS = ["99.1", "99.2", "99.3", "99.4", "99.5", "99.6", "99.7"];
+const KEYS = ["99.1", "99.2", "99.3", "99.4", "99.5", "99.6", "99.7", "99.8", "99.9"];
 const root = realpathSync(mkdtempSync(join(tmpdir(), "gate-occurrence-")));
 try {
   git(["init", "--quiet", "--initial-branch=main"], root);
@@ -372,6 +376,40 @@ try {
     // gate open keeps its own hint.
     const viaGate = failing("gate", "99.7", "open", "--question", "Again?", "--now", NOW);
     assert.match(viaGate, /Retry with: orchestrate gate 99\.7 open --question "<the same question>"/);
+  });
+
+  // --- a refused state change writes nothing --------------------------------------
+
+  const refusedThenAnswered = (key, refusedArgs) => {
+    ok("gate", key, "open", "--question", Q, "--now", NOW);
+    const id = gateId(key);
+    assert.ok(isGateOccurrence(id));
+    const ticketBefore = readFileSync(ticketPath(key), "utf8");
+    const stateBefore = readFileSync(statePath(key), "utf8");
+
+    const refused = orchestrate("state", key, ...refusedArgs, "--now", NOW);
+    assert.notEqual(refused.status, 0, `state ${refusedArgs.join(" ")} is refused`);
+    assert.equal(readFileSync(ticketPath(key), "utf8"), ticketBefore, "the store is byte-identical: no false closing");
+    assert.equal(readFileSync(statePath(key), "utf8"), stateBefore, "the state file is byte-identical");
+
+    ok("gate", key, "resolve", "--answer", "Yes, approved", "--now", NOW);
+    assert.deepEqual(
+      gateMarkers(key).map((m) => [m.event, m.digest, m.occurrence]),
+      [["gate-opened", D(Q), id], ["gate-resolved", D(Q), id]],
+    );
+    const text = readFileSync(ticketPath(key), "utf8");
+    assert.match(text, /\*\*Human gate resolved\*\* on 2026-11-12\. Worker `[^`]+` resumes\.\n\nDecision:\n\n> Yes, approved/, "the human's decision is recorded");
+    assert.ok(!/Human gate closed/.test(text), "no state-change closing was written");
+    assert.equal(gateId(key), null);
+    assert.equal(stateField(key, "State"), "working");
+  };
+
+  check("a refused unknown state leaves every gate record unchanged, and the later answer is recorded", () => {
+    refusedThenAnswered("99.8", ["--set", "wroking"]);
+  });
+
+  check("a refused blank --last leaves every gate record unchanged, and the later answer is recorded", () => {
+    refusedThenAnswered("99.9", ["--set", "working", "--last", " "]);
   });
 
   // --- read-only commands -----------------------------------------------------

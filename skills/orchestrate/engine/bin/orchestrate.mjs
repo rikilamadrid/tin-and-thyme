@@ -37,7 +37,7 @@ import { computeBoard, formatBoard } from "../board.mjs";
 import { buildBrief, formatBrief, translateBrief } from "../brief.mjs";
 import { approvalScope, blockedNote, claimedNote, gateClosedNote, gateOpenedNote, gateResolvedNote, unblockedNote } from "../comments.mjs";
 import { computePlan, formatPlan } from "../plan.mjs";
-import { updateStateFile } from "../statefile.mjs";
+import { stateUpdateRefusal, updateStateFile } from "../statefile.mjs";
 import { postNote, setGateLabel } from "../tracker.mjs";
 import { GATE_ID_FIELD, isGateOccurrence, occurrenceForOpen } from "../gates.mjs";
 import { renderProfile } from "../profile.mjs";
@@ -518,6 +518,12 @@ function state({ root, store: storeOverride, gh, key, set, gate: gateText, last,
     process.stdout.write(`${key}: state ${set}\n`);
     return 0;
   }
+
+  // A change the state file would refuse writes nothing anywhere: checked
+  // before the closing note, so a refused change cannot close a gate it never
+  // left, and the human's later answer still reaches that occurrence.
+  const refusal = stateUpdateRefusal(worktree, { set: fields, unset });
+  if (refusal) return fail(refusal.usage ? 2 : 1, refusal.message);
 
   // Leaving an open gate ends its occurrence, so the store records that end
   // under the same occurrence before the state file forgets it. If the note

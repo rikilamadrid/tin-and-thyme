@@ -46,11 +46,13 @@ export function updateStateText(text, { set = {}, unset = [] }) {
 }
 
 /**
- * Update a claimed worktree's state file.
+ * Why `updateStateFile` would refuse this update, or null when it would apply
+ * it. Every check it makes, with no write, so a caller that writes elsewhere
+ * first (a note in the store) can refuse before anything is written.
  *
- * @returns {{ok: true, path: string} | {ok: false, usage?: boolean, message: string}}
+ * @returns {null | {ok: false, usage?: boolean, message: string}}
  */
-export function updateStateFile(worktreePath, { set = {}, unset = [] }) {
+export function stateUpdateRefusal(worktreePath, { set = {}, unset = [] }) {
   for (const name of [...Object.keys(set), ...unset]) {
     if (!WRITABLE.includes(name)) return { ok: false, usage: true, message: `field \`${name}\` is not one the engine writes` };
   }
@@ -62,9 +64,20 @@ export function updateStateFile(worktreePath, { set = {}, unset = [] }) {
   if (set.State !== undefined && !CLAIM_STATES.includes(set.State)) {
     return { ok: false, usage: true, message: `state must be one of ${CLAIM_STATES.join(", ")}, not \`${set.State}\`` };
   }
-
   const path = join(worktreePath, "context", "current-ticket.md");
   if (!existsSync(path)) return { ok: false, message: `${path} does not exist; the claim has no state file` };
+  return null;
+}
+
+/**
+ * Update a claimed worktree's state file.
+ *
+ * @returns {{ok: true, path: string} | {ok: false, usage?: boolean, message: string}}
+ */
+export function updateStateFile(worktreePath, { set = {}, unset = [] }) {
+  const refused = stateUpdateRefusal(worktreePath, { set, unset });
+  if (refused) return refused;
+  const path = join(worktreePath, "context", "current-ticket.md");
   writeFileSync(path, updateStateText(readFileSync(path, "utf8"), { set, unset }), "utf8");
   return { ok: true, path };
 }
