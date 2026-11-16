@@ -17,6 +17,8 @@ export class Hub {
   private seq = 0;
   /** False for a workflow adapter (Pathfinder): the project's files are its own; HQ writes nothing there. */
   persist = true;
+  /** A workflow adapter's name for an id that has no team row (a past session of a reused crew character). */
+  alias: ((id: string) => string | null) | null = null;
 
   constructor(readonly repo: RepoInfo, readonly slug: string, config: HqConfig, plan: PlanFile, setup: SetupState) {
     this.snap = {
@@ -62,7 +64,7 @@ export class Hub {
   name(id: string | null) {
     if (id === "you") return "You";
     if (id === "hq") return "HQ";
-    return (id && this.cfg(id)?.name) || "Someone";
+    return (id && (this.cfg(id)?.name ?? this.alias?.(id))) || "Someone";
   }
 
   // ------------------------------------------------------------ mutations

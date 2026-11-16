@@ -124,6 +124,10 @@ export interface OfficeDataSource {
   setContextAlert?(pct: number): void;
   /** The human saw this agent's context alert. */
   ackContextAlert?(agentId: string): void;
+  /** Workflow projects: a crew robot's name and colour (visual only; null resets to the catalogue value). */
+  customizeCrew?(characterId: string, change: { name?: string | null; color?: string | null }): void;
+  /** Workflow projects: take a crew robot off the floor, or bring it back. */
+  retireCrew?(characterId: string, retired: boolean): void;
   /** Ask an idle agent to write a short summary of its work. */
   summariseAgent?(agentId: string): void;
   freshContext?(agentId: string): void;

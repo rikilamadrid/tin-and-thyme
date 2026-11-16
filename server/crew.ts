@@ -4,9 +4,9 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import {
   CREW_BOOK_FILE, CREW_BOOK_SCHEMA, CREW_BOOK_VERSION, ROLE_FAMILIES, isCrewCharacterId,
-  migrateLegacy, reconcileAfterRestore, restoreSession, startSession, endSession,
+  migrateLegacy, reconcileAfterRestore, restoreSession, startSession, endSession, continueSession, latestOccurrence, conversationOccurrences,
   customizeCharacter, retireCharacter,
-  type CrewBook, type CrewCharacterId, type CrewObservation, type CrewSessionFacts,
+  type CrewBook, type CrewCharacterId, type CrewContinuation, type CrewObservation, type CrewSession, type CrewSessionFacts,
   type CrewState, type CrewTelemetry, type LegacyCrewJson, type LegacySessionsJson,
 } from "../src/data/crewContract";
 import { crewSnapshot } from "../src/data/crewSnapshot";
@@ -58,6 +58,15 @@ function readLegacy(directory: string, name: "crew.json" | "sessions.json"): Rec
 }
 
 
+/** A first occurrence has no link; a continuation names an earlier occurrence of its own conversation and how the resume was seen. */
+function validContinuation(sessions: Record<string, any>, s: Record<string, any>): boolean {
+  const c = s.continuation;
+  if (c === null) return true;
+  const of = record(c) && typeof c.of === "string" ? sessions[c.of] : null;
+  return record(c) && record(of) && of.id !== s.id && (of.conversation ?? of.id) === s.conversation &&
+    ["tool", "transcript", "hook"].includes(c.via) && nullableString(c.evidence);
+}
+
 /** Refuse an invalid book before mutation. Unknown future versions are handled separately, read-only. */
 function validBook(v: unknown, kitchen: string): v is CrewBook {
   if (!record(v) || v.schema !== CREW_BOOK_SCHEMA || v.version !== CREW_BOOK_VERSION || v.kitchen !== kitchen ||
@@ -73,7 +82,7 @@ function validBook(v: unknown, kitchen: string): v is CrewBook {
       !["live", "ended"].includes(s.phase) || !Number.isInteger(s.seq) || s.seq < 0 || seqs.has(s.seq) ||
       ![s.hqId, s.role, s.stage, s.ticket, s.title, s.worktree, s.parent, s.startedAt, s.endedAt, s.transcript].every(nullableString) ||
       (s.characterId !== null && !isCrewCharacterId(s.characterId)) || (s.reassignedFrom !== null && !isCrewCharacterId(s.reassignedFrom)) ||
-      (s.end !== null && endingProblem(s.end) !== null) ||
+      (s.end !== null && endingProblem(s.end) !== null) || typeof s.conversation !== "string" || !s.conversation || !validContinuation(v.sessions, s) ||
       (s.telemetry !== null && !record(s.telemetry)) || (s.legacy !== null && !record(s.legacy))) return false;
     seqs.add(s.seq);
   }
@@ -99,6 +108,12 @@ export class CrewRegistry {
         throw new Error(`Crew book version ${raw.version} is newer than supported ${CREW_BOOK_VERSION}; left read-only: ${file}`);
       if (record(raw) && typeof raw.kitchen === "string" && raw.kitchen !== kitchen)
         throw new Error(`Crew book belongs to ${raw.kitchen}, not ${kitchen}; left read-only: ${file}`);
+      // Books written before conversations and occurrences were kept apart: every session was its
+      // conversation's only occurrence. Read as such; nothing is written until a later save.
+      if (record(raw) && record(raw.sessions)) for (const session of Object.values(raw.sessions)) if (record(session)) {
+        if (session.conversation === undefined) session.conversation = session.id;
+        if (session.continuation === undefined) session.continuation = null;
+      }
       if (validBook(raw, kitchen)) existing = raw;
       else corrupt = true;
     }
@@ -134,8 +149,31 @@ export class CrewRegistry {
     return startSession(this.book, id, facts, now);
   }
 
+  /** The occurrence a conversation is in now (or was last in). */
+  latest(conversation: string): CrewSession | null {
+    return latestOccurrence(this.book, conversation);
+  }
+
+  /**
+   * Re-observes a conversation: `id` is the Claude conversation id, and the facts go to its latest
+   * occurrence. An ended occurrence is never revived by this; a resume needs `resume()`.
+   */
   restore(id: string, facts: CrewSessionFacts & { phase: "live" | "ended"; end?: SessionEnd | null; endedAt?: string | null }, now = new Date().toISOString()) {
-    return restoreSession(this.book, id, facts, now);
+    return restoreSession(this.book, this.latest(id)?.id ?? id, facts, now);
+  }
+
+  /**
+   * The same conversation was seen running again after its last occurrence ended: a new linked
+   * occurrence, once. Returns the occurrence this resume belongs to: an ended one means this very
+   * resume was already recorded and is over (a duplicate event). null for an unknown conversation.
+   */
+  resume(conversation: string, resume: Pick<CrewContinuation, "via" | "evidence">, now = new Date().toISOString()) {
+    return continueSession(this.book, conversation, resume, now);
+  }
+
+  /** The newest recorded ending of a conversation, whichever occurrence it belongs to. */
+  lastEnding(conversation: string): EndingEvidence | null {
+    return conversationOccurrences(this.book, conversation).reverse().find((s) => s.end)?.end ?? null;
   }
 
   end(id: string, ending: EndingEvidence | null, now = new Date().toISOString()) {
@@ -148,7 +186,10 @@ export class CrewRegistry {
     const s = this.book.sessions[id];
     if (!s || s.phase !== "live") return;
     this.observations[id] = observation;
-    if (telemetry) s.telemetry = structuredClone(telemetry);
+    if (!telemetry) return;
+    // The reading's time moves only when a reading does, so an unchanged poll rewrites nothing.
+    const same = s.telemetry && JSON.stringify({ ...s.telemetry, at: "" }) === JSON.stringify({ ...telemetry, at: "" });
+    if (!same) s.telemetry = structuredClone(telemetry);
   }
 
   reconcile(runningIds: Iterable<string>, now = new Date().toISOString()) {

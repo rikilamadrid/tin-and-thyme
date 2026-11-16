@@ -64,6 +64,19 @@ export function crewBookProblems(book: CrewBook, settled = true): string[] {
     if (id === COORDINATOR_CHARACTER) for (const s of live) if (s.kind !== "coordinator") problems.push(`${s.kind} session ${s.id} wears basil`);
   }
   if (sessions.filter((s) => s.phase === "live" && s.kind === "coordinator").length > 1) problems.push("more than one live coordinator session");
+  const running = new Map<string, string[]>();
+  for (const s of sessions) {
+    if (s.phase === "live") running.set(s.conversation, [...(running.get(s.conversation) ?? []), s.id]);
+    if (!s.continuation) {
+      if (s.conversation !== s.id) problems.push(`first occurrence ${s.id} is not keyed by its conversation ${s.conversation}`);
+      continue;
+    }
+    const of = book.sessions[s.continuation.of];
+    if (!of || of.conversation !== s.conversation) problems.push(`occurrence ${s.id} continues ${s.continuation.of}, which is not an occurrence of its conversation`);
+    else if (of.phase !== "ended") problems.push(`occurrence ${s.id} continues ${of.id}, which has not ended`);
+    if (sessions.some((o) => o !== s && o.continuation?.of === s.continuation!.of)) problems.push(`${s.continuation.of} is continued more than once`);
+  }
+  for (const [conversation, ids] of running) if (ids.length > 1) problems.push(`conversation ${conversation} has ${ids.length} live occurrences (${ids.join(", ")})`);
   const seqs = new Set<number>();
   for (const [key, s] of Object.entries(book.sessions)) {
     if (key !== s.id) problems.push(`session ${s.id} is filed under ${key}`);
@@ -106,6 +119,7 @@ export function crewHistoryProblems(before: CrewBook, after: CrewBook): string[]
     if (is.kind !== was.kind) problems.push(`session ${was.id} changed kind`);
     if (was.phase === "ended" && is.phase !== "ended") problems.push(`ended session ${was.id} is live again`);
     if (is.characterId !== was.characterId && is.reassignedFrom !== was.characterId) problems.push(`session ${was.id} changed character ${was.characterId} -> ${is.characterId}`);
+    if (is.conversation !== was.conversation || json(is.continuation) !== json(was.continuation)) problems.push(`session ${was.id} changed its conversation or continuation link`);
     for (const f of ["hqId", "role", "stage", "ticket", "title", "worktree", "parent", "transcript", "startedAt", "endedAt", "end", "report", "legacy"] as const) {
       if (was[f] !== null && json(is[f]) !== json(was[f])) problems.push(`session ${was.id} changed ${f}: ${json(was[f])} -> ${json(is[f])}`);
     }

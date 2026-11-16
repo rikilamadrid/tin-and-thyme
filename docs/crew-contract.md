@@ -12,7 +12,7 @@ this document and the code disagree, fix one of them. Neither one wins by defaul
 | --- | --- | --- |
 | Role | The Pathfinder role contract (`roles/<role>.md`). Read-only here. | Feature 07 |
 | Crew character | A persistent robot (`CrewCharacterId`). Its name and colour can be customized. | this contract |
-| Execution session | One Pathfinder session (`CrewSession`). Always fresh, never resumed. | Pathfinder |
+| Execution session | One execution occurrence (`CrewSession`): one uninterrupted run. Never revived once ended. | Pathfinder |
 | Ticket | Durable. Passes through many sessions. | Pathfinder |
 
 - A character holds **at most one live session**.
@@ -20,7 +20,10 @@ this document and the code disagree, fix one of them. Neither one wins by defaul
 - A ticket has many sessions. Each session names at most one ticket. The coordinator and
   helpers may name none.
 - Reusing a character for a new session starts a new conversation. Nothing carries over except the
-  look.
+  look. The kitchen itself never resumes a conversation.
+- A session's own id (the **occurrence**) is kept apart from the **Claude conversation** id. When
+  Pathfinder resumes a conversation, the kitchen records a new occurrence linked to the ended one
+  (see Linked continuations). It is labelled the same conversation, never a new one.
 
 ## Characters and families
 
@@ -124,10 +127,16 @@ The orchestrator pool is Basil alone, and families never borrow, so it gets no r
 
 The `CrewSession` id rules are below. A session record is never re-keyed or deleted.
 
-- **Worker or helper:** the Claude Code subagent id. This is the key crew.json and sessions.json use
-  today.
-- **Coordinator:** `coordinator:<transcript file name without .jsonl>`. Until its transcript is
-  known, Basil shows `unknown` and no session record is written.
+- `conversation` is the Claude conversation:
+  - **Worker or helper:** the Claude Code subagent id. This is the key crew.json and sessions.json
+    use today.
+  - **Coordinator:** `coordinator:<transcript file name without .jsonl>`. Until its transcript is
+    known, Basil shows `unknown` and no session record is written.
+- `id` is the occurrence. A conversation's first occurrence has `id` equal to `conversation`, so
+  every id written before this amendment stays valid. A continuation is `<conversation>#<n>`, where
+  n is its place in the chain (2, 3 and so on).
+- `continuation` is `null` for a first occurrence. For a continuation it is `{ of, via, evidence }`:
+  the occurrence it continues, and the recorded evidence of the resume.
 - `hqId` keeps today's snapshot id: `w-<key>-<session>-<id10>`, `coordinator`, or the helper's id.
 - `stage` and `role` are verbatim. Stages that are not known are kept as written. Both are `null`
   for a migrated session until the restore fills them.
@@ -137,7 +146,8 @@ The `CrewSession` id rules are below. A session record is never re-keyed or dele
   family. The character is never changed to match.
 - `seq` is the book-wide creation order: 0, 1, 2 and so on. Migrated sessions take crew.json key
   order, which is start order, because `addWorker` appends at session start. It breaks ties of age.
-- `phase` only goes `live` → `ended`. Nothing moves a session back to `live`.
+- `phase` only goes `live` → `ended`. Nothing moves a session back to `live`. A resumed
+  conversation gets a new occurrence instead.
 - `endedAt` is set once, when the session goes `live` → `ended` (or filled when it was null), and
   is never moved afterwards. If reconcile ended a session with `end: null` and a sessions.json
   ending arrives later, that ending fills `end`, and its own time stays in `end.at`. `endedAt`
@@ -152,6 +162,50 @@ The `CrewSession` id rules are below. A session record is never re-keyed or dele
   cost and tool count. A value that is not available is `null`, never 0. This includes `tools`, which
 is `null` for a restored session whose count was never read. The readings freeze when
   the session ends and stay in History. A character that is available shows no readings.
+
+### Linked continuations (amendment, 09.3; human decision 2026-11-16)
+
+Pathfinder can resume a worker under the same Claude subagent id after it ended. The kitchen only
+observes that; it never causes it. `continueSession(book, conversation, { via, evidence }, now)`
+records it:
+
+- The ended occurrence is left exactly as it is: its `phase`, `end`, `endedAt` and readings.
+- A **new occurrence** is created, `<conversation>#<n>`, with `continuation.of` naming the ended
+  one. It copies the conversation's identity (kind, hqId, role, stage, ticket, title, worktree,
+  parent and transcript) and takes `startedAt` = now. `hqId` is the conversation's, so the rest of
+  the snapshot keeps one id for it.
+- **It is labelled the same conversation** (`occurrenceLabel`: `same conversation` when
+  `continuation` is set, `new conversation` otherwise). No view may show a continuation as a
+  newly created conversation.
+- **One live occurrence per conversation, and one per character.** The continuation takes the
+  character its conversation wore last when that character is free. If another session holds it by
+  then, the ordinary allocation rules pick (a free character of the family, else overflow). So a
+  resume never gives a worker a second robot, and never takes a different robot while its own is
+  free. While the restore pass is open it waits for reconcile like any session (rule 10), and
+  reconcile applies the same preference.
+- **Processing the same resume again adds nothing:**
+  - a resume whose `via` and non-null `evidence` already opened an occurrence of the conversation
+    returns that occurrence unchanged, even when it has ended since;
+  - while the conversation's latest occurrence is live, every further resume signal returns it;
+  - the id is the place in the chain, so recording the same resume from the same book gives the
+    same id.
+- `via` and `evidence` are what was observed, never inferred:
+  - `tool`: a tool call the kitchen had not seen before. `evidence` is its `tool_use_id`;
+  - `transcript`: the conversation's transcript moved past the ended turn. `evidence` is the
+    transcript revision it moved past, or `terminal:<revision>` for a whole turn that started and
+    finished unseen (its terminal record);
+  - `hook`: a start hook, or the process seen running, with no boundary named. `evidence` is
+    `null`. The boundary is unknown and stays unknown; none is made up.
+- A terminal record that appears for an ended occurrence which had **no** terminal record of its own
+  is not a new occurrence. It can't be told from that turn's own late bytes, so it may only fill an
+  unknown outcome. A recorded outcome is never rewritten.
+- `restoreSession` still never revives an ended occurrence. A restart that finds the transcript
+  unfinished records no resume. Only one of the three kinds of evidence above does.
+- A conversation the book has never seen is not a continuation: `continueSession` returns `null`
+  and the caller uses `startSession`.
+
+A crew book written before this amendment has neither field. It is read with `conversation` equal
+to `id` and `continuation` null, which is what those sessions were. The version stays 1.
 
 ## Lifecycle states (`CrewState`)
 
@@ -228,7 +282,8 @@ record, not a state (`retireCharacter`). A session that ends never beams the rob
    in a digit, so "Dash 2", "Dash2", "Dash-2" and "R2D2" are all refused. Renaming changes only the
    label, never the family or role.
 9. The registry changes sessions only through `startSession` (allocates once, and returns an id
-   that already exists unchanged), `endSession`, `restoreSession` and `reconcileAfterRestore`. It
+   that already exists unchanged), `continueSession` (a linked continuation of a conversation that
+   ended), `endSession`, `restoreSession` and `reconcileAfterRestore`. It
    changes characters only through `customizeCharacter` and `retireCharacter`. A new
    coordinator session ends any other live coordinator session, and moves any live
    non-coordinator session still on Basil (a legacy worker) to overflow with `reassignedFrom:
@@ -256,7 +311,7 @@ The file is `~/.controlroom/<key>/crew-book.json`, the `CrewBook` type, with sch
 { schema, version: 1, kitchen, updatedAt,
   characters: { <CrewCharacterId>: { id, family, name|null, color|null, sessionId|null,
                                      lastSessionId|null, availableSince|null, firstSeen, retired } },
-  sessions:   { <session id>: CrewSession },
+  sessions:   { <occurrence id>: CrewSession },   // each has conversation and continuation
   migrations: [ { from, fromVersion, at, backup, imported[], filled[], conflicts[] } ],
   restorePass: { firstSeq } | null }
 ```
@@ -391,8 +446,10 @@ the disk writes belong to the caller.
       loses the character (`reassignedFrom`, listed in the latest migration's `conflicts`) and joins
       the queue.
    6. The queue is those sessions plus every live session the pass recorded with no character. It
-      is allocated oldest first against the reconciled book. A session gets a free character of its
-      family when there is one, and otherwise it is overflow.
+      is allocated oldest first against the reconciled book. First each continuation takes back
+      the character its conversation wore last, when that character is free (Linked continuations).
+      Then a session gets a free character of its family when there is one, and otherwise it is
+      overflow.
 
    The result is the same allocation for every restore order. No live session is left without a
    character while its family has a free one. The exception is a session that was already overflow
@@ -442,7 +499,30 @@ The startup order for 09.3:
   shows instead of `config.team` rows.
 - `overflow: string[]`: ids of live sessions that have no character.
 
-A `CrewSessionView` is a `CrewSession` plus `characterName` and `state`.
+A `CrewSessionView` is a `CrewSession` plus `characterName` and `state`. It carries `conversation`
+and `continuation`, so History can show a continuation as the same conversation, linked to the
+occurrence before it.
+
+What 09.3's projection guarantees (`crewSnapshot` in `src/data/crewSnapshot.ts`, the one
+projection the server and the fixtures share):
+
+- every recorded character is listed once, in pool order, including an available one;
+- a character's `ticket`, `stage`, `role` and `telemetry` are those of the session it shows, and
+  are null when it is available, so a reused character never shows the last session's role;
+- `current` and `history` hold every session exactly once, in the orders above;
+- `lastOutcome` is the outcome of the character's ended session with the highest `seq`.
+
+`crewSnapshotProblems` checks the second item and the listing of sessions. Order, completeness and
+`lastOutcome` are asserted by `scripts/crew-registry-test.ts` and `scripts/crew-runtime-test.ts`.
+
+### Team rows in Pathfinder mode (09.3)
+
+`config.team` no longer gets a row per session. It holds the coordinator and one row per
+character: the session the character holds now, or held last, under that session's `hqId`. A
+character taken by a fresh session swaps its row, and the earlier session stays in `history`. Until
+09.5 draws the overflow layout, a session with no character is listed as the plain crew bot under
+its role name: every live one, and only the latest ended one of each family. `AgentStatus` entries
+stay keyed by `hqId`, one per conversation, in memory only.
 
 ### Transporter (decision for 09.5)
 

@@ -12,6 +12,7 @@
 // Empty stations stay empty: a ticket is only "ready for next round" when the coordinator's plan says so.
 
 import { assignCharacter, CHARACTERS, characterForRole, type CharacterId } from "../data/crew";
+import type { CrewCharacterId } from "../data/crewContract";
 import type { AgentConfig, AgentStatus, OfficeSnapshot, SessionEnd, SessionTelemetry, Task, TaskStatus, WorkflowHelper } from "../data/types";
 import { usableAccent, type IconKind } from "./robots";
 import { selectAttention } from "../store/office";
@@ -24,7 +25,7 @@ export type Place = "island" | "pod" | "pass" | "lounge" | "gone";
 
 export interface CrewMember {
   id: string;
-  character: CharacterId;
+  character: CrewCharacterId;
   name: string;
   job: string;
   /** The real workflow role. */
@@ -148,7 +149,7 @@ const byKey = (a: string, b: string) => {
 };
 
 /** The character, name and job for an agent (from the server; a stable fallback for native HQ teams). */
-export function crewIdentity(snap: OfficeSnapshot, config: AgentConfig): { character: CharacterId; name: string; job: string; role: string } {
+export function crewIdentity(snap: OfficeSnapshot, config: AgentConfig): { character: CrewCharacterId; name: string; job: string; role: string } {
   if (config.crew) return { character: config.crew.character, name: config.name, job: config.crew.job, role: config.crew.role };
   const team = snap.config.team;
   const taken: CharacterId[] = [];

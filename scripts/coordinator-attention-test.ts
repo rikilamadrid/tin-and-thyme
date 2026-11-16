@@ -7,7 +7,7 @@
 //   npx tsx scripts/coordinator-attention-test.ts
 
 import { spawnSync } from "node:child_process";
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -155,10 +155,23 @@ const helperInfo = (w: World) => (w.run as unknown as { helperInfo: Map<string, 
 const pendingLaunches = (w: World) => (w.run as unknown as { attribution: InstanceType<typeof Attribution> }).attribution.pending().map((l) => l.toolUseId);
 const refresh = (w: World) => (w.run as unknown as { refresh(): Promise<void> }).refresh();
 const coordinator = (w: World) => w.hub.status(COORDINATOR_ID)!;
+type BookSession = { id: string; conversation: string; continuation: { of: string; via: string; evidence: string | null } | null; phase: string; seq: number; ticket: string | null; stage: string | null; role: string | null; characterId: string | null; hqId: string | null; end: (Record<string, unknown> & { occurrence?: string }) | null };
+/** The crew book the run holds (09.3): sessions are recorded there, no longer as one team row each. */
+const crewBook = (w: World) => (w.run as unknown as { crew: { book: { restorePass: unknown; sessions: Record<string, BookSession>; characters: Record<string, { sessionId: string | null }> } } }).crew.book;
+/** Every occurrence the book holds for one Claude conversation, oldest first. */
+const occurrences = (w: World, agentId: string) => Object.values(crewBook(w).sessions).filter((s) => s.conversation === agentId).sort((a, b) => a.seq - b.seq);
+/** A session's recorded identity: its ticket and stage in the crew book, from its own brief (never from arrival order). */
 const crewTicket = (w: World, agentId: string) => {
-  const wk = workers(w).get(agentId);
-  const cfg = wk && w.hub.cfg(wk.hqId);
-  return cfg?.crew ? { ticket: cfg.crew.ticket, session: cfg.crew.session } : null;
+  const wk = workers(w).get(agentId) as (WorkerView & { occurrence: string }) | undefined;
+  const s = wk && crewBook(w).sessions[wk.occurrence];
+  return s ? { ticket: s.ticket, session: s.stage } : null;
+};
+/** crew-book.json as it is on disk for a kitchen: the newest recorded ending of each conversation. */
+const savedEndings = (slug: string) => {
+  const sessions = Object.values((JSON.parse(readFileSync(join(tmp, ".controlroom", slug, "crew-book.json"), "utf8")) as { sessions: Record<string, BookSession> }).sessions).sort((a, b) => a.seq - b.seq);
+  const out: Record<string, NonNullable<BookSession["end"]>> = {};
+  for (const s of sessions) if (s.end) out[s.conversation] = s.end;
+  return out;
 };
 const helpers = (w: World) => w.hub.snap.workflow?.helpers ?? [];
 
@@ -432,10 +445,11 @@ w.run.deliveryOf = () => null;
 // 6. Restart and reconnect: a new run rebuilds every identity from the transcripts alone.
 {
   // A saved outcome from before tickets were kept with it, wrong for this session: its own report wins.
-  const book = join(tmp, ".controlroom", "tt-a", "sessions.json");
+  // 09.3 keeps outcomes in crew-book.json; sessions.json is a frozen migration input the kitchen no longer writes.
+  check("09.3: the kitchen writes neither legacy book", !existsSync(join(tmp, ".controlroom", "tt-a", "sessions.json")) && !existsSync(join(tmp, ".controlroom", "tt-a", "crew.json")));
+  const book = join(tmp, ".controlroom", "tt-a", "crew-book.json");
   const saved = JSON.parse(readFileSync(book, "utf8"));
-  delete saved.a091;
-  saved.a091 = { outcome: "gate", next: null, result: "02.1's gate text", at: new Date().toISOString() };
+  saved.sessions.a091.end = { outcome: "gate", next: null, result: "02.1's gate text", at: new Date().toISOString() };
   writeFileSync(book, JSON.stringify(saved));
   for (const [id, prompt] of [["a021", brief("02.1")], ["a021r", brief("02.1", "review", "tester")]] as const) writeSub(w, id, { prompt, finished: true, toolUseId: `tu_${id}` });
   writeSub(w, "aplan", { prompt: "Investigate the in-app delivery flow and plan it.", toolUseId: "tu_plan", finished: true, description: "Investigate in-app delivery flow plan", agentType: "Plan" });
@@ -613,6 +627,10 @@ for (const ending of ["handback", "end-turn"] as const) for (const order of ["po
   const expected = [false, "FINDINGS", "current regression", "idle", []];
   const snapshot = () => [workers(w).get(id)?.live, workers(w).get(id)?.ended?.verdict, workers(w).get(id)?.ended?.result, w.hub.status(workers(w).get(id)!.hqId)?.state, w.run.liveKeys()];
   eq(`${label}: first poll keeps the current terminal outcome`, snapshot(), expected);
+  // 09.3: the resumed turn is its own linked occurrence of the same conversation; the earlier PASS stays recorded.
+  const chain = () => occurrences(w, id).map((s) => [s.id, s.phase, s.end?.verdict ?? null, s.continuation?.of ?? null]);
+  const resumed = [[id, "ended", "PASS", null], [`${id}#2`, "ended", "FINDINGS", id]];
+  eq(`${label}: the resumed turn is one linked occurrence and the earlier outcome is preserved`, chain(), resumed);
   // end_turn has no report tool hook; a delayed prior tool hook is modelled only for actual tool reports.
   if (order === "poll-first" && ending === "handback") reportHook();
   await refresh(w);
@@ -631,12 +649,16 @@ for (const ending of ["handback", "end-turn"] as const) for (const order of ["po
   subStop(w, id, "FINDINGS: current regression");
   await refresh(w);
   eq(`${label}: delayed stop and replay preserve the settled history`, [snapshot(), JSON.stringify(workers(w).get(id)?.ended)], [expected, currentEnd]);
+  eq(`${label}: delayed hooks, replays, bookkeeping and repeated polls add no occurrence`, chain(), resumed);
   // Repeated identical text in a genuinely new turn is still new terminal evidence (no unique UUID needed).
   appendFileSync(file, JSON.stringify({ type: "user", message: { content: "Review again" } }) + "\n");
   appendFileSync(file, JSON.stringify({ type: "assistant", message: { stop_reason: "end_turn", content: [{ type: "text", text: "FINDINGS: current regression" }] } }) + "\n");
   await refresh(w);
   eq(`${label}: another completed turn preserves its own verdict`, snapshot(), expected);
   check(`${label}: repeated report text settles the new turn`, JSON.stringify(workers(w).get(id)?.ended) !== currentEnd);
+  eq(`${label}: another genuine turn adds exactly one occurrence`, chain(), [...resumed, [`${id}#3`, "ended", "FINDINGS", `${id}#2`]]);
+  await refresh(w);
+  eq(`${label}: …and reading it again adds none`, chain().length, 3);
   w.run.stop();
 }
 
@@ -915,7 +937,7 @@ for (const ending of ["handback", "end-turn"] as const) for (const order of ["po
   setRows(w, [row("02.1", "working")]);
   await refresh(w);
   eq("R3: the answer is Recorded once Pathfinder shows Q resolved", [first.status, first.answer?.state], ["done", "recorded"]);
-  const book = () => JSON.parse(readFileSync(join(tmp, ".controlroom", "tt-r3-consumed", "sessions.json"), "utf8")) as Record<string, { occurrence?: string }>;
+  const book = () => savedEndings("tt-r3-consumed");
   eq("R3: A's report is kept with the occurrence it was made in", book().aA?.occurrence, X);
   // Another session runs and finishes; then the coordinator raises the identical question: a new occurrence.
   preAgent(w, "tu_b", brief("02.1"), "02.1 dev 2");
@@ -938,6 +960,7 @@ for (const ending of ["handback", "end-turn"] as const) for (const order of ["po
   subStop(w, "aA");
   await refresh(w);
   eq("R3: A resumed and stopped on its old report: the report stays the earlier occurrence's", [book().aA?.occurrence, gateItem(w)?.request?.owner], [X, null]);
+  eq("R3: the resume is a linked occurrence of the same conversation; the first one's gate outcome is untouched", occurrences(w, "aA").map((s) => [s.id, s.phase, s.end?.verdict, s.end?.occurrence, s.continuation?.of ?? null]), [["aA", "ended", "GATE", X, null], ["aA#2", "ended", "GATE", X, "aA"]]);
   // Restart: the kitchen rebuilds every session from transcripts and sessions.json.
   const w2 = boot(repo, "tt-r3-consumed", w.rows);
   await refresh(w2);

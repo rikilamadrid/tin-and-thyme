@@ -4,7 +4,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CrewRegistry } from "../server/crew";
-import { FAMILY_POOLS, type CrewSessionFacts } from "../src/data/crewContract";
+import { FAMILY_POOLS, occurrenceLabel, type CrewSessionFacts } from "../src/data/crewContract";
 import { crewBookProblems, crewHistoryProblems, crewSnapshotProblems } from "../src/data/fixture/crewFixture";
 
 const root = mkdtempSync(join(tmpdir(), "tt-crew-registry-"));
@@ -177,6 +177,112 @@ test("filling unknown ending keeps all verdict/gate metadata and never overwrite
   assert.deepEqual(again.book.sessions.unknown.end, full); assert.deepEqual(again.book.sessions.known.end, known);
   assert.equal(again.book.migrations.length, next.book.migrations.length);
   assert.deepEqual(crewHistoryProblems(next.book, again.book), []);
+});
+
+// ---- Linked continuations (human decision 2026-11-16): the Claude conversation id and the occurrence id are kept apart.
+const convo = (r: CrewRegistry, id: string) => Object.values(r.book.sessions).filter((s) => s.conversation === id).sort((a, b) => a.seq - b.seq);
+
+test("resume: a new linked occurrence, same conversation and robot; the ended one keeps its outcome", () => {
+  const r = fresh("resume"); r.start("conv", facts("05.1"), t()); const robot = r.book.sessions.conv.characterId;
+  r.observe("conv", { session: "running", agent: "working", tools: 2, attention: null, at: t(1) }, { context: { used: 5, limit: 100 }, model: null, tokens: null, costUsd: null, tools: 2, at: t(1) });
+  r.end("conv", { ...ending(2), key: "05.1", session: "implementation" }, t(2)); r.save();
+  const ended = structuredClone(r.book.sessions.conv); const before = structuredClone(r.book);
+  const next = r.resume("conv", { via: "tool", evidence: "toolu_resume_1" }, t(5))!;
+  assert.equal(next.id, "conv#2"); assert.equal(next.conversation, "conv"); assert.deepEqual(next.continuation, { of: "conv", via: "tool", evidence: "toolu_resume_1" });
+  assert.equal(occurrenceLabel(next), "same conversation"); assert.equal(occurrenceLabel(r.book.sessions.conv), "new conversation");
+  assert.equal(next.phase, "live"); assert.equal(next.characterId, robot); assert.equal(next.end, null); assert.equal(next.telemetry, null); assert.equal(next.startedAt, t(5));
+  for (const f of ["hqId", "role", "stage", "ticket", "transcript", "kind", "family"] as const) assert.equal(next[f], ended[f]);
+  assert.deepEqual(r.book.sessions.conv, ended, "the ended occurrence is untouched");
+  assert.deepEqual(crewHistoryProblems(before, r.book), []); assert.deepEqual(crewBookProblems(r.book), []);
+  const snap = r.snapshot(Date.parse(t(5)))!;
+  assert.deepEqual(snap.current.map((s) => s.id), ["conv#2"]); assert.deepEqual(snap.history.map((s) => [s.id, s.end?.outcome]), [["conv", "handed-off"]]);
+  assert.equal(snap.characters.find((c) => c.id === robot)!.sessionId, "conv#2"); assert.deepEqual(crewSnapshotProblems(snap, r.book), []);
+  assert.equal(r.resume("never-seen", { via: "hook", evidence: null }, t(5)), null, "an unknown conversation is not a continuation");
+});
+
+test("repeated resume and duplicate events add no record; a later genuine resume adds exactly one", () => {
+  const r = fresh("repeat"); r.start("conv", facts("05.1"), t()); r.end("conv", ending(2), t(2));
+  r.resume("conv", { via: "tool", evidence: "toolu_a" }, t(3));
+  // The same resume again, by the same evidence, by other evidence and by a bare hook, while it runs: all the live occurrence.
+  for (const again of [{ via: "tool", evidence: "toolu_a" }, { via: "transcript", evidence: "rev-9" }, { via: "hook", evidence: null }] as const)
+    assert.equal(r.resume("conv", again, t(4))!.id, "conv#2");
+  assert.equal(r.restore("conv", { ...facts("05.1"), phase: "live" }, t(4)).id, "conv#2"); assert.equal(r.start("conv", facts("05.1"), t(4)).id, "conv");
+  assert.deepEqual(convo(r, "conv").map((s) => s.id), ["conv", "conv#2"]);
+  r.end("conv#2", { ...ending(6), verdict: "PASS" }, t(6)); const settled = structuredClone(r.book);
+  // A late duplicate of the event that opened #2 arrives after #2 ended: that occurrence, unchanged, never a #3 and never live.
+  const late = r.resume("conv", { via: "tool", evidence: "toolu_a" }, t(7))!;
+  assert.equal(late.id, "conv#2"); assert.equal(late.phase, "ended"); assert.deepEqual(r.book.sessions, settled.sessions);
+  // Ending again, or with another outcome, never rewrites a recorded outcome.
+  r.end("conv#2", { ...ending(8), outcome: "failed", verdict: "FAILED" }, t(8)); r.end("conv", null, t(8));
+  assert.deepEqual(r.book.sessions, settled.sessions);
+  const third = r.resume("conv", { via: "transcript", evidence: "terminal:123:abc" }, t(9))!;
+  assert.equal(third.id, "conv#3"); assert.equal(third.continuation!.of, "conv#2");
+  assert.equal(r.resume("conv", { via: "transcript", evidence: "terminal:123:abc" }, t(10))!.id, "conv#3");
+  assert.deepEqual(convo(r, "conv").map((s) => [s.id, s.phase, s.end?.verdict ?? null]), [["conv", "ended", "DONE"], ["conv#2", "ended", "PASS"], ["conv#3", "live", null]]);
+  assert.deepEqual(crewHistoryProblems(settled, r.book), []); assert.deepEqual(crewBookProblems(r.book), []);
+});
+
+test("a resume never holds two robots, and takes another only when its own is worn", () => {
+  const r = fresh("robots"); r.start("a", facts("05.1"), t()); r.end("a", ending(1), t(1));
+  r.start("b", facts("05.1", "developer", 2), t(2)); // a fresh session on the same ticket takes the free robot first
+  assert.equal(r.book.sessions.b.characterId, "pepper");
+  const again = r.resume("a", { via: "hook", evidence: null }, t(3))!;
+  assert.equal(again.characterId, "roux", "its robot is worn by b, so the ordinary rules pick the next free one");
+  const worn = Object.values(r.book.sessions).filter((s) => s.phase === "live").map((s) => s.characterId);
+  assert.deepEqual(worn.sort(), ["pepper", "roux"]); assert.equal(new Set(worn).size, worn.length);
+  assert.equal(convo(r, "a").filter((s) => s.phase === "live").length, 1); assert.deepEqual(crewBookProblems(r.book), []);
+  // An overflow conversation that resumes still gets at most one robot, and only a free one of its own family.
+  const o = fresh("robots-overflow");
+  for (let n = 0; n <= FAMILY_POOLS.developer.length; n++) o.start(`dev-${n}`, facts(`01.${n}`, "developer", n), t(n));
+  assert.equal(o.book.sessions["dev-6"].characterId, null);
+  o.end("dev-6", ending(8), t(8)); assert.equal(o.resume("dev-6", { via: "hook", evidence: null }, t(9))!.characterId, null);
+  assert.deepEqual(o.snapshot(Date.parse(t(9)))!.overflow, ["dev-6#2"]); assert.deepEqual(crewBookProblems(o.book), []);
+});
+
+test("restart recovery: the chain survives, restore revives nothing and reprocessing after restart adds nothing", () => {
+  const r = fresh("restart-chain"); r.start("conv", facts("05.1"), t()); r.end("conv", { ...ending(2), key: "05.1" }, t(2));
+  r.resume("conv", { via: "tool", evidence: "toolu_a" }, t(3)); r.start("other", facts("06.1", "tester"), t(3)); r.save();
+  const before = structuredClone(r.book);
+  const next = new CrewRegistry(r.directory, r.kitchen, t(10));
+  // The transcript restore names the conversation, in reverse order; hooks from before the restart are delivered again.
+  next.restore("other", { ...facts("06.1", "tester"), phase: "live" }, t(10)); next.restore("conv", { ...facts("05.1"), phase: "live" }, t(10));
+  assert.equal(next.resume("conv", { via: "tool", evidence: "toolu_a" }, t(10))!.id, "conv#2"); assert.equal(next.resume("conv", { via: "hook", evidence: null }, t(10))!.id, "conv#2");
+  next.reconcile(["conv#2", "other"], t(11));
+  assert.deepEqual(Object.keys(next.book.sessions).sort(), ["conv", "conv#2", "other"]); assert.equal(next.book.sessions["conv#2"].characterId, before.sessions["conv#2"].characterId);
+  assert.deepEqual(next.lastEnding("conv"), { ...ending(2), key: "05.1" });
+  assert.deepEqual(crewHistoryProblems(before, next.book), []); assert.deepEqual(crewBookProblems(next.book), []);
+  // The next start finds the conversation's transcript finished: its live occurrence ends; the first one is not touched.
+  const later = new CrewRegistry(r.directory, r.kitchen, t(20)); later.restore("conv", { ...facts("05.1"), phase: "ended" }, t(20)); later.reconcile(["other"], t(21));
+  assert.deepEqual(convo(later, "conv").map((s) => [s.id, s.phase, s.end?.outcome ?? null]), [["conv", "ended", "handed-off"], ["conv#2", "ended", null]]);
+  // A restart that only finds the transcript unfinished is no evidence of a resume: nothing is revived or added.
+  const idle = new CrewRegistry(r.directory, r.kitchen, t(30)); idle.restore("conv", { ...facts("05.1"), phase: "live" }, t(30)); idle.reconcile(["other"], t(31));
+  assert.deepEqual(convo(idle, "conv").map((s) => [s.id, s.phase]), [["conv", "ended"], ["conv#2", "ended"]]); assert.deepEqual(crewHistoryProblems(later.book, idle.book), []);
+});
+
+test("a resume seen during the restore pass waits for reconcile and gets its own robot back", () => {
+  const r = fresh("pass-resume"); r.start("busy", facts("05.2"), t()); r.start("conv", facts("05.1", "developer", 1), t(1)); r.end("conv", ending(2), t(2)); r.save();
+  assert.equal(r.book.sessions.conv.characterId, "roux");
+  const next = new CrewRegistry(r.directory, r.kitchen, t(10));
+  const s = next.resume("conv", { via: "tool", evidence: "toolu_b" }, t(10))!;
+  assert.equal(s.characterId, null, "nothing is allocated while the pass is open"); assert.equal(next.resume("conv", { via: "tool", evidence: "toolu_b" }, t(10))!.id, s.id);
+  next.restore("fresh", { ...facts("05.9", "developer", 9), phase: "live" }, t(10));
+  next.reconcile([s.id, "busy", "fresh"], t(11));
+  // `fresh` is older and would be handed roux first in pool order; the continuation still gets its own robot back.
+  assert.equal(next.book.sessions.busy.characterId, "pepper"); assert.equal(next.book.sessions["conv#2"].characterId, "roux"); assert.equal(next.book.sessions.fresh.characterId, "ember");
+  assert.deepEqual(crewBookProblems(next.book), []);
+});
+
+test("a book written before occurrences reads unchanged; a broken link is refused, not repaired", () => {
+  const r = fresh("old-book"); r.start("conv", facts("05.1"), t()); r.end("conv", ending(2), t(2)); r.save();
+  const file = join(r.directory, "crew-book.json"); const book = JSON.parse(readFileSync(file, "utf8"));
+  for (const s of Object.values(book.sessions) as Record<string, unknown>[]) { delete s.conversation; delete s.continuation; }
+  writeFileSync(file, JSON.stringify(book));
+  const next = new CrewRegistry(r.directory, r.kitchen, t(5)); next.reconcile([], t(6));
+  assert.equal(next.book.sessions.conv.conversation, "conv"); assert.equal(next.book.sessions.conv.continuation, null); assert.equal(existsSync(join(r.directory, "backups")), false);
+  assert.equal(next.resume("conv", { via: "hook", evidence: null }, t(7))!.id, "conv#2"); next.save();
+  const linked = JSON.parse(readFileSync(file, "utf8")); linked.sessions["conv#2"].continuation.of = "missing"; writeFileSync(file, JSON.stringify(linked));
+  const repaired = new CrewRegistry(r.directory, r.kitchen, t(8)); repaired.reconcile([], t(9));
+  assert.equal(readdirSync(join(r.directory, "backups")).filter((f) => f.startsWith("crew-book.corrupt-")).length, 1, "an invalid book is quarantined, never overwritten");
 });
 
 // Optional evidence from a real kitchen's frozen legacy inputs. Read-only source; all mutation is in temp.

@@ -7,7 +7,7 @@ import { agentPalette } from "../src/theme/tokens";
 import {
   allocateCharacter, beginRestore, canTransition, crewColor, crewColorProblem, crewFloorChanges, customizeCharacter, FAMILY_COLOR, retireCharacter, compareSessionAge, CREW_STATE_BADGE, CHARACTER_FAMILY, CREW_STATES, CREW_TRANSITIONS, crewContractProblems, crewNameProblem, crewTransitionKind, deriveCrewState,
   emptyCrewBook, endSession, FAMILY_POOLS, familyFor, FINISHED_LINGER_MS, MAX_CREW_NAME, migrateLegacy, PARALLEL_FAMILIES, reconcileAfterRestore,
-  RESERVED_ACCENTS, restoreSession, ROLE_FAMILIES, spriteBase, startSession,
+  RESERVED_ACCENTS, restoreSession, ROLE_FAMILIES, spriteBase, startSession, continueSession, conversationOccurrences, latestOccurrence, occurrenceLabel,
   type CrewBook, type CrewCharacterId, type CrewCharacterView, type CrewState, type CrewSession, type LegacyCrewJson, type LegacySessionsJson, type RoleFamily,
 } from "../src/data/crewContract";
 
@@ -20,7 +20,7 @@ const iso = (ms: number) => new Date(ms).toISOString();
 
 function session(id: string, family: RoleFamily, ticket: string | null, characterId: CrewCharacterId | null, phase: "live" | "ended"): CrewSession {
   return {
-    id, kind: "worker", hqId: `w-${id}`, role: family, stage: family === "tester" ? "review" : "implementation", family, ticket, title: null, worktree: null, parent: null,
+    id, conversation: id, continuation: null, kind: "worker", hqId: `w-${id}`, role: family, stage: family === "tester" ? "review" : "implementation", family, ticket, title: null, worktree: null, parent: null,
     characterId, reassignedFrom: null, phase, seq: 0, startedAt: iso(NOW - 60_000), endedAt: phase === "ended" ? iso(NOW - 30_000) : null, end: null, report: null,
     transcript: null, telemetry: null, legacy: null,
   };
@@ -462,6 +462,39 @@ const tests: [string, () => void][] = [
     const s4 = { characters: [v("basil", "working"), v("pepper", "available", true), v("roux", "available")] };
     same("then departs; a session ending alone never does", crewFloorChanges(s3, s4), { arrivals: [], departures: ["pepper"] });
     same("un-retire arrives", crewFloorChanges(s4, { characters: [v("basil", "working"), v("pepper", "available"), v("roux", "available")] }), { arrivals: ["pepper"], departures: [] });
+  }],
+  ["linked continuations: conversation and occurrence ids are separate; a resume is one new linked occurrence (09.3 amendment)", () => {
+    const b = emptyCrewBook("k", iso(NOW));
+    same("an unknown conversation is not a continuation", continueSession(b, "c1", { via: "hook", evidence: null }, iso(NOW)), null);
+    const first = startSession(b, "c1", { role: "developer", stage: "implementation", ticket: "5.1", hqId: "w-5-1-implementation-c1", transcript: "/t/c1.jsonl" }, iso(NOW));
+    same("first occurrence", [first.id, first.conversation, first.continuation, occurrenceLabel(first)], ["c1", "c1", null, "new conversation"]);
+    same("a resume while it is live is that occurrence", continueSession(b, "c1", { via: "tool", evidence: "tu1" }, iso(NOW + 1))?.id, "c1");
+    const end = { outcome: "gate" as const, next: null, result: "Ship?", at: iso(NOW + 2) };
+    endSession(b, "c1", end, iso(NOW + 2));
+    const frozen = JSON.stringify(b.sessions.c1);
+    const second = continueSession(b, "c1", { via: "tool", evidence: "tu2" }, iso(NOW + 3))!;
+    same("continuation", [second.id, second.conversation, second.continuation, occurrenceLabel(second), second.phase, second.characterId, second.end, second.startedAt],
+      ["c1#2", "c1", { of: "c1", via: "tool", evidence: "tu2" }, "same conversation", "live", first.characterId, null, iso(NOW + 3)]);
+    same("identity copied", [second.kind, second.hqId, second.role, second.stage, second.family, second.ticket, second.transcript], [first.kind, first.hqId, first.role, first.stage, first.family, first.ticket, first.transcript]);
+    same("the ended occurrence is untouched", JSON.stringify(b.sessions.c1), frozen);
+    same("latest and chain", [latestOccurrence(b, "c1")?.id, conversationOccurrences(b, "c1").map((s) => s.id)], ["c1#2", ["c1", "c1#2"]]);
+    for (const again of [{ via: "tool", evidence: "tu2" }, { via: "transcript", evidence: "r1" }, { via: "hook", evidence: null }] as const) same(`repeated resume (${again.via})`, continueSession(b, "c1", again, iso(NOW + 4))?.id, "c1#2");
+    same("startSession and restoreSession never revive the first", [startSession(b, "c1", {}, iso(NOW + 4)).phase, restoreSession(b, "c1", { phase: "live" }, iso(NOW + 4)).phase], ["ended", "ended"]);
+    endSession(b, "c1#2", null, iso(NOW + 5));
+    same("the duplicate of an ended continuation's own evidence is that occurrence, still ended", [continueSession(b, "c1", { via: "tool", evidence: "tu2" }, iso(NOW + 6))?.id, b.sessions["c1#2"].phase, Object.keys(b.sessions).length], ["c1#2", "ended", 2]);
+    // Its robot is worn by someone else when it resumes: the ordinary rules pick, and it never holds two.
+    const other = startSession(b, "c2", { role: "developer", stage: "implementation", ticket: "5.1" }, iso(NOW + 7));
+    same("the free robot goes to the fresh session", other.characterId, first.characterId);
+    const third = continueSession(b, "c1", { via: "hook", evidence: null }, iso(NOW + 8))!;
+    same("third occurrence", [third.id, third.continuation, third.characterId], ["c1#3", { of: "c1#2", via: "hook", evidence: null }, "roux"]);
+    const live = Object.values(b.sessions).filter((s) => s.phase === "live");
+    same("one live occurrence per conversation and per character", [live.filter((s) => s.conversation === "c1").length, new Set(live.map((s) => s.characterId)).size], [1, live.length]);
+    // A coordinator conversation seen running again keeps Basil and ends any other live coordinator.
+    startSession(b, "coordinator:a", { kind: "coordinator" }, iso(NOW + 9));
+    endSession(b, "coordinator:a", null, iso(NOW + 10));
+    startSession(b, "coordinator:b", { kind: "coordinator" }, iso(NOW + 11));
+    const lead = continueSession(b, "coordinator:a", { via: "hook", evidence: null }, iso(NOW + 12))!;
+    same("coordinator continuation", [lead.id, lead.characterId, b.sessions["coordinator:b"].phase, b.characters.basil?.sessionId], ["coordinator:a#2", "basil", "ended", "coordinator:a#2"]);
   }],
   ["restore never changes kind; migrated sessions are workers (L3)", () => {
     const b = migrateLegacy({ h: { id: "unit", name: "Helper bot", job: "Helper" } }, {}, null, OPTS);

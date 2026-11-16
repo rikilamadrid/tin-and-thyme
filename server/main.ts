@@ -131,6 +131,8 @@ async function main() {
     commands.assignTask = () => hub.activity("config", null, "Pathfinder owns assignment: start the orchestration instead");
     commands.setContextAlert = (pct) => r.setContextAlert(Number(pct));
     commands.ackContextAlert = (id) => typeof id === "string" && r.ackContextAlert(id);
+    commands.customizeCrew = (id, change) => r.customizeCrew(id, change);
+    commands.retireCrew = (id, retired) => r.retireCrew(id, retired);
     commands.checkpointFresh = (id) => typeof id === "string" && void r.handoffs.start(id);
     commands.retryHandoff = (key) => typeof key === "string" && void r.handoffs.retry(key);
     commands.resolveActionItem = (id, decision, note, revision) => {
