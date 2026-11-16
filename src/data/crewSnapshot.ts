@@ -48,4 +48,3 @@ export function crewSnapshot(book: CrewBook, observations: Record<string, CrewOb
     .map(view);
   return { version: book.version, characters, current, history, overflow: current.filter((s) => s.characterId === null).map((s) => s.id) };
 }
-

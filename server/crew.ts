@@ -12,7 +12,7 @@ import {
 import { crewSnapshot } from "../src/data/crewSnapshot";
 import type { SessionEnd } from "../src/data/types";
 
-export type EndingEvidence = SessionEnd & { key?: string; session?: string; occurrence?: string; consumed?: string };
+export type EndingEvidence = SessionEnd & { key?: string; session?: string; occurrence?: string; consumed?: string; terminalBoundary?: { revision: string | null; pending: boolean } };
 const record = (v: unknown): v is Record<string, any> => !!v && typeof v === "object" && !Array.isArray(v);
 const nullableString = (v: unknown) => v === null || typeof v === "string";
 
@@ -35,6 +35,7 @@ function endingProblem(value: unknown, legacy = false): string | null {
   if (value.verdict !== undefined && value.verdict !== null && !["DONE", "PASS", "FINDINGS", "GATE", "FAILED"].includes(value.verdict)) return "verdict is invalid";
   for (const field of ["key", "session", "occurrence", "consumed"])
     if (value[field] !== undefined && typeof value[field] !== "string") return `${field} must be a string when present`;
+  if (value.terminalBoundary !== undefined && (!record(value.terminalBoundary) || !nullableString(value.terminalBoundary.revision) || typeof value.terminalBoundary.pending !== "boolean")) return "terminalBoundary is invalid";
   return null;
 }
 

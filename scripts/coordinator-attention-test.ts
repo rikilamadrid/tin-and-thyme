@@ -362,7 +362,8 @@ eq("the earlier session keeps its own ticket", crewTicket(w, "a021"), { ticket: 
 writeSub(w, "a101", { prompt: brief("10.1"), toolUseId: "tu_101", report: "DONE: 0123456789abcdef", finished: true });
 subStop(w, "a101", "DONE: 0123456789abcdef");
 eq("a session that reported DONE handed off", workers(w).get("a101")?.ended?.outcome, "handed-off");
-subStart(w, "a101"); // resumed under the same subagent id
+subStart(w, "a101"); // a bare start is ambiguous until this conversation has fresh activity
+hook(w, "PreToolUse", { agent_id: "a101", tool_name: "Bash", tool_use_id: "a101-resume-tool", tool_input: {} });
 eq("a resumed session keeps its own identity", [crewTicket(w, "a101"), workers(w).get("a101")?.live, workers(w).get("a101")?.ended], [{ ticket: "10.1", session: "implementation" }, true, null]);
 await refresh(w); // its meta.json still says finished from before the resume
 check("a resumed session isn't ended by its earlier finished flag", workers(w).get("a101")?.live === true);
@@ -530,6 +531,7 @@ w.run.deliveryOf = () => null;
   await refresh(w);
   eq("R5: terminal transcript ends a worker with no stop hook or finished metadata", [workers(w).get("af57c6f1742445342")?.live, workers(w).get("af57c6f1742445342")?.ended?.verdict], [false, "PASS"]);
   subStart(w, "af57c6f1742445342");
+  hook(w, "PreToolUse", { agent_id: "af57c6f1742445342", tool_name: "Bash", tool_use_id: "r5-resume-tool", tool_input: {} });
   await refresh(w);
   eq("R5: an old terminal transcript cannot stop a resumed worker", workers(w).get("af57c6f1742445342")?.live, true);
   postAgent(w, "tu_no_file", brief("03.1"), "hook_only");

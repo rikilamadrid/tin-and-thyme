@@ -194,8 +194,15 @@ records it:
   - `transcript`: the conversation's transcript moved past the ended turn. `evidence` is the
     transcript revision it moved past, or `terminal:<revision>` for a whole turn that started and
     finished unseen (its terminal record);
-  - `hook`: a start hook, or the process seen running, with no boundary named. `evidence` is
-    `null`. The boundary is unknown and stays unknown; none is made up.
+  - `hook`: a coordinator hook associates the running process with its observed transcript.
+    `evidence` is `null`; a saved transcript path plus a running process is insufficient.
+    A worker’s bare `SubagentStart` after an ending is ambiguous (it may be replayed), so the
+    runtime waits for its own fresh tool or transcript evidence before recording a continuation.
+    Helpers likewise need their own activity; restarting a coordinator never revives a helper.
+- The runtime stores `terminalBoundary: { revision, pending }` with its ending evidence, once.
+  It records the terminal revision visible when the stop arrived and whether this turn’s terminal
+  bytes were still absent. This optional metadata survives restart and is never rewritten. A pending
+  terminal consumes its eventual late flush without creating a continuation or changing the outcome.
 - A terminal record that appears for an ended occurrence which had **no** terminal record of its own
   is not a new occurrence. It can't be told from that turn's own late bytes, so it may only fill an
   unknown outcome. A recorded outcome is never rewritten.

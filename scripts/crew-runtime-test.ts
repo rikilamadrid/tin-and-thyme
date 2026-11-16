@@ -159,12 +159,14 @@ await test("resume: the same conversation gets one linked occurrence; repeated a
 
   // Pathfinder resumes it under the same subagent id.
   subStart(w, "conv");
+  assert.equal(chain(w, "conv").length, 1, "a bare start can be a duplicate; wait for evidence");
+  tool(w, "conv", "toolu_second");
   assert.deepEqual(chain(w, "conv").map((s) => [s.id, s.phase]), [["conv", "ended"], ["conv#2", "live"]]);
   const second = book(w).sessions["conv#2"];
-  assert.deepEqual([second.conversation, second.continuation, second.characterId, second.hqId, occurrenceLabel(second)], ["conv", { of: "conv", via: "hook", evidence: null }, "pepper", hqId, "same conversation"]);
+  assert.deepEqual([second.conversation, second.continuation, second.characterId, second.hqId, occurrenceLabel(second)], ["conv", { of: "conv", via: "tool", evidence: "toolu_second" }, "pepper", hqId, "same conversation"]);
   assert.deepEqual(book(w).sessions.conv, first, "the ended occurrence and its outcome are untouched");
   assert.deepEqual([workers(w).get("conv")!.hqId, workers(w).get("conv")!.live, workers(w).get("conv")!.occurrence], [hqId, true, "conv#2"]);
-  assert.match(w.hub.status(hqId)!.note ?? "", /Resumed implementation session \(same conversation\)/);
+  assert.equal(w.hub.status(hqId)!.session.state, "running");
   assert.equal(w.hub.snap.activity.some((a) => /resumed the same conversation/.test(a.text)), true);
   assert.equal(team(w).length, rows, "no second robot and no second row because a worker resumed");
 
@@ -191,11 +193,87 @@ await test("resume: the same conversation gets one linked occurrence; repeated a
 
   // A later genuine resume, seen by a tool call the kitchen had never seen: exactly one more, keyed by that evidence.
   tool(w, "conv", "toolu_third");
-  assert.deepEqual(chain(w, "conv").map((s) => [s.id, s.phase, s.continuation?.via ?? null, s.continuation?.evidence ?? null]), [["conv", "ended", null, null], ["conv#2", "ended", "hook", null], ["conv#3", "live", "tool", "toolu_third"]]);
+  assert.deepEqual(chain(w, "conv").map((s) => [s.id, s.phase, s.continuation?.via ?? null, s.continuation?.evidence ?? null]), [["conv", "ended", null, null], ["conv#2", "ended", "tool", "toolu_second"], ["conv#3", "live", "tool", "toolu_third"]]);
   assert.equal(book(w).sessions["conv#3"].characterId, "pepper"); assert.equal(team(w).length, rows);
   assert.deepEqual(crewHistoryProblems({ ...book(w), sessions: settled } as Book, book(w)), []);
   await refresh(w);
   sound(w);
+});
+
+// Append real turn boundaries rather than replacing earlier turns, so delayed bytes and replay are distinct.
+const appendRecord = (w: World, id: string, record: unknown) => {
+  const file = join(subDir(w), `agent-${id}.jsonl`);
+  writeFileSync(file, readFileSync(file, "utf8") + JSON.stringify(record) + "\n");
+};
+const userTurn = (w: World, id: string) => appendRecord(w, id, { type: "user", message: { role: "user", content: "Continue" } });
+const terminal = (w: World, id: string, report: string, toolId: string) => appendRecord(w, id, { type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: toolId, name: "SubagentHandback", input: { message: report } }] } });
+
+await test("delayed bare starts cannot reserve a robot or duplicate a completed resumed turn", async () => {
+  const w = boot(makeRepo("repo-start-replay"), "tt-start-replay");
+  setRows(w, [row("03.2", "working")]); launch(w, "conv", "03.2"); await refresh(w);
+  finish(w, "conv", "03.2", "DONE: first"); await refresh(w);
+  const before = structuredClone(book(w).sessions.conv);
+  subStart(w, "conv"); subStop(w, "conv", "DONE: second");
+  userTurn(w, "conv"); terminal(w, "conv", "DONE: second", "second-handback");
+  await refresh(w); await refresh(w);
+  assert.equal(chain(w, "conv").length, 2);
+  const settled = structuredClone(book(w).sessions);
+  subStart(w, "conv"); subStart(w, "conv"); await refresh(w); subStop(w, "conv", "DONE: second");
+  assert.deepEqual(book(w).sessions, settled);
+  assert.deepEqual(book(w).sessions.conv, before);
+  assert.equal(workers(w).get("conv")!.live, false);
+  launch(w, "next", "03.2"); await refresh(w);
+  assert.equal(book(w).sessions.next.characterId, "pepper", "duplicate starts do not reserve Pepper"); sound(w);
+});
+
+await test("a hook-ended continuation consumes its late terminal once, including a restart before the flush", async () => {
+  for (const restart of [false, true]) {
+    const repo = makeRepo(`repo-late-${restart}`);
+    let w = boot(repo, `tt-late-${restart}`);
+    setRows(w, [row("03.3", "working")]); launch(w, "conv", "03.3"); await refresh(w);
+    finish(w, "conv", "03.3", "DONE: first"); await refresh(w);
+    tool(w, "conv", "resume-tool");
+    subStop(w, "conv", "DONE: second");
+    assert.equal(chain(w, "conv").length, 2);
+    const ended = structuredClone(book(w).sessions["conv#2"]);
+    if (restart) { w = boot(repo, `tt-late-${restart}`); await refresh(w); }
+    userTurn(w, "conv"); await refresh(w); // partial late flush must not look like another resume
+    terminal(w, "conv", "DONE: second", "second-handback"); await refresh(w); await refresh(w);
+    assert.equal(chain(w, "conv").length, 2);
+    assert.deepEqual(book(w).sessions["conv#2"], ended, "late bytes do not rewrite the recorded ending");
+    const again = boot(repo, `tt-late-${restart}`); await refresh(again);
+    assert.equal(chain(again, "conv").length, 2);
+    userTurn(again, "conv"); terminal(again, "conv", "DONE: third", "third-handback"); await refresh(again);
+    assert.equal(chain(again, "conv").length, 3, "a subsequent whole turn still gets its own record"); sound(again);
+  }
+});
+
+await test("coordinator replacement neither resumes the old conversation nor revives its dead helpers", async () => {
+  const w = boot(makeRepo("repo-coordinator-restart"), "tt-coordinator-restart");
+  const prompt = "Search the repository";
+  hook(w, "PreToolUse", { tool_name: "Agent", tool_use_id: "helper-launch", tool_input: { prompt, description: "Search", subagent_type: "Explore" } });
+  hook(w, "PostToolUse", { tool_name: "Agent", tool_use_id: "helper-launch", tool_input: { prompt }, tool_response: { agentId: "helper", prompt } });
+  writeSub(w, "helper", { prompt, toolUseId: "helper-launch" }); await refresh(w);
+  assert.equal(chain(w, "helper").length, 1);
+  const original = `coordinator:repo-coordinator-restart-session`;
+  for (let i = 0; i < 2; i++) {
+    w.hub.setSession(COORDINATOR_ID, { state: "stopped" }); await refresh(w);
+    w.hub.setSession(COORDINATOR_ID, { state: "running" }); await refresh(w);
+    assert.equal(chain(w, original).length, 1);
+    assert.equal(chain(w, "helper").length, 1);
+    assert.equal(chain(w, "helper")[0].phase, "ended");
+  }
+  // Genuine helper advancement under the same observed parent can still resume it once.
+  hook(w, "UserPromptSubmit", {});
+  userTurn(w, "helper"); await refresh(w);
+  assert.equal(chain(w, "helper").length, 2);
+  assert.equal(chain(w, "helper")[1].phase, "live");
+  await refresh(w); assert.equal(chain(w, "helper").length, 2);
+  const replacement = join(tmp, "replacement-session.jsonl"); writeFileSync(replacement, "");
+  hook(w, "SessionStart", { transcript_path: replacement }); await refresh(w);
+  assert.equal(chain(w, original).length, 2, "only the explicitly identified same-conversation resume is recorded");
+  assert.equal(chain(w, "coordinator:replacement-session").length, 1);
+  assert.equal(snapshot(w).current.some((s) => s.kind === "helper"), false); sound(w);
 });
 
 await test("restart recovery: the chain, the robots and the outcomes are read back; nothing is duplicated or relaunched", async () => {
@@ -205,7 +283,7 @@ await test("restart recovery: the chain, the robots and the outcomes are read ba
   launch(w, "conv", "04.1"); launch(w, "rev", "04.2", "review", "tester");
   await refresh(w);
   finish(w, "conv", "04.1", "DONE: first");
-  subStart(w, "conv"); // resumed: conv#2 is live when the kitchen stops
+  subStart(w, "conv"); tool(w, "conv", "toolu_resume"); // positive evidence: conv#2 is live when the kitchen stops
   writeSub(w, "conv", { prompt: brief("04.1") }); // its transcript is unfinished again
   await refresh(w);
   const before = structuredClone(book(w)); const rowsBefore = workerRows(w).map((a) => [a.id, a.crew?.character]);
