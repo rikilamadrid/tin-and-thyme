@@ -276,6 +276,271 @@ await test("coordinator replacement neither resumes the old conversation nor rev
   assert.equal(snapshot(w).current.some((s) => s.kind === "helper"), false); sound(w);
 });
 
+// Repair round 2 (N1–N5). Each record is appended as Claude Code writes it: a prompt opens a turn, a terminal record closes it.
+const prompt = (w: World, id: string, text = "Continue") => appendRecord(w, id, { isSidechain: true, agentId: id, type: "user", message: { role: "user", content: text } });
+const toolCall = (w: World, id: string, toolId: string) => appendRecord(w, id, { isSidechain: true, agentId: id, type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: toolId, name: "Bash", input: {} }] } });
+const toolResult = (w: World, id: string, toolId: string) => appendRecord(w, id, { isSidechain: true, agentId: id, type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: toolId, content: "ok" }] } });
+const say = (w: World, id: string, text: string) => appendRecord(w, id, { isSidechain: true, agentId: id, type: "assistant", message: { role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text }] } });
+const outcomes = (w: World, id: string) => chain(w, id).map((s) => [s.id, s.phase, s.end?.verdict ?? s.end?.outcome ?? null]);
+const boundaryOf = (w: World, id: string) => (book(w).sessions[id].end as { terminalBoundary?: { revision: string | null; pending: boolean; starts?: number; tools?: string[] } } | null)?.terminalBoundary;
+const setMeta = (w: World, id: string, meta: Record<string, unknown>) => writeFileSync(join(subDir(w), `agent-${id}.meta.json`), JSON.stringify({ toolUseId: `tu_${id}`, description: "", agentType: "general-purpose", ...meta }));
+function launchHelper(w: World, id: string) {
+  const text = `Search the repository for ${id}`;
+  hook(w, "PreToolUse", { tool_name: "Agent", tool_use_id: `tu_${id}`, tool_input: { prompt: text, description: "Search", subagent_type: "Explore" } });
+  writeFileSync(join(subDir(w), `agent-${id}.jsonl`), JSON.stringify({ parentUuid: null, isSidechain: true, agentId: id, type: "user", message: { role: "user", content: text }, timestamp: new Date().toISOString() }) + "\n");
+  setMeta(w, id, { agentType: "Explore", description: "Search" });
+  hook(w, "SubagentStart", { agent_id: id, agent_type: "Explore" });
+}
+const helperTool = (w: World, id: string, toolId: string, event = "PreToolUse") => hook(w, event, { agent_id: id, agent_type: "Explore", tool_name: "Grep", tool_use_id: toolId, tool_input: { pattern: "x" } });
+const helperStop = (w: World, id: string) => hook(w, "SubagentStop", { agent_id: id, agent_type: "Explore" });
+const liveOn = (w: World, character: string) => Object.values(book(w).sessions).filter((s) => s.phase === "live" && s.characterId === character).map((s) => s.id);
+
+await test("N1: an ending with no terminal record never hides a later turn, however it ended and across a restart", async () => {
+  for (const how of ["stop hook, no terminal record", "coordinator lost", "meta.json finished"] as const) for (const restart of [false, true]) {
+    const repo = makeRepo(`repo-n1-${how.length}-${restart}`); const slug = `tt-n1-${how.length}-${restart}`;
+    let w = boot(repo, slug);
+    setRows(w, [row("11.1", "working")]); await refresh(w); launch(w, "conv", "11.1"); await refresh(w);
+    if (how === "stop hook, no terminal record") subStop(w, "conv", "");
+    if (how === "coordinator lost") { w.hub.setSession(COORDINATOR_ID, { state: "stopped" }); await refresh(w); w.hub.setSession(COORDINATOR_ID, { state: "running" }); hook(w, "SessionStart", {}); }
+    if (how === "meta.json finished") setMeta(w, "conv", { finished: true });
+    await refresh(w);
+    assert.deepEqual(outcomes(w, "conv"), [["conv", "ended", "interrupted"]], how);
+    assert.deepEqual(boundaryOf(w, "conv"), { revision: null, pending: true, starts: 1 });
+    const first = structuredClone(book(w).sessions.conv);
+    // No late flush ever comes. Polls, bookkeeping bytes and a bare start are not a resume.
+    await refresh(w); await refresh(w);
+    if (restart) { w = boot(repo, slug); hook(w, "Notification", {}); await refresh(w); await refresh(w); }
+    appendRecord(w, "conv", { type: "progress", note: "bookkeeping" }); subStart(w, "conv"); await refresh(w);
+    assert.equal(chain(w, "conv").length, 1, `${how}: nothing but a later prompt is a later turn`);
+    // A genuine resume that makes no tool call: seen mid-turn by its own prompt record.
+    prompt(w, "conv", "Please continue and report"); await refresh(w); await refresh(w);
+    assert.deepEqual([outcomes(w, "conv"), workers(w).get("conv")!.live, liveOn(w, "pepper")], [[["conv", "ended", "interrupted"], ["conv#2", "live", null]], true, ["conv#2"]], `${how}, restart ${restart}`);
+    assert.equal(w.hub.status(workers(w).get("conv")!.hqId)?.session.state, "running");
+    say(w, "conv", "DONE: resumed work"); subStop(w, "conv", "DONE: resumed work"); await refresh(w); await refresh(w);
+    assert.deepEqual(outcomes(w, "conv"), [["conv", "ended", "interrupted"], ["conv#2", "ended", "DONE"]]);
+    assert.equal(book(w).sessions["conv#2"].end?.result, "resumed work"); assert.equal(w.hub.status(workers(w).get("conv")!.hqId)?.ended?.verdict, "DONE");
+    assert.deepEqual(book(w).sessions.conv, first, "the ended occurrence is never rewritten");
+    // A whole further text-only turn between two polls, with its stop hook: its own record, once.
+    subStart(w, "conv"); prompt(w, "conv", "Again"); say(w, "conv", "FAILED: third"); subStop(w, "conv", "FAILED: third"); await refresh(w); await refresh(w);
+    assert.deepEqual(outcomes(w, "conv"), [["conv", "ended", "interrupted"], ["conv#2", "ended", "DONE"], ["conv#3", "ended", "FAILED"]]);
+    const settled = structuredClone(book(w).sessions);
+    const again = boot(repo, slug); hook(again, "Notification", {}); await refresh(again); await refresh(again); subStart(again, "conv"); subStop(again, "conv", "FAILED: third"); await refresh(again);
+    assert.deepEqual(book(again).sessions, settled, "a restart and replays add and change nothing"); sound(again);
+  }
+});
+
+await test("N1/M2: a pending turn's late bytes are still its own; the turn after them is a later turn", async () => {
+  for (const restart of [false, true]) {
+    const repo = makeRepo(`repo-n1-late-${restart}`); const slug = `tt-n1-late-${restart}`;
+    let w = boot(repo, slug);
+    setRows(w, [row("11.2", "working")]); await refresh(w); launch(w, "conv", "11.2"); await refresh(w);
+    terminal(w, "conv", "DONE: first", "t1"); subStop(w, "conv", "DONE: first"); await refresh(w);
+    tool(w, "conv", "t2"); subStop(w, "conv", "DONE: second"); // resumed by a tool call, stopped before any byte of the turn is on disk
+    assert.equal(boundaryOf(w, "conv#2")?.pending, true); assert.equal(boundaryOf(w, "conv#2")?.starts, 2);
+    const ended = structuredClone(book(w).sessions["conv#2"]);
+    if (restart) { w = boot(repo, slug); hook(w, "Notification", {}); await refresh(w); }
+    prompt(w, "conv"); await refresh(w); toolCall(w, "conv", "t2"); toolResult(w, "conv", "t2"); await refresh(w);
+    assert.deepEqual([chain(w, "conv").length, workers(w).get("conv")!.live], [2, false], "its own prompt and tool records are not a resume");
+    // The genuine next turn begins before the pending turn's terminal record ever arrives.
+    prompt(w, "conv", "One more thing"); await refresh(w);
+    assert.deepEqual(outcomes(w, "conv"), [["conv", "ended", "DONE"], ["conv#2", "ended", "DONE"], ["conv#3", "live", null]]);
+    assert.deepEqual(book(w).sessions["conv#2"], ended, "late bytes rewrite nothing");
+    say(w, "conv", "DONE: third"); subStop(w, "conv", "DONE: third"); await refresh(w); await refresh(w);
+    assert.deepEqual(chain(w, "conv").map((s) => s.end?.result), ["first", "second", "third"]); sound(w);
+  }
+});
+
+await test("a book written before boundaries kept `starts` and `tools`, or before they existed, still consumes its pending turn's late flush", async () => {
+  for (const [owed, shape] of [["whole turn", "b085f0a"], ["terminal only", "b085f0a"], ["whole turn", "87f8e46"]] as const) {
+    const repo = makeRepo(`repo-old-boundary-${owed.length}-${shape}`); const slug = `tt-old-boundary-${owed.length}-${shape}`;
+    const w = boot(repo, slug);
+    setRows(w, [row("11.4", "working")]); await refresh(w); launch(w, "conv", "11.4"); await refresh(w);
+    if (owed === "whole turn") { terminal(w, "conv", "DONE: first", "t1"); subStop(w, "conv", "DONE: first"); await refresh(w); tool(w, "conv", "t2"); }
+    subStop(w, "conv", "DONE: latest"); await refresh(w);
+    // As b085f0a wrote it: { revision, pending } only. As 87f8e46 wrote it: no boundary at all.
+    const file = join(tmp, ".controlroom", slug, "crew-book.json"); const old = JSON.parse(readFileSync(file, "utf8"));
+    for (const s of Object.values(old.sessions) as { end: { terminalBoundary?: Record<string, unknown> } | null }[]) if (s.end?.terminalBoundary) {
+      if (shape === "87f8e46") delete s.end.terminalBoundary; else { delete s.end.terminalBoundary.starts; delete s.end.terminalBoundary.tools; }
+    }
+    writeFileSync(file, JSON.stringify(old, null, 2) + "\n");
+    const w2 = boot(repo, slug); hook(w2, "Notification", {}); await refresh(w2);
+    const settled = structuredClone(book(w2).sessions);
+    const keys = shape === "87f8e46" ? [] : ["revision", "pending"];
+    assert.deepEqual(Object.values(settled).filter((s) => s.conversation === "conv").map((s) => Object.keys((s.end as { terminalBoundary?: object }).terminalBoundary ?? {})), owed === "whole turn" ? [keys, keys] : [keys], "loaded as written");
+    if (owed === "whole turn") { prompt(w2, "conv"); await refresh(w2); toolCall(w2, "conv", "t2"); toolResult(w2, "conv", "t2"); await refresh(w2); }
+    terminal(w2, "conv", "DONE: latest", "t9"); await refresh(w2); await refresh(w2);
+    assert.deepEqual(book(w2).sessions, settled, `${owed}: the late flush adds and rewrites nothing`);
+    prompt(w2, "conv", "And again"); await refresh(w2);
+    assert.equal(chain(w2, "conv").at(-1)!.phase, "live"); assert.equal(chain(w2, "conv").length, Object.values(settled).filter((s) => s.conversation === "conv").length + 1); sound(w2);
+  }
+});
+
+await test("N2: a helper's own late bytes and a stale finished flag are not resumes", async () => {
+  const w = boot(makeRepo("repo-n2"), "tt-n2");
+  hook(w, "Notification", {}); await refresh(w);
+  // Late flush: its stop hook first, then its bytes in two parts with a poll between.
+  launchHelper(w, "late"); await refresh(w);
+  helperTool(w, "late", "g1"); helperTool(w, "late", "g1", "PostToolUse"); await refresh(w);
+  helperStop(w, "late"); await refresh(w);
+  assert.deepEqual(chain(w, "late").map((s) => s.phase), ["ended"]);
+  toolCall(w, "late", "g1"); await refresh(w);
+  assert.deepEqual([chain(w, "late").length, liveOn(w, "whisk")], [1, []], "part of its own turn is not a resume, and Whisk is not reserved");
+  toolResult(w, "late", "g1"); say(w, "late", "found"); await refresh(w); await refresh(w);
+  assert.equal(chain(w, "late").length, 1);
+  // Stale flag: meta.json keeps `finished: true` across a genuine resume.
+  launchHelper(w, "stale"); await refresh(w);
+  say(w, "stale", "found it"); setMeta(w, "stale", { agentType: "Explore", finished: true }); helperStop(w, "stale"); await refresh(w); await refresh(w);
+  assert.deepEqual(chain(w, "stale").map((s) => s.phase), ["ended"]);
+  hook(w, "SubagentStart", { agent_id: "stale", agent_type: "Explore" }); prompt(w, "stale", "Look again"); await refresh(w);
+  for (const step of [() => {}, () => toolCall(w, "stale", "h1"), () => toolResult(w, "stale", "h1"), () => toolCall(w, "stale", "h2")]) { step(); await refresh(w); await refresh(w); }
+  assert.deepEqual(chain(w, "stale").map((s) => [s.id, s.phase, s.continuation?.via ?? null]), [["stale", "ended", null], ["stale#2", "live", "transcript"]], "one genuine resume is one continuation, still running");
+  assert.deepEqual(liveOn(w, book(w).sessions["stale#2"].characterId!), ["stale#2"]);
+  // A flag written after the resume, or its own terminal record, ends it once.
+  toolResult(w, "stale", "h2"); say(w, "stale", "found again"); await refresh(w); await refresh(w);
+  assert.deepEqual(chain(w, "stale").map((s) => s.phase), ["ended", "ended"]); sound(w);
+});
+
+await test("N2 across a restart: a resumed helper keeps its occurrence; its late bytes and a stale finished flag add none", async () => {
+  const helperChain = (w: World) => chain(w, "h").map((s) => [s.id, s.phase, s.continuation?.via ?? null]);
+  // Resumed by a tool call before any byte, meta.json still says finished, the kitchen restarts mid-turn.
+  {
+    const repo = makeRepo("repo-n2-restart-live"); let w = boot(repo, "tt-n2-restart-live");
+    hook(w, "Notification", {}); await refresh(w);
+    launchHelper(w, "h"); await refresh(w);
+    say(w, "h", "found"); setMeta(w, "h", { agentType: "Explore", finished: true }); helperStop(w, "h"); await refresh(w); await refresh(w);
+    helperTool(w, "h", "g2"); await refresh(w);
+    assert.deepEqual(helperChain(w), [["h", "ended", null], ["h#2", "live", "tool"]]);
+    w = boot(repo, "tt-n2-restart-live"); hook(w, "Notification", {}); await refresh(w); await refresh(w);
+    assert.deepEqual(helperChain(w), [["h", "ended", null], ["h#2", "live", "tool"]], "the stale flag and the earlier turn's terminal record end nothing");
+    assert.deepEqual(liveOn(w, book(w).sessions["h#2"].characterId!), ["h#2"]);
+    prompt(w, "h", "Look again"); toolCall(w, "h", "g2"); await refresh(w); helperTool(w, "h", "g3"); toolResult(w, "h", "g2"); await refresh(w); await refresh(w);
+    assert.deepEqual(helperChain(w), [["h", "ended", null], ["h#2", "live", "tool"]], "its own bytes and its next tool call are the same occurrence");
+    say(w, "h", "found again"); helperStop(w, "h"); await refresh(w); await refresh(w);
+    assert.deepEqual(helperChain(w), [["h", "ended", null], ["h#2", "ended", "tool"]]); sound(w);
+  }
+  // Resumed by a tool call and stopped before any byte; the kitchen restarts; then the late flush, then a real turn.
+  {
+    const repo = makeRepo("repo-n2-restart-late"); let w = boot(repo, "tt-n2-restart-late");
+    hook(w, "Notification", {}); await refresh(w);
+    launchHelper(w, "h"); await refresh(w);
+    say(w, "h", "found"); helperStop(w, "h"); await refresh(w); await refresh(w);
+    helperTool(w, "h", "g2"); await refresh(w); helperStop(w, "h"); await refresh(w);
+    const settled = structuredClone(book(w).sessions);
+    w = boot(repo, "tt-n2-restart-late"); hook(w, "Notification", {}); await refresh(w); await refresh(w);
+    prompt(w, "h", "Look again"); toolCall(w, "h", "g2"); await refresh(w); toolResult(w, "h", "g2"); say(w, "h", "found again"); await refresh(w); await refresh(w);
+    assert.deepEqual(helperChain(w), [["h", "ended", null], ["h#2", "ended", "tool"]], "the late prompt it still owed is not a later turn");
+    assert.deepEqual(Object.fromEntries(Object.entries(book(w).sessions).filter(([, s]) => s.kind === "helper")), Object.fromEntries(Object.entries(settled).filter(([, s]) => s.kind === "helper")));
+    prompt(w, "h", "A third question"); await refresh(w);
+    assert.deepEqual(helperChain(w), [["h", "ended", null], ["h#2", "ended", "tool"], ["h#3", "live", "transcript"]], "a genuine later turn still is one"); sound(w);
+  }
+  // Stopped before its own bytes, the kitchen restarts, then those bytes arrive.
+  {
+    const repo = makeRepo("repo-n2-restart-first"); let w = boot(repo, "tt-n2-restart-first");
+    hook(w, "Notification", {}); await refresh(w);
+    launchHelper(w, "h"); await refresh(w); helperTool(w, "h", "g1"); helperStop(w, "h"); await refresh(w);
+    w = boot(repo, "tt-n2-restart-first"); hook(w, "Notification", {}); await refresh(w);
+    toolCall(w, "h", "g1"); await refresh(w); toolResult(w, "h", "g1"); say(w, "h", "found"); await refresh(w); await refresh(w);
+    assert.deepEqual(helperChain(w), [["h", "ended", null]]); assert.deepEqual(liveOn(w, "whisk"), []); sound(w);
+  }
+});
+
+await test("a worker continuation live at a restart keeps its occurrence; a stale flag or the earlier terminal record ends nothing", async () => {
+  for (const stopFirst of [true, false]) {
+    const repo = makeRepo(`repo-live-restart-${stopFirst}`); const slug = `tt-live-restart-${stopFirst}`;
+    let w = boot(repo, slug);
+    setRows(w, [row("11.5", "working")]); await refresh(w); launch(w, "conv", "11.5"); await refresh(w);
+    finish(w, "conv", "11.5", "DONE: first"); await refresh(w); // meta.json now says finished
+    tool(w, "conv", "t2"); await refresh(w); // resumed by a tool call; none of its bytes on disk
+    const first = structuredClone(book(w).sessions.conv);
+    w = boot(repo, slug); hook(w, "Notification", {}); await refresh(w); await refresh(w);
+    assert.deepEqual([outcomes(w, "conv"), liveOn(w, "pepper")], [[["conv", "ended", "DONE"], ["conv#2", "live", null]], ["conv#2"]], `stop first ${stopFirst}: still the same live occurrence`);
+    if (stopFirst) { subStop(w, "conv", "DONE: second"); await refresh(w); assert.deepEqual(boundaryOf(w, "conv#2"), { revision: boundaryOf(w, "conv")!.revision, pending: true, starts: 2 }); }
+    prompt(w, "conv"); toolCall(w, "conv", "t2"); toolResult(w, "conv", "t2"); await refresh(w);
+    if (!stopFirst) { tool(w, "conv", "t3"); await refresh(w); } // after its stop a fresh tool call would be a later turn
+    terminal(w, "conv", "DONE: second", "t4"); if (!stopFirst) subStop(w, "conv", "DONE: second"); await refresh(w); await refresh(w);
+    assert.deepEqual(outcomes(w, "conv"), [["conv", "ended", "DONE"], ["conv#2", "ended", "DONE"]], "its own bytes, a later tool call and its stop are that one occurrence");
+    assert.deepEqual(chain(w, "conv").map((s) => s.end?.result), ["first", "second"]); assert.deepEqual(book(w).sessions.conv, first);
+    const w2 = boot(repo, slug); hook(w2, "Notification", {}); await refresh(w2); prompt(w2, "conv", "Once more"); await refresh(w2);
+    assert.deepEqual(outcomes(w2, "conv").map((o) => o[1]), ["ended", "ended", "live"], "a genuine later turn after another restart is one more"); sound(w2);
+  }
+});
+
+await test("N3: after a restart, a replayed hook for any tool of a pending turn is still a replay", async () => {
+  const repo = makeRepo("repo-n3");
+  const w = boot(repo, "tt-n3");
+  setRows(w, [row("11.3", "working")]); await refresh(w); launch(w, "conv", "11.3"); await refresh(w);
+  terminal(w, "conv", "DONE: first", "t1"); subStop(w, "conv", "DONE: first"); await refresh(w);
+  tool(w, "conv", "t2"); tool(w, "conv", "t2", "PostToolUse"); tool(w, "conv", "t3"); tool(w, "conv", "t3", "PostToolUse");
+  subStop(w, "conv", "DONE: second");
+  assert.deepEqual(boundaryOf(w, "conv#2")?.tools, ["t2", "t3"], "the tool calls no byte was written for are kept with the ending");
+  const settled = structuredClone(book(w).sessions);
+  const w2 = boot(repo, "tt-n3"); hook(w2, "Notification", {}); await refresh(w2);
+  tool(w2, "conv", "t2", "PostToolUse"); tool(w2, "conv", "t3", "PostToolUse"); tool(w2, "conv", "t3"); await refresh(w2);
+  assert.deepEqual(book(w2).sessions, settled); assert.deepEqual([workers(w2).get("conv")!.live, liveOn(w2, "pepper")], [false, []]);
+  prompt(w2, "conv"); toolCall(w2, "conv", "t2"); toolResult(w2, "conv", "t2"); toolCall(w2, "conv", "t3"); toolResult(w2, "conv", "t3"); terminal(w2, "conv", "DONE: second", "t4");
+  await refresh(w2); tool(w2, "conv", "t4", "PostToolUse"); await refresh(w2);
+  assert.deepEqual(book(w2).sessions, settled, "the late flush and its own replays add and change nothing");
+  // A second restart with the bytes on disk, then a tool call nobody has seen: exactly one more.
+  const w3 = boot(repo, "tt-n3"); hook(w3, "Notification", {}); await refresh(w3); tool(w3, "conv", "t3", "PostToolUse");
+  assert.deepEqual(book(w3).sessions, settled);
+  tool(w3, "conv", "t5");
+  assert.deepEqual(chain(w3, "conv").map((s) => [s.id, s.phase, s.continuation?.evidence ?? null]), [["conv", "ended", null], ["conv#2", "ended", "t2"], ["conv#3", "live", "t5"]]); await refresh(w3); sound(w3);
+});
+
+await test("N4: a hook handled while no coordinator runs ties no later process to the old conversation", async () => {
+  const lead = (w: World) => Object.values(book(w).sessions).filter((s) => s.kind === "coordinator").sort((a, b) => a.seq - b.seq).map((s) => [s.phase, s.continuation?.via ?? null]);
+  for (const pollBetween of [false, true]) {
+    const w = boot(makeRepo(`repo-n4-${pollBetween}`), `tt-n4-${pollBetween}`);
+    hook(w, "Notification", {}); await refresh(w);
+    assert.deepEqual(lead(w), [["live", null]]);
+    w.hub.setSession(COORDINATOR_ID, { state: "stopped" }); await refresh(w);
+    hook(w, "SessionEnd", {}); // the old process's last hook, handled after it was seen stopped
+    if (pollBetween) await refresh(w);
+    w.hub.setSession(COORDINATOR_ID, { state: "running" }); await refresh(w); await refresh(w);
+    assert.deepEqual(lead(w), [["ended", null]], "a new process with no hook of its own resumes nothing");
+    // Its own hook, handled while it runs, records the resume once; replays add nothing.
+    hook(w, "SessionStart", {}); await refresh(w); hook(w, "SessionStart", {}); hook(w, "UserPromptSubmit", {}); await refresh(w);
+    assert.deepEqual(lead(w), [["ended", null], ["live", "hook"]]); sound(w);
+  }
+});
+
+await test("N5: a helper resume is recorded when it is seen: by its tool call before any byte, or as a whole turn between polls", async () => {
+  const repo = makeRepo("repo-n5");
+  const w = boot(repo, "tt-n5");
+  hook(w, "Notification", {}); await refresh(w);
+  launchHelper(w, "h"); await refresh(w);
+  helperTool(w, "h", "g1"); toolCall(w, "h", "g1"); helperTool(w, "h", "g1", "PostToolUse"); toolResult(w, "h", "g1"); await refresh(w);
+  say(w, "h", "found"); helperStop(w, "h"); await refresh(w); await refresh(w);
+  const first = structuredClone(book(w).sessions.h);
+  // Replays of the ended turn: nothing, in this run and after a restart.
+  hook(w, "SubagentStart", { agent_id: "h", agent_type: "Explore" }); helperTool(w, "h", "g1"); helperTool(w, "h", "g1", "PostToolUse"); helperStop(w, "h"); await refresh(w); await refresh(w);
+  assert.equal(chain(w, "h").length, 1);
+  const w2 = boot(repo, "tt-n5"); hook(w2, "Notification", {}); await refresh(w2); await refresh(w2);
+  helperTool(w2, "h", "g1"); helperTool(w2, "h", "g1", "PostToolUse"); await refresh(w2);
+  assert.equal(chain(w2, "h").length, 1);
+  // A fresh tool call while the transcript still ends at the old terminal record: recorded now, by that call.
+  helperTool(w2, "h", "g2"); await refresh(w2);
+  assert.deepEqual(chain(w2, "h").map((s) => [s.id, s.phase, s.continuation?.via ?? null, s.continuation?.evidence ?? null]), [["h", "ended", null, null], ["h#2", "live", "tool", "g2"]]);
+  helperTool(w2, "h", "g2"); helperTool(w2, "h", "g2", "PostToolUse"); await refresh(w2); await refresh(w2);
+  assert.equal(chain(w2, "h").length, 2, "its replay and quiet polls add nothing, and it stays live while its bytes are late");
+  assert.equal(chain(w2, "h")[1].phase, "live");
+  prompt(w2, "h", "again"); toolCall(w2, "h", "g2"); await refresh(w2);
+  assert.deepEqual(chain(w2, "h").map((s) => s.phase), ["ended", "live"], "its own bytes arriving are the same occurrence");
+  toolResult(w2, "h", "g2"); say(w2, "h", "found again"); helperStop(w2, "h"); await refresh(w2); await refresh(w2);
+  assert.deepEqual(chain(w2, "h").map((s) => s.phase), ["ended", "ended"]);
+  // A whole resumed turn between two polls: one ended occurrence, keyed by its terminal record.
+  hook(w2, "SubagentStart", { agent_id: "h", agent_type: "Explore" }); prompt(w2, "h", "third"); say(w2, "h", "third answer"); helperStop(w2, "h"); await refresh(w2); await refresh(w2);
+  assert.deepEqual(chain(w2, "h").map((s) => [s.id, s.phase, s.continuation?.via ?? null, String(s.continuation?.evidence ?? "").startsWith("terminal:")]), [["h", "ended", null, false], ["h#2", "ended", "tool", false], ["h#3", "ended", "transcript", true]]);
+  assert.deepEqual(book(w2).sessions.h, first); assert.deepEqual(liveOn(w2, "whisk"), []);
+  const settled = structuredClone(book(w2).sessions);
+  const w3 = boot(repo, "tt-n5"); hook(w3, "Notification", {}); await refresh(w3); helperStop(w3, "h"); await refresh(w3);
+  assert.deepEqual(Object.fromEntries(Object.entries(book(w3).sessions).filter(([, s]) => s.kind === "helper")), Object.fromEntries(Object.entries(settled).filter(([, s]) => s.kind === "helper")), "a restart reads the same helper chain back"); sound(w3);
+  // A helper resume still needs a running coordinator that identified itself (M4).
+  w3.hub.setSession(COORDINATOR_ID, { state: "stopped" }); await refresh(w3); w3.hub.setSession(COORDINATOR_ID, { state: "running" });
+  helperTool(w3, "h", "g9"); prompt(w3, "h", "fourth"); await refresh(w3); await refresh(w3);
+  assert.equal(chain(w3, "h").length, 3, "an unidentified coordinator revives no helper");
+});
+
 await test("restart recovery: the chain, the robots and the outcomes are read back; nothing is duplicated or relaunched", async () => {
   const repo = makeRepo("repo-restart");
   const w = boot(repo, "tt-restart");

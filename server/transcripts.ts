@@ -174,6 +174,8 @@ export interface SubagentRecord {
   revision: string;
   transcriptEnded: boolean;
   terminalRevision: string | null;
+  /** Prompt records in the file: one per turn (`subagentTurnStarts`). */
+  starts: number;
 }
 
 /** Identity of the latest terminal record, stable across appended bookkeeping and file timestamp changes.
@@ -188,11 +190,7 @@ export function subagentTerminalRevision(file: string): string | null {
       end -= Buffer.byteLength(line) + 1;
       let r: Record<string, any>;
       try { r = JSON.parse(line); } catch { continue; }
-      if (r.type === "api-request") return null;
-      if (r.type === "user") {
-        const c = r.message?.content;
-        if (typeof c === "string" || (Array.isArray(c) && c.some((p: any) => p.type !== "tool_result"))) return null;
-      }
+      if (r.type === "api-request" || isPrompt(r)) return null;
       if (r.type !== "assistant") continue;
       const ended = r.message?.stop_reason === "end_turn" || r.isApiErrorMessage === true ||
         (Array.isArray(r.message?.content) && r.message.content.some((p: any) => p.type === "tool_use" && p.name === "SubagentHandback"));
@@ -200,6 +198,47 @@ export function subagentTerminalRevision(file: string): string | null {
     }
   } catch { /* unreadable evidence cannot establish an ending */ }
   return null;
+}
+
+/** A prompt record: the reader's one definition of where a turn starts, used by the terminal reader too. */
+function isPrompt(r: Record<string, any>): boolean {
+  if (r.type !== "user") return false;
+  const c = r.message?.content;
+  return typeof c === "string" || (Array.isArray(c) && c.some((p: any) => p.type !== "tool_result"));
+}
+
+/** Per file: how far it was counted, and the bytes just before that point (a rewritten file is counted again). */
+const turnScans = new Map<string, { offset: number; starts: number; guard: string }>();
+
+/**
+ * How many turns a subagent's transcript holds: its prompt records, in complete lines only. A turn's own
+ * late bytes never add one; a later prompt does. Transcripts are appended to, so only new bytes are read.
+ * 0 for a file that can't be read.
+ */
+export function subagentTurnStarts(file: string): number {
+  let fd: number;
+  try { fd = openSync(file, "r"); } catch { return 0; }
+  try {
+    const size = fstatSync(fd).size;
+    const read = (from: number, to: number) => {
+      const buf = Buffer.alloc(Math.max(0, to - from));
+      return buf.subarray(0, readSync(fd, buf, 0, buf.length, from));
+    };
+    const guard = (offset: number) => read(Math.max(0, offset - 64), offset).toString("base64");
+    let scan = turnScans.get(file);
+    if (scan && (size < scan.offset || guard(scan.offset) !== scan.guard)) scan = undefined;
+    const from = scan?.offset ?? 0;
+    const buf = read(from, size);
+    const complete = buf.lastIndexOf(0x0a) + 1;
+    let starts = scan?.starts ?? 0;
+    for (const r of lines(buf.subarray(0, complete).toString("utf8"))) if (isPrompt(r)) starts++;
+    turnScans.set(file, { offset: from + complete, starts, guard: guard(from + complete) });
+    return starts;
+  } catch {
+    return 0;
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /** Explicit completion in the latest turn, even when no Stop hook or finished metadata was written. */
@@ -300,7 +339,7 @@ export function subagents(sessionFile: string): SubagentRecord[] {
       agentId, file, prompt: firstPrompt(file), finished: meta?.finished ?? false, startedAt: firstTimestamp(file),
       description: meta?.description ?? "", agentType: meta?.agentType ?? "", toolUseId: meta?.toolUseId ?? null, parentAgentId: meta?.parentAgentId ?? null,
       metaUpdatedAt: meta ? mtime(join(dir, `agent-${agentId}.meta.json`)) : 0,
-      revision: transcriptRevision(file), transcriptEnded: terminalRevision !== null, terminalRevision,
+      revision: transcriptRevision(file), transcriptEnded: terminalRevision !== null, terminalRevision, starts: subagentTurnStarts(file),
     });
   }
   return out.sort((a, b) => a.startedAt.localeCompare(b.startedAt));

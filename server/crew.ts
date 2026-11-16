@@ -12,7 +12,21 @@ import {
 import { crewSnapshot } from "../src/data/crewSnapshot";
 import type { SessionEnd } from "../src/data/types";
 
-export type EndingEvidence = SessionEnd & { key?: string; session?: string; occurrence?: string; consumed?: string; terminalBoundary?: { revision: string | null; pending: boolean } };
+export type EndingEvidence = SessionEnd & { key?: string; session?: string; occurrence?: string; consumed?: string; terminalBoundary?: TerminalBoundary };
+/**
+ * Where a worker's ended turn stood in its transcript when the ending was recorded. Written once with the
+ * ending, never rewritten. `starts` and `tools` are absent in books written before they were kept.
+ */
+export interface TerminalBoundary {
+  /** The terminal record visible in the transcript at that moment (an earlier turn's while `pending`). */
+  revision: string | null;
+  /** This turn's own terminal record was not on disk yet. */
+  pending: boolean;
+  /** Prompt records the transcript holds once this turn's own bytes are all on disk: a later one is a later turn. */
+  starts?: number;
+  /** Tool calls of this turn seen through hooks whose records were not on disk yet: a replay of one is not a resume. */
+  tools?: string[];
+}
 const record = (v: unknown): v is Record<string, any> => !!v && typeof v === "object" && !Array.isArray(v);
 const nullableString = (v: unknown) => v === null || typeof v === "string";
 
@@ -35,7 +49,10 @@ function endingProblem(value: unknown, legacy = false): string | null {
   if (value.verdict !== undefined && value.verdict !== null && !["DONE", "PASS", "FINDINGS", "GATE", "FAILED"].includes(value.verdict)) return "verdict is invalid";
   for (const field of ["key", "session", "occurrence", "consumed"])
     if (value[field] !== undefined && typeof value[field] !== "string") return `${field} must be a string when present`;
-  if (value.terminalBoundary !== undefined && (!record(value.terminalBoundary) || !nullableString(value.terminalBoundary.revision) || typeof value.terminalBoundary.pending !== "boolean")) return "terminalBoundary is invalid";
+  const b = value.terminalBoundary;
+  if (b !== undefined && (!record(b) || !nullableString(b.revision) || typeof b.pending !== "boolean" ||
+    (b.starts !== undefined && !(Number.isInteger(b.starts) && b.starts >= 0)) ||
+    (b.tools !== undefined && !(Array.isArray(b.tools) && b.tools.every((id: unknown) => typeof id === "string"))))) return "terminalBoundary is invalid";
   return null;
 }
 
@@ -175,6 +192,11 @@ export class CrewRegistry {
   /** The newest recorded ending of a conversation, whichever occurrence it belongs to. */
   lastEnding(conversation: string): EndingEvidence | null {
     return conversationOccurrences(this.book, conversation).reverse().find((s) => s.end)?.end ?? null;
+  }
+
+  /** Every recorded ending of a conversation, oldest first. */
+  endings(conversation: string): EndingEvidence[] {
+    return conversationOccurrences(this.book, conversation).flatMap((s) => (s.end ? [s.end as EndingEvidence] : []));
   }
 
   end(id: string, ending: EndingEvidence | null, now = new Date().toISOString()) {
