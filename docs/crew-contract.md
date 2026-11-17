@@ -305,6 +305,17 @@ What this does not guarantee:
 - A helper has no ending evidence in the book, so its tool-call memory lasts one kitchen run. After
   a restart, a replayed hook for a helper tool call whose record never reached disk is read as a
   resume. A replay of a tool call that already opened a recorded continuation is not.
+- Known limit F4-1 (accepted by the human, 2026-11-17, at `ed25e37`; follow-up ticket 09.9). Helpers
+  have no counterpart to the worker's own-bytes-on-disk check, and their tool-call freshness is
+  checked against the transcript file. After a helper turn that ended with no terminal record
+  (a stop hook mid-tool-call, or a `meta.json` `finished` flag):
+  - a resume opened by a fresh tool hook that then writes its whole turn, with no `SubagentStop`,
+    stays live and holds its robot. A newer `finished` flag, a kitchen restart, or losing the
+    coordinator releases it;
+  - a resume whose `PreToolUse` hook is handled after its `tool_use` record is already on disk is
+    not recorded at all, although it made tool calls.
+
+  Workers are not affected.
 - Hooks carry no process identity. A hook from an old coordinator process that is handled while a
   newer process is already running is taken as the running one's.
 - A replayed `SubagentStop` has no identity either. It ends whichever turn of that subagent is
