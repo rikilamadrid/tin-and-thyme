@@ -6,6 +6,7 @@ import { agentWrite } from "./lib/agentFs";
 import type { AgentCli, AgentConfig, HqConfig } from "../src/data/types";
 import { adoptRoleFile, excludeFromGit, HOOK_SCRIPT, type RoleExtras, hookCommand, hookScriptFor, hqUrl, MCP_CONFIG, roleMd, writeClaudeFiles, writeHookScript } from "./agentFiles";
 import { run } from "./lib/exec";
+import { isPrompter, PROMPTER_DISALLOWED_TOOLS } from "../src/data/prompter";
 
 export interface Launch {
   sbxAgent: string; // agent name for `sbx run`
@@ -31,7 +32,9 @@ const claude: CliAdapter = {
     const model = !m || /^default$/i.test(m) ? null : /^(opus|sonnet|haiku)$/i.test(m) ? m.toLowerCase() : m;
     // Relative to the agent's folder, where it starts. An absolute path would be the host's, and on
     // Windows the folder has a different path inside the sandbox (C:\x on the host, /c/x in the sandbox).
-    return { sbxAgent: "claude", args: ["--mcp-config", MCP_CONFIG, ...(model ? ["--model", model] : [])] };
+    // The Master Prompter reads and advises: Claude Code refuses it every editing tool.
+    const readOnly = isPrompter(agent) ? ["--disallowedTools", PROMPTER_DISALLOWED_TOOLS.join(",")] : [];
+    return { sbxAgent: "claude", args: ["--mcp-config", MCP_CONFIG, ...(model ? ["--model", model] : []), ...readOnly] };
   },
 };
 

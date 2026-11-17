@@ -33,6 +33,7 @@ import { Sessions } from "./sessions";
 import { runSetupChecks } from "./setup";
 import { loadConfig, loadPlan } from "./store";
 import { COORDINATOR_ID, detectPathfinder, PathfinderRun } from "./pathfinder";
+import { PROMPTER_ID } from "../src/data/prompter";
 import { attachDelivery } from "./delivery/preview";
 import { unavailableBoard, unavailableRpc } from "./delivery/service";
 import { adoptLegacyState, APP, canonicalRoot, claimStateDir, clearRecord, kitchenKey, writeRecord } from "./kitchen";
@@ -126,9 +127,12 @@ async function main() {
     sessions.external = (id) => r.isExternal(id);
     sessions.holdsAsking = (id) => r.isAsking(id);
     const native = { ...commands };
-    commands.startAgent = (id) => (id === COORDINATOR_ID ? r.startCoordinator() : undefined);
-    commands.stopAgent = (id) => (id === COORDINATOR_ID ? native.stopAgent(id) : undefined);
+    commands.startAgent = (id) => (id === COORDINATOR_ID ? r.startCoordinator() : id === PROMPTER_ID ? r.prompter.start() : undefined);
+    commands.stopAgent = (id) => (id === COORDINATOR_ID || id === PROMPTER_ID ? native.stopAgent(id) : undefined);
     commands.assignTask = () => hub.activity("config", null, "Pathfinder owns assignment: start the orchestration instead");
+    // The Master Prompter (Feature 04): kept in the crew book, launched by the kitchen, never dispatched.
+    commands.addPrompter = () => r.prompter.add();
+    commands.removeAgent = (id, opts) => (id === PROMPTER_ID ? r.prompter.remove() : native.removeAgent(id, opts));
     commands.setContextAlert = (pct) => r.setContextAlert(Number(pct));
     commands.ackContextAlert = (id) => typeof id === "string" && r.ackContextAlert(id);
     commands.customizeCrew = (id, change) => r.customizeCrew(id, change);

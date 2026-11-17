@@ -104,6 +104,11 @@ export interface OfficeDataSource {
   runSetupFix(id: SetupCheckId): void;
 
   addAgent(input: NewAgentInput): void;
+  /**
+   * Settings → Team → "Add the Master Prompter" (Feature 04). At most one per kitchen: the server refuses
+   * a second one and says so in the activity feed. Removed like any agent (removeAgent).
+   */
+  addPrompter(): void;
   updateAgent(id: string, patch: AgentPatch): void;
   /** Stops the agent and removes it from the team; optionally deletes its sandbox and HQ-made folder. Ignored for the lead. */
   removeAgent(id: string, opts?: RemoveAgentOptions): void;

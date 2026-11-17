@@ -67,8 +67,10 @@ const tests: [string, () => void][] = [
   }],
   ["existing character ids stay valid in their old families", () => {
     const legacy: CharacterId[] = ["basil", "pepper", "roux", "ember", "sprig", "crumb", "mochi", "dash", "pinch", "unit"];
-    same("legacy ids", Object.keys(CHARACTERS).sort(), [...legacy].sort());
+    // 04.1 adds one base character, the alien Master Prompter, in its own family; the ten old ids are unchanged.
+    same("legacy ids", Object.keys(CHARACTERS).sort(), [...legacy, "alien"].sort());
     same("families", legacy.map((id) => CHARACTER_FAMILY[id]), ["orchestrator", "developer", "developer", "developer", "developer", "developer", "developer", "tester", "adversary", "unknown"]);
+    same("the alien is the prompter family's only character", [CHARACTER_FAMILY.alien, [...FAMILY_POOLS.prompter]], ["prompter", ["alien"]]);
   }],
   ["every parallel family has >= 3 distinct characters", () => {
     for (const f of PARALLEL_FAMILIES) if (FAMILY_POOLS[f].length < 3) throw new Error(`${f}: ${FAMILY_POOLS[f].length}`);

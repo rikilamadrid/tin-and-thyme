@@ -84,6 +84,18 @@ const BASE: Record<CharacterId, RobotDef> = {
     ["b", 4, 21, 3, 5, C.dark, { r: 1 }], ["b", 11, 21, 3, 5, C.dark, { r: 1 }], ["b", 0, 12, 3, 6, C.steel, { r: 1 }], ["b", 15, 12, 3, 6, C.steel, { r: 1 }],
     ["b", 3, 11, 12, 11, "#9aa6ba", { r: 2 }], ["b", 4, 3, 10, 8, "#b3bdcc", { r: 2 }],
   ], details: [[8, 0, 2, 3, C.steel], [8, -1, 2, 1, C.cyan], [5, 5, 8, 3, C.screen], [6, 6, 2, 1, C.cyan], [10, 6, 2, 1, C.cyan], [5, 14, 8, 5, "#6f7c94"], [6, 15, 6, 1, "#c9d3e0"], [6, 17, 4, 1, "#c9d3e0"]] },
+  // The Master Prompter (Feature 04): a visiting alien, visibly not a robot. A soft domed head with three
+  // eyes, two antennae, a little robe with a gold collar, floating on a hover disc instead of feet.
+  alien: { w: 22, h: 24, parts: [
+    ["e", 11, 22.5, 8, 1.8, C.steel], ["e", 11, 22, 5, 0.9, C.dark, { noShade: true }],
+    ["b", 6, 0, 1, 4, "#3f9a5a", { noShade: true }], ["b", 15, 0, 1, 4, "#3f9a5a", { noShade: true }],
+    ["e", 6.5, -0.5, 1.6, 1.6, C.gold], ["e", 15.5, -0.5, 1.6, 1.6, C.gold],
+    ["b", 2, 14, 3, 5, "#7fe08a", { r: 1 }], ["b", 17, 14, 3, 5, "#7fe08a", { r: 1 }],
+    ["b", 5, 13, 12, 8, C.purple, { r: 2 }],
+    ["e", 11, 8, 8, 6, "#7fe08a"],
+    ["b", 7, 13, 8, 2, C.gold, { noShade: true }],
+  ], details: [[9, 11, 4, 1, "#2f8a55"], [10, 16, 2, 2, C.cyan], [5, 19, 12, 1, "#5d3f9a"], [6, 22, 1, 1, C.cyan], [11, 22, 1, 1, C.cyan], [15, 22, 1, 1, C.cyan], [4, 9, 2, 1, "#b8f5c0"], [16, 9, 2, 1, "#b8f5c0"]],
+    eyes: [[6.6, 8, 2, 1, "#ffffff"], [11, 5.4, 2.3, 1.2, "#ffffff"], [15.4, 8, 2, 1, "#ffffff"]] },
 };
 
 // ---------------------------------------------------------------- Variants (Feature 09)
@@ -280,6 +292,8 @@ export const ACCENT_PARTS: Record<CharacterId, { name: string; colour: string; p
   dash: { name: "running lights", colour: C.teal, details: [5, 6] },
   pinch: { name: "belly band", colour: "#b8452f", details: [7] },
   unit: { name: "chest panel", colour: "#6f7c94", details: [5] },
+  // Drawn as designed in practice: the prompter always carries `crew`, and agentColor gives no colour then.
+  alien: { name: "robe band", colour: "#5d3f9a", details: [2] },
 };
 
 /**

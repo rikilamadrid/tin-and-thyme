@@ -50,6 +50,8 @@ const DESIGN_DRAWS: Record<CrewCharacterId, [string, string]> = {
   clove: ["f72587dc355b3b65", "ccb30e847bfe157b"],
   bolt: ["c6dc6afa647b3112", "c3eb14607a3e4747"],
   cog: ["b6365482391e0a81", "2212d8c77f56a385"],
+  // Added by 04.1 (the Master Prompter's new design); every entry above is unchanged.
+  alien: ["8052373a935bdd29", "05eab35708699a78"],
 };
 
 const canon = (v: unknown): unknown =>
@@ -84,8 +86,8 @@ const VARIANTS = Object.keys(CREW_VARIANTS) as CrewCharacterId[];
 const PICKS = agentPalette.filter((c) => !RESERVED_ACCENTS.includes(c));
 
 const tests: [string, () => void][] = [
-  ["designs: all 24 characters draw as on main, in both styles, with no colour", () => {
-    same("characters", ALL.length, 24);
+  ["designs: all 25 characters draw as designed (24 as on main, plus 04.1's alien), in both styles, with no colour", () => {
+    same("characters", ALL.length, 25);
     for (const id of ALL) same(id, STYLES.map((k) => hash(drawing(k, id))), DESIGN_DRAWS[id]);
   }],
   ["designs: a null colour and the design's own accent colour draw the design", () => {

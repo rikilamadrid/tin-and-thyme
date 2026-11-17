@@ -11,6 +11,7 @@
 //   cooktop pods × 5                                  │ café: range, coffee, stools
 //   ─────────────── aisle ──────────────────────────────────────────────────────────
 //   subagent stations × 4          reviewer [scanner] reviewer        floor spot
+//   [table] alien (Master Prompter)
 //   ═══════════════════════════ belt ═══════════════════════════════▶ [MAIN hatch]
 
 import type { CrewCharacterId } from "../data/crewContract";
@@ -71,7 +72,7 @@ const POD_W = 48;
 /** Distance between pod left edges (POD_W plus the gap between neighbouring pods). */
 const POD_PITCH = 58;
 const PODS_X = [0, 1, 2, 3, 4].map((i) => 40 + i * POD_PITCH);
-const BELT = { y: BELT_Y, x0: 34, x1: 488 };
+export const BELT = { y: BELT_Y, x0: 34, x1: 488 };
 /** MAIN sits at the end of the belt and reaches down to the floor's bottom edge. */
 const HATCH = { x: 486, y: BELT_Y - 38, w: 42, h: FLOOR_BOTTOM - (BELT_Y - 38) };
 const BOARD = { x: 40, y: 64, w: 136, h: 124 };
@@ -79,7 +80,7 @@ const OFFICE = { x: 186, y: 34, w: 144, h: 162, cx: 258 };
 const LOUNGE = { x: 384, y: 66, w: 140, h: TOP_BAND_END - 66 };
 /** The café opens onto the upper aisle and runs down beside the prep line. */
 const CAFE = { x: 352, y: AISLE_Y, w: 176, h: 116 + GAP.line };
-const SUBS = { x: 40, y: SUBS_Y, w: 272, h: 72 };
+export const SUBS = { x: 40, y: SUBS_Y, w: 272, h: 72 };
 const SUB_X = [72, 138, 204, 270];
 /** The review scanner: a compact hood over the belt. */
 const SCAN = { cx: 395, w: 30 };
@@ -244,7 +245,19 @@ export const SPOTS = {
    * right that it never stands on a robot at the floor hangout under the pod.
    */
   tubeQueue: { x: TUBE.cx + 36, y: TOP_BAND_END + 22 },
+  /**
+   * The Master Prompter (Feature 04): the alien at its table, in the open floor between the subagent
+   * stations and the belt, at the left. Its badge and name plate stand beside it (PROMPTER_TAGS_X), so
+   * nothing rises into the stations above or reaches down to the belt.
+   */
+  prompter: { x: 92, y: BELT_Y - 8 },
 };
+
+/** The prompter's round table, left of where it floats. */
+export const PROMPTER_TABLE = { cx: 60, y: BELT_Y - 8 };
+/** Where the prompter's badge and name plate start (left edge), right of the alien; never past PROMPTER_TAGS_MAX. */
+export const PROMPTER_TAGS_X = 110;
+export const PROMPTER_TAGS_MAX = 300;
 
 export type HangoutKind = "couch" | "stool" | "floor";
 
@@ -849,6 +862,70 @@ function cafe(B: Backend, m: GalleyModel, f: FrameState, P: boolean, hits: Hit[]
   for (const { c, a, index } of parkedAt(m, f, ["stool"])) seatedCrew(B, m, f, P, hits, c, a, false, index === 3 ? 18 : 0);
 }
 
+/** The prompter's name, shortened with an ellipsis until its plate fits beside it. */
+function fitName(B: Backend, name: string, max: number): string {
+  if (B.tw(name, 6.8, 800) <= max) return name;
+  let n = name;
+  while (n.length > 1 && B.tw(`${n}…`, 6.8, 800) > max) n = n.slice(0, -1);
+  return `${n.trimEnd()}…`;
+}
+
+/** The state mark and words the prompter's badge shows (it has no ticket): shape, not colour, carries the meaning. */
+export function prompterBadge(c: CrewMember): { kind: IconKind; words: string; alert: boolean } {
+  if (!c.running) return { kind: "off", words: "not running", alert: false };
+  if (c.state === "needs") return { kind: "needs", words: "needs you", alert: true };
+  if (c.state === "work") return { kind: "work", words: "prompting", alert: false };
+  return { kind: "idle", words: "ready", alert: false };
+}
+
+/**
+ * The Master Prompter's corner (Feature 04): a small round table with a crystal ball and a stack of prompt
+ * cards, and the alien floating beside it. Drawn only while the team has a prompter. Its working cue (the
+ * ball's light stepping round, a card lifting) follows observed state only (isWorking) and is one still
+ * pose under reduced motion. The badge and the plate stand to its right, left-aligned.
+ */
+function prompterStation(B: Backend, m: GalleyModel, f: FrameState, P: boolean, hits: Hit[]) {
+  const c = m.prompter;
+  if (!c) return;
+  const { cx, y } = PROMPTER_TABLE;
+  const beat = cueBeat(c, f.now, f.reduce);
+  // the table: a round top on a pedestal
+  B.ell(cx, y + 1, 9, 1.6, "#0b1022");
+  B.rect(cx - 1.5, y - 12, 3, 12, "#55607e");
+  B.ell(cx, y - 13, 14, 3.6, "#6a4a8a", { ink: true, shade: true });
+  B.ell(cx, y - 13.6, 11, 2.2, "#7d58c2");
+  // the stack of prompt cards: the top one lifts a little while it works
+  B.box(cx + 4, y - 18, 8, 5, "#f6eedd", { ink: !P, r: 1 });
+  B.box(cx + 5, y - 20 - (beat >= 0 && beat % 3 === 1 ? 1 : 0), 8, 5, "#fffaf0", { ink: !P, r: 1 });
+  B.rect(cx + 6, y - 18 - (beat >= 0 && beat % 3 === 1 ? 1 : 0), 5, 1, "#8a6a2a");
+  // the crystal ball on its stand, lit while the session runs
+  B.rect(cx - 9, y - 16, 8, 2, C.gold);
+  if (c.running) B.glow(cx - 5, y - 21, 12, "#9b7be0", P ? 0.22 : 0.15);
+  B.ell(cx - 5, y - 21, 5, 5, c.running ? "#3a2f6e" : "#2a2f3d", { ink: true, shade: true, hi: true });
+  if (beat >= 0) {
+    const k = beat % 6;
+    B.rect(cx - 7 + (k % 3) * 2, y - 23 + Math.floor(k / 3) * 2, 2, 2, "#bff8f2", 0.9);
+  } else if (c.running) B.rect(cx - 6, y - 22, 2, 2, "#9b7be0", 0.8);
+  // the alien itself, when it is floating at its spot (walking or beaming, others draw it)
+  const a = f.actors.get(c.id);
+  const here = !!a && !a.moving && !inBeam(a, f.now) && Math.abs(a.x - SPOTS.prompter.x) < 1 && Math.abs(a.y - SPOTS.prompter.y) < 1;
+  const sub = `${c.role} · ${c.status} · never takes a ticket`;
+  if (a && here) {
+    const box = crewBot(B, c, a.x, a.y, a.alpha);
+    if (f.selected === c.id) brackets(B, box);
+    hits.push(agentHit(box, c, sub));
+  }
+  // its state and its name, beside it
+  const name = fitName(B, c.name, PROMPTER_TAGS_MAX - PROMPTER_TAGS_X - 8);
+  const pw = Math.max(B.tw(name, 6.8, 800), B.tw(c.job, 5.2, 700)) + 8;
+  const plate = nameplate(B, PROMPTER_TAGS_X + pw / 2, y - 16, name, c.job, P, f.selected === c.id, c.color);
+  hits.push({ ...plate, kind: "agent", id: c.id, title: `${c.name} · ${c.job}`, sub });
+  const st = prompterBadge(c);
+  const bw = Math.round(10 + B.tw(st.words, 5.2, 800) + 4);
+  const b = badge(B, PROMPTER_TAGS_X + bw / 2, y - 31, st.kind, null, st.words, { alert: st.alert });
+  hits.push({ ...b, kind: st.alert ? "needs" : "agent", id: c.id, title: st.alert ? `${c.name} needs you` : `${c.name} · ${c.job}`, sub: st.alert ? c.agent.note ?? "Answer the Master Prompter in its terminal" : sub });
+}
+
 /** Off-shift crew stopped at a clear floor spot: robot plus a small tag at its feet. */
 function floorCrew(B: Backend, m: GalleyModel, f: FrameState, P: boolean, hits: Hit[]) {
   for (const { c, a } of parkedAt(m, f, ["floor"])) {
@@ -1310,6 +1387,7 @@ export function drawGalley(B: Backend, m: GalleyModel, f: FrameState): Hit[] {
   line(B, m, f, P, hits);
   transporter(B, m, f, P, hits);
   subagents(B, m, f, P, hits);
+  prompterStation(B, m, f, P, hits);
   scanner(B, m, f, P, hits);
   floorCrew(B, m, f, P, hits);
   headChef(B, m, f, P, hits);
@@ -1344,6 +1422,7 @@ export function route(a: { x: number; y: number }, t: { x: number; y: number }):
 /** Where a crew member belongs right now. Off-shift crew go to their hangout (see HANGOUTS), or out of view. */
 export function targetFor(m: GalleyModel, c: CrewMember, spotOf: Map<string, number>): { x: number; y: number; seated: boolean } {
   if (c.place === "island") return { ...SPOTS.island, seated: false };
+  if (c.place === "prompter") return { ...SPOTS.prompter, seated: false };
   if (c.place === "gone") return { ...SPOTS.tube, seated: false };
   if (c.place === "pod") {
     const i = m.pods.findIndex((p) => p.kind === "cook" && p.member.id === c.id);

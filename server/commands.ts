@@ -15,6 +15,9 @@ import type { SbxMcp } from "./sbxMcp";
 import type { Sessions } from "./sessions";
 import { newAgent } from "./store";
 import { mergeByNotice } from "./githubSync";
+import { CHARACTERS } from "../src/data/crew";
+import { FAMILY_COLOR } from "../src/data/crewContract";
+import { isPrompter, PROMPTER_ID, PROMPTER_NO_TASKS, PROMPTER_ROLE_MD, PROMPTER_TITLE, prompterAddProblem, prompterCrew } from "../src/data/prompter";
 
 /** A stack from the browser, checked against the catalog. Null when nothing is chosen. */
 function cleanStack(raw: unknown): StackConfig | null {
@@ -77,7 +80,11 @@ export function makeCommands(hub: Hub, sessions: Sessions, planner: Planner, inb
     runSetupFix: (id) => sessions.runFix(str(id, 40) as SetupCheckId),
 
     // You → agent: same delivery path as the lead's assign_task / send_message.
-    assignTask: (taskId, agentId) => planner.assign(str(taskId, 40), str(agentId, 80), "you"),
+    assignTask: (taskId, agentId) => {
+      // The Master Prompter never takes ticket work: say so instead of failing silently.
+      if (isPrompter(hub.cfg(str(agentId, 80)))) return hub.activity("config", null, PROMPTER_NO_TASKS);
+      return planner.assign(str(taskId, 40), str(agentId, 80), "you");
+    },
     sendMessage: (toId, text) => planner.message("you", str(toId, 80), str(text, 2000)),
 
     addAgent: (raw) => {
@@ -100,6 +107,37 @@ export function makeCommands(hub: Hub, sessions: Sessions, planner: Planner, inb
       hub.emit({ type: "agent.updated", agent: structuredClone(status) });
       hub.activity("config", null, `Added ${agent.name} (${agent.role}). Press Start to launch their session.`);
       if (agent.cli === "codex") void sessions.recheckSetup();
+    },
+
+    /**
+     * Settings → Team → "Add the Master Prompter" (Feature 04). At most one per kitchen: a second add is
+     * refused (returned, and said in the activity feed). It runs where the lead runs, reads the project and
+     * never takes tasks; Start launches it like any agent. Returns the refusal, or null once it is added.
+     */
+    addPrompter: (raw) => {
+      const refused = prompterAddProblem(team());
+      if (refused) {
+        hub.activity("config", null, refused);
+        return refused;
+      }
+      const input = (raw ?? {}) as Partial<NewAgentInput>;
+      let id = PROMPTER_ID;
+      for (let i = 2; team().some((a) => a.id === id); i++) id = `${PROMPTER_ID}-${i}`;
+      const lead = team().find((a) => a.isLead);
+      const agent = newAgent(id, CHARACTERS.alien.name, PROMPTER_TITLE, FAMILY_COLOR.prompter, false);
+      agent.crew = prompterCrew();
+      agent.roleMd = PROMPTER_ROLE_MD;
+      agent.cli = "claude";
+      agent.model = str(input.model, 60).trim();
+      agent.mode = input.mode === "local" || input.mode === "sandbox" ? input.mode : (lead?.mode ?? "sandbox");
+      if (lead) agent.sandbox = structuredClone(lead.sandbox);
+      team().push(agent);
+      const status = Hub.freshStatus(id);
+      hub.snap.agents.push(status);
+      hub.configChanged();
+      hub.emit({ type: "agent.updated", agent: structuredClone(status) });
+      hub.activity("config", null, `Added ${agent.name}, the ${PROMPTER_TITLE}. Press Start to launch their session.`);
+      return null;
     },
 
     updateAgent: (id, patch) => {

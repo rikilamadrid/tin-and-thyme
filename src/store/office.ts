@@ -195,6 +195,7 @@ export const officeActions = {
   assignTask: (taskId: string, agentId: string) => source.assignTask(taskId, agentId),
   sendMessage: (toId: string, text: string) => source.sendMessage(toId, text),
   addAgent: source.addAgent.bind(source),
+  addPrompter: () => source.addPrompter(),
   updateAgent: source.updateAgent.bind(source),
   removeAgent: (id: string, opts?: RemoveAgentOptions) => source.removeAgent(id, opts),
   inspectWorkspace: (id: string) => source.inspectWorkspace(id),

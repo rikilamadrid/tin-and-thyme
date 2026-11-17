@@ -7,6 +7,7 @@
 //   running session  → beamed in through the transporter: at a prep pod, the pass, or the island
 //   finished session → beamed out: off the floor and the roster, kept in its ticket's history
 //   ticket card      → one per ticket in flight; it outlives each session and says what it waits for
+//   Master Prompter  → the alien at its own table (Feature 04), running or not; it never takes a ticket
 //
 // A worktree or claim alone never puts a robot to work: only an observed session start does.
 // Empty stations stay empty: a ticket is only "ready for next round" when the coordinator's plan says so.
@@ -17,11 +18,15 @@ import type { AgentConfig, AgentStatus, OfficeSnapshot, SessionEnd, SessionTelem
 import { usableAccent, type IconKind } from "./robots";
 import { selectAttention } from "../store/office";
 import { ticketView } from "../data/ticketStage";
+import { isPrompter } from "../data/prompter";
 
 /** `wait`: the coordinator's turn ended while workers it dispatched run (not asking you). */
 export type CrewState = "needs" | "work" | "review" | "wait" | "idle" | "off";
-/** "gone" = a finished workflow session: it has beamed out and lives only in its ticket's history. */
-export type Place = "island" | "pod" | "pass" | "lounge" | "gone";
+/**
+ * "gone" = a finished workflow session: it has beamed out and lives only in its ticket's history.
+ * "prompter" = the Master Prompter at its own table: it stays there whether its session runs or not.
+ */
+export type Place = "island" | "pod" | "pass" | "lounge" | "gone" | "prompter";
 
 export interface CrewMember {
   id: string;
@@ -100,6 +105,8 @@ export interface GalleyModel {
   pods: Pod[];
   podOverflow: number;
   coordinator: CrewMember | null;
+  /** The Master Prompter (Feature 04), when the team has one. */
+  prompter: CrewMember | null;
   reviewers: CrewMember[];
   lounge: CrewMember[];
   /** Tickets waiting on a human decision (workflow gates). */
@@ -196,7 +203,12 @@ export function buildGalley(snap: OfficeSnapshot, podOf?: Map<string, number>): 
     let state: CrewState;
     let status: string;
     let place: Place;
-    if (isLead) {
+    if (isPrompter(config) && !isLead) {
+      // Its own table, in every state: a session ending never sends it away (only removal does).
+      place = "prompter";
+      state = !running ? "off" : agent.state === "needs-input" ? "needs" : agent.state === "working" ? "work" : "idle";
+      status = !running ? "not running" : state === "needs" ? "Needs you" : state === "work" ? "writing a prompt" : "ready to help";
+    } else if (isLead) {
       place = "island";
       state = !running ? "off" : agent.state === "needs-input" ? "needs" : agent.state === "working" ? "work" : agent.state === "waiting" ? "wait" : "idle";
       status = !running ? "not running" : state === "needs" ? "Needs you" : state === "work" ? "running the pass" : state === "wait" ? "waiting on workers" : "on watch";
@@ -369,6 +381,7 @@ export function buildGalley(snap: OfficeSnapshot, podOf?: Map<string, number>): 
     pods,
     podOverflow: Math.max(0, cooks.length - placed.size),
     coordinator: crew.find((c) => c.place === "island") ?? null,
+    prompter: crew.find((c) => c.place === "prompter") ?? null,
     reviewers: crew.filter((c) => c.place === "pass"),
     // Oldest break first: the couch seats the most recent finishers (the last two).
     lounge: crew.filter((c) => c.place === "lounge").sort((a, b) => Date.parse(a.agent.stateSince) - Date.parse(b.agent.stateSince)),

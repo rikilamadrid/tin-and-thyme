@@ -11,8 +11,11 @@
 
 import type { VariantCharacterId } from "./crewContract";
 
-/** The base characters, each with its own sprite in src/galley/robots.ts. */
-export type CharacterId = "basil" | "pepper" | "roux" | "ember" | "sprig" | "crumb" | "mochi" | "dash" | "pinch" | "unit";
+/**
+ * The base characters, each with its own sprite in src/galley/robots.ts. `alien` is the one crew
+ * member who is not a robot: the visiting Master Prompter (Feature 04), never given ticket work.
+ */
+export type CharacterId = "basil" | "pepper" | "roux" | "ember" | "sprig" | "crumb" | "mochi" | "dash" | "pinch" | "unit" | "alien";
 
 export interface Character<I extends string = CharacterId> {
   id: I;
@@ -33,6 +36,7 @@ export const CHARACTERS: Record<CharacterId, Character> = {
   dash: { id: "dash", name: "Dash", job: "Expediter", look: "hover drone · one scanner eye" },
   pinch: { id: "pinch", name: "Pinch", job: "Taster", look: "low crab bot · two pincers · tasting spoon" },
   unit: { id: "unit", name: "Crew bot", job: "Crew", look: "neutral box bot" },
+  alien: { id: "alien", name: "Zorbo", job: "Master Prompter", look: "visiting alien · domed head · three eyes · antennae · hover disc" },
 };
 
 /**

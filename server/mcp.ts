@@ -8,6 +8,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import type { Hub } from "./hub";
 import { requestAccess } from "./access";
+import { isPrompter } from "../src/data/prompter";
 import type { Planner } from "./planner";
 
 type Result = { content: { type: "text"; text: string }[]; isError?: boolean };
@@ -47,7 +48,8 @@ function buildServer(hub: Hub, planner: Planner, me: string): McpServer {
           return {
             id: a.id, name: a.name, role: a.role, lead: a.isLead, you: a.id === me,
             running: st?.session.state === "running", state: st?.state, task: st?.currentTaskId ?? null,
-            free: st?.session.state === "running" && !a.isLead && !planner.currentTask(a.id),
+            free: st?.session.state === "running" && !a.isLead && !isPrompter(a) && !planner.currentTask(a.id),
+            ...(isPrompter(a) ? { takesTasks: false } : {}),
           };
         }),
       ),

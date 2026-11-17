@@ -102,7 +102,7 @@ function validBook(v: unknown, kitchen: string): v is CrewBook {
   }
   const seqs = new Set<number>();
   for (const [id, s] of Object.entries(v.sessions)) {
-    if (!record(s) || s.id !== id || !["worker", "helper", "coordinator"].includes(s.kind) || !ROLE_FAMILIES.includes(s.family) ||
+    if (!record(s) || s.id !== id || !["worker", "helper", "coordinator", "prompter"].includes(s.kind) || !ROLE_FAMILIES.includes(s.family) ||
       !["live", "ended"].includes(s.phase) || !Number.isInteger(s.seq) || s.seq < 0 || seqs.has(s.seq) ||
       ![s.hqId, s.role, s.stage, s.ticket, s.title, s.worktree, s.parent, s.startedAt, s.endedAt, s.transcript].every(nullableString) ||
       (s.characterId !== null && !isCrewCharacterId(s.characterId)) || (s.reassignedFrom !== null && !isCrewCharacterId(s.reassignedFrom)) ||

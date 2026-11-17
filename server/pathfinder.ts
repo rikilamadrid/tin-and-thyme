@@ -31,6 +31,7 @@ import type { ActionItem, AgentConfig, AgentStatus, Board, PlanSeen, SessionEnd,
 import { assignCharacter, CREW_CHARACTERS } from "../src/data/crew";
 import { crewName, familyFor, FAMILY_COLOR, isCrewCharacterId, type CrewCharacterId, type CrewContinuation, type CrewObservation, type CrewSession, type CrewTelemetry } from "../src/data/crewContract";
 import { CrewRegistry, type EndingEvidence } from "./crew";
+import { PathfinderPrompter } from "./prompter";
 import { awaitingHuman, findSession, sessionUse, subagentPickedModel, subagents, type SubagentRecord } from "./transcripts";
 import type { Hub } from "./hub";
 import type { Inbox } from "./inbox";
@@ -370,6 +371,12 @@ export class PathfinderRun {
       this.crewProblem = e instanceof Error ? e.message : String(e);
       log.warn("crew book:", this.crewProblem);
     }
+    // The Master Prompter (Feature 04): its own session, recorded in this crew book.
+    this.prompter = new PathfinderPrompter({
+      hub: this.hub, sessions: this.sessions, port: this.port, agentToken: this.agentToken,
+      root: () => this.root, stateDir: () => this.stateDir,
+      crew: () => this.crew, crewProblem: () => this.crewProblem, changed: () => this.crewChanged(),
+    });
     // A session keeps its name after its robot has moved on to a later session and its row is gone.
     this.hub.alias = (id) => {
       const w = [...this.workers.values()].find((x) => x.hqId === id);
@@ -398,6 +405,7 @@ export class PathfinderRun {
   }
 
   readonly handoffs: Handoffs;
+  readonly prompter: PathfinderPrompter;
   /** Context alerts: per worker, whether a crossing may alert (armed), and whether one is showing. */
   private ctxAlert = new Map<string, { armed: boolean; showing: boolean; pct: number }>();
 
@@ -794,12 +802,14 @@ export class PathfinderRun {
     // The coordinator's attention is the state Feature 06 already decided (applyAttention, or a real ask a hook raised).
     if (lead && st) read(lead.id, COORDINATOR_ID, Math.max(this.coordinatorTools, 1), st.state === "needs-input" ? { kind: "needs-you", reason: st.note ?? "needs you" } : st.state === "waiting" ? { kind: "waiting", reason: st.note ?? "waiting" } : null);
     for (const id of this.liveHelpers) crew.observe(id, { session: "running", agent: "working", tools: 1, attention: null, at });
+    this.prompter.observe(crew, at);
   }
 
   /** After any change to the crew book: the roster rows, the observations, the file, then the published snapshot. */
   private crewChanged() {
     const crew = this.crew;
     if (!crew) return;
+    this.prompter.sync(crew);
     this.syncRoster();
     this.observeCrew();
     try {
@@ -835,7 +845,7 @@ export class PathfinderRun {
     if (crew.book.restorePass && decided && (this.transcript || elapsed)) {
       const lead = this.coordinatorSession();
       const running = [...this.workers.values()].filter((w) => w.live || w.livenessUnknown).map((w) => w.occurrence);
-      crew.reconcile([...running, ...this.liveHelpers, ...(lead ? [lead.id] : [])]);
+      crew.reconcile([...running, ...this.liveHelpers, ...(lead ? [lead.id] : []), ...this.prompter.runningIds(crew)]);
     }
     this.crewChanged();
   }

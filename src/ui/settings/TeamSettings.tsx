@@ -10,6 +10,8 @@ import { Field, SectionTitle } from "../kit";
 import { CommitInput } from "./controls";
 import { RemoveAgentDialog } from "./RemoveAgentDialog";
 import { RoleContractPanel } from "../RoleContractPanel";
+import { CHARACTERS } from "../../data/crew";
+import { findPrompter, isPrompter, PROMPTER_TITLE } from "../../data/prompter";
 
 export function CliSelect({ value, onChange }: { value: AgentCli; onChange: (v: AgentCli) => void }) {
   return (
@@ -43,6 +45,7 @@ export function TeamSettings() {
           ))}
         </div>
       </section>
+      <AddPrompter />
       {!pathfinder && <AddAgent />}
       {removing && <RemoveAgentDialog agent={removing} onClose={() => setRemoving(null)} />}
     </div>
@@ -61,6 +64,18 @@ function AgentRow({ agent, expanded, onToggle, onRemove }: { agent: AgentConfig;
     : agentColor(agent)
       ? "Shows on the robot's accent, its name tag and its roster card."
       : "This colour can't be shown (the alert pinks are kept for needs-you), so the robot keeps its own accent. Pick another to change it.";
+  if (pathfinder && isPrompter(agent)) return (
+    <div className="border-[3px] border-line bg-card p-3">
+      <div className="flex items-center gap-3">
+        <RobotPortrait character={character} size={40} />
+        <b className="flex-1">{agent.name} · {PROMPTER_TITLE}</b>
+        <button className="btn px-2 text-[13px] text-[#ff7a9c]" onClick={() => officeActions.removeAgent(agent.id)}>
+          Remove
+        </button>
+      </div>
+      <p className="mt-2 text-[12px] text-muted">Coaches your prompts from the project's context. Never takes a ticket and never edits files. Removing stops its session; its history stays in the crew book.</p>
+    </div>
+  );
   if (pathfinder) return (
     <div className="border-[3px] border-line bg-card p-3">
       <div className="mb-2 flex items-center gap-3"><RobotPortrait character={character} size={40} /><b>{agent.name} · {agent.crew?.role ?? agent.role}</b></div>
@@ -164,6 +179,28 @@ function AgentRow({ agent, expanded, onToggle, onRemove }: { agent: AgentConfig;
         </div>
       )}
     </div>
+  );
+}
+
+/** Feature 04: one visiting alien per kitchen. The server refuses a second; the button says why it is off. */
+function AddPrompter() {
+  const team = useOffice((s) => s.snap?.config.team) ?? [];
+  const has = findPrompter(team);
+  return (
+    <section className="flex items-center gap-3 border-[3px] border-dashed border-line p-3">
+      <RobotPortrait character="alien" size={40} />
+      <div className="flex-1">
+        <SectionTitle>The {PROMPTER_TITLE}</SectionTitle>
+        <p className="text-[12px] text-muted">
+          {has
+            ? `${has.name} is in the kitchen. There is at most one ${PROMPTER_TITLE}.`
+            : `${CHARACTERS.alien.name}, a visiting alien, reads the project's context and helps you write the next prompt: a ready-to-paste prompt plus why. It never takes a ticket and never edits files.`}
+        </p>
+      </div>
+      <button className="btn" disabled={!!has} title={has ? `The kitchen already has its ${PROMPTER_TITLE}` : undefined} onClick={() => officeActions.addPrompter()}>
+        Add the {PROMPTER_TITLE}
+      </button>
+    </section>
   );
 }
 

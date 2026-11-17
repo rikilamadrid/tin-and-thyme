@@ -7,6 +7,7 @@ import { run } from "./lib/exec";
 import { join } from "node:path";
 import { stackRoleMd } from "../src/data/stack";
 import type { AgentConfig, HqConfig } from "../src/data/types";
+import { isPrompter, PROMPTER_TITLE } from "../src/data/prompter";
 
 /** Team MCP config, passed with `claude --mcp-config` (so the project's own .mcp.json is untouched). */
 export const MCP_CONFIG = ".claude/hq-mcp.json";
@@ -124,8 +125,18 @@ export function hqUrl(agent: AgentConfig, port: number): string {
 }
 
 export function roleMd(agent: AgentConfig, cfg: HqConfig, extras: RoleExtras = {}): string {
-  const team = cfg.team.map((a) => `- ${a.name} — ${a.role}${a.isLead ? " (lead)" : ""}${a.id === agent.id ? " ← you" : ""}`).join("\n");
-  const rules = agent.isLead
+  const team = cfg.team
+    .map((a) => `- ${a.name} — ${a.role}${a.isLead ? " (lead)" : ""}${isPrompter(a) ? ` (${PROMPTER_TITLE}: coaches the user's prompts, never takes tasks)` : ""}${a.id === agent.id ? " ← you" : ""}`)
+    .join("\n");
+  const prompter = isPrompter(agent);
+  const rules = prompter
+    ? [
+        "You coach the user's prompts. You never take, claim or work on a task, and the lead never assigns you one.",
+        "Read only the project context each request needs; never load the whole repository.",
+        "Never edit, create or delete files, and never run a command that changes the repository. HQ blocks the edit tools for you.",
+        "Answer each request with a ready-to-paste prompt and a short note on why.",
+      ]
+    : agent.isLead
     ? [
         "You plan the work and assign it to the team. You never write app code.",
         "Keep tasks small: one task = one branch = one PR. Give each task the files it may edit and a clear done-when.",
@@ -134,6 +145,7 @@ export function roleMd(agent: AgentConfig, cfg: HqConfig, extras: RoleExtras = {
           ? "You merge PRs once they pass review (`gh pr merge <number> --squash --delete-branch`), one at a time, in an order that avoids conflicts. HQ tells you when each one passes."
           : "The user merges PRs; never merge one yourself. Decide the order they should land in, and tell the user if one blocks another.",
         "If the user changes who merges, HQ tells you. Follow the latest message.",
+        `Never assign a task to the ${PROMPTER_TITLE}: it coaches the user's prompts and does no ticket work.`,
       ]
     : [
         "Work only on the task you were given. One task = one branch = one PR.",
@@ -143,7 +155,7 @@ export function roleMd(agent: AgentConfig, cfg: HqConfig, extras: RoleExtras = {
         "set_my_status tells the lead automatically. Don't also send_message the same news.",
         "If you are blocked or need a decision, call set_my_status blocked with the reason.",
       ];
-  rules.push(
+  if (!prompter) rules.push(
     "When you need the user to do something outside your sandbox (create an account, database or API key, change a setting in a dashboard, put a value in your env file), call ask_user with a short title and clear steps, then keep working on what you can. Never put secret values in it; name the variable instead. Variables reach you through HQ: ask the user to add NAME to your App variables in HQ (Settings → Sandbox → App variables) and restart you; there is no env file inside your sandbox to edit.",
   );
   // Sandboxes block most sites; the agent asks instead of working around it.
@@ -151,7 +163,9 @@ export function roleMd(agent: AgentConfig, cfg: HqConfig, extras: RoleExtras = {
     rules.push(
       "Your sandbox blocks most websites and APIs. If a request you need is blocked (a docs page or an API: usually a 403 saying 'Approval required for <host>'), call request_access with the domain and why, then continue with other work until HQ tells you it was answered. Never work around the block.",
     );
-  const tools = agent.isLead
+  const tools = prompter
+    ? "list_workers, get_status, list_tasks, ask_user, request_access"
+    : agent.isLead
     ? "list_workers, get_status, list_tasks, create_board, create_task, update_task, assign_task, send_message, ask_user, request_access"
     : "get_my_task, set_my_status, list_workers, get_status, list_tasks, send_message, ask_user, request_access";
   return [
