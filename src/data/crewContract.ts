@@ -48,7 +48,7 @@ export const UNKNOWN_GREY = "#c2c3c7";
 
 // ---------------------------------------------------------------- Role families
 
-export const ROLE_FAMILIES = ["developer", "tester", "adversary", "orchestrator", "helper", "planner", "integrator", "unknown"] as const;
+export const ROLE_FAMILIES = ["developer", "tester", "adversary", "orchestrator", "helper", "planner", "integrator", "prompter", "unknown"] as const;
 export type RoleFamily = (typeof ROLE_FAMILIES)[number];
 
 /**
@@ -64,6 +64,7 @@ export const FAMILY_POOLS: Record<RoleFamily, readonly CrewCharacterId[]> = {
   helper: ["whisk", "ladle", "scoop", "tongs"],
   planner: ["sage"],
   integrator: ["clove"],
+  prompter: ["alien"],
   unknown: ["unit", "bolt", "cog"],
 };
 
@@ -83,6 +84,8 @@ export const FAMILY_PRESENCE: Record<RoleFamily, "live" | "in-coordinator" | "hu
   integrator: "in-coordinator",
   planner: "human-led",
   adversary: "fixture-only",
+  // The Master Prompter (Feature 04): its own session the kitchen launches when the human adds it, never a dispatch.
+  prompter: "live",
   unknown: "live",
 };
 
@@ -106,6 +109,7 @@ export const FAMILY_COLOR: Record<RoleFamily, string> = {
   helper: UNKNOWN_GREY,
   planner: "#83769c",
   integrator: "#ffec27",
+  prompter: "#008751",
   unknown: UNKNOWN_GREY,
 };
 
@@ -117,6 +121,14 @@ export const FAMILY_COLOR: Record<RoleFamily, string> = {
  */
 export const COORDINATOR_CHARACTER: CrewCharacterId = "basil";
 
+/**
+ * The Master Prompter's character (Feature 04). Reserved for `kind: "prompter"` sessions, the way Basil
+ * is for the coordinator: a worker or helper whose family is prompter (a brief with `Role: prompter`)
+ * is overflow, so a dispatched ticket session never wears the alien. At most one prompter session is
+ * live, because the pool is this one character.
+ */
+export const PROMPTER_CHARACTER: CrewCharacterId = "alien";
+
 // ---------------------------------------------------------------- Stages
 
 /**
@@ -125,7 +137,7 @@ export const COORDINATOR_CHARACTER: CrewCharacterId = "basil";
  * versions; `coordinate` and `integrate` are the coordinator's own work; `helper` is a non-brief
  * subagent the coordinator or a worker starts.
  */
-export const CREW_STAGES = ["implementation", "resume", "rebase-and-reverify", "resolve-conflict", "repair", "review", "adversary", "coordinate", "integrate", "plan", "helper"] as const;
+export const CREW_STAGES = ["implementation", "resume", "rebase-and-reverify", "resolve-conflict", "repair", "review", "adversary", "coordinate", "integrate", "plan", "helper", "prompt"] as const;
 export type CrewStage = (typeof CREW_STAGES)[number];
 
 export const STAGE_FAMILY: Record<CrewStage, RoleFamily> = {
@@ -140,6 +152,7 @@ export const STAGE_FAMILY: Record<CrewStage, RoleFamily> = {
   integrate: "orchestrator", // `/orchestrate integrate` runs inside the coordinator session here
   plan: "planner",
   helper: "helper",
+  prompt: "prompter", // the Master Prompter's own session (kind "prompter"), never a brief
 };
 
 /** Pathfinder role names (and the aliases the kitchen already accepts) to a family. */
@@ -151,6 +164,7 @@ const ROLE_FAMILY: Record<string, RoleFamily> = {
   planner: "planner",
   integrator: "integrator",
   helper: "helper",
+  prompter: "prompter",
 };
 
 /**
@@ -169,7 +183,8 @@ export function familyFor(role: string | null | undefined, stage: string | null 
 
 // ---------------------------------------------------------------- Sessions
 
-export type CrewSessionKind = "coordinator" | "worker" | "helper";
+/** `prompter` is the Master Prompter's own session (Feature 04): launched by the kitchen, never dispatched. */
+export type CrewSessionKind = "coordinator" | "worker" | "helper" | "prompter";
 
 /** How a session ended. Alias of SessionEnd's outcome so Feature 06 changes flow through. */
 export type CrewOutcome = SessionEnd["outcome"];
@@ -435,6 +450,8 @@ export function deriveCrewState(session: CrewSession | null, obs: CrewObservatio
  *  4. No candidate -> null: the session is overflow (shown in the compact crew list). Never a
  *     numbered copy, never another family's character, never a cap on real sessions. The session
  *     stays overflow for its whole life, even when a character frees up later.
+ *  5. The prompter family is reserved like Basil: only a `kind: "prompter"` session takes the alien,
+ *     and any other session of that family is overflow, so ticket work never lands on it.
  */
 export function allocateCharacter(
   book: Pick<CrewBook, "characters" | "sessions">,
@@ -444,6 +461,7 @@ export function allocateCharacter(
 ): CrewCharacterId | null {
   if (kind === "coordinator") return COORDINATOR_CHARACTER;
   if (family === "orchestrator") return null;
+  if ((family === "prompter") !== (kind === "prompter")) return null;
   const worn = new Set(Object.values(book.sessions).flatMap((s) => (s.phase === "live" && s.characterId ? [s.characterId] : [])));
   const free = FAMILY_POOLS[family].filter((id) => !book.characters[id]?.retired && !worn.has(id));
   if (ticket) {
@@ -543,7 +561,7 @@ function moveOffBasil(s: CrewSession): CrewMigration["conflicts"][number] {
 function newSession(book: CrewBook, id: string, facts: CrewSessionFacts): CrewSession {
   const s = blankSession(id, nextSeq(book));
   for (const f of FACT_FIELDS) if (facts[f] !== undefined) (s as unknown as Record<string, unknown>)[f] = facts[f];
-  s.family = s.kind === "coordinator" ? "orchestrator" : familyFor(s.role, s.stage ?? (s.kind === "helper" ? "helper" : null));
+  s.family = s.kind === "coordinator" ? "orchestrator" : s.kind === "prompter" ? "prompter" : familyFor(s.role, s.stage ?? (s.kind === "helper" ? "helper" : null));
   return s;
 }
 
@@ -570,7 +588,7 @@ export function occurrenceLabel(s: Pick<CrewSession, "continuation">): "same con
 /** The robot a continuation's conversation wore last, when it is still that family's, not retired and free; else null. */
 function keptCharacter(book: CrewBook, s: CrewSession): CrewCharacterId | null {
   const kept = s.continuation ? book.sessions[s.continuation.of]?.characterId ?? null : null;
-  const free = kept && s.kind !== "coordinator" && kept !== COORDINATOR_CHARACTER && CHARACTER_FAMILY[kept] === s.family && !book.characters[kept]?.retired &&
+  const free = kept && s.kind !== "coordinator" && kept !== COORDINATOR_CHARACTER && (kept !== PROMPTER_CHARACTER || s.kind === "prompter") && CHARACTER_FAMILY[kept] === s.family && !book.characters[kept]?.retired &&
     !Object.values(book.sessions).some((o) => o.phase === "live" && o.characterId === kept);
   return free ? kept : null;
 }
@@ -725,7 +743,7 @@ export function restoreSession(book: CrewBook, id: string, facts: CrewSessionFac
     changed = true;
     if (f === "role" || f === "stage") refamily = true;
   }
-  if (refamily || (!s.legacy && s.family === "unknown" && (s.role || s.stage))) s.family = s.kind === "coordinator" ? "orchestrator" : familyFor(s.role, s.stage);
+  if (refamily || (!s.legacy && s.family === "unknown" && (s.role || s.stage))) s.family = s.kind === "coordinator" ? "orchestrator" : s.kind === "prompter" ? "prompter" : familyFor(s.role, s.stage);
   if (s.end === null && facts.end) (s.end = facts.end), (changed = true);
   if (facts.phase === "ended" && s.phase === "live") {
     s.phase = "ended";
@@ -1134,5 +1152,7 @@ export function crewContractProblems(): string[] {
   }
   for (const f of PARALLEL_FAMILIES) if (new Set(FAMILY_POOLS[f]).size < 3) problems.push(`${f} has fewer than 3 characters`);
   if (CHARACTER_FAMILY[COORDINATOR_CHARACTER] !== "orchestrator") problems.push("basil is not the orchestrator");
+  if (FAMILY_POOLS.prompter.length !== 1 || FAMILY_POOLS.prompter[0] !== PROMPTER_CHARACTER) problems.push("the prompter family is not the alien alone");
+  if (Object.hasOwn(CREW_VARIANTS, PROMPTER_CHARACTER)) problems.push("the alien is drawn from a robot base");
   return problems;
 }

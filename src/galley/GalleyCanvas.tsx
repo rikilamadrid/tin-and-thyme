@@ -4,7 +4,7 @@ import { usePrefs } from "../store/prefs";
 import { useOffice } from "../store/office";
 import { ui, useUi } from "../store/ui";
 import { makeBackend } from "./backend";
-import { buildGalley, type GalleyModel } from "./model";
+import { buildGalley, type CrewMember, type GalleyModel } from "./model";
 import { MarkIcon } from "../ui/hud/CrewPanel";
 import { ALERT, ambientInit, ambientStep, beamSlot, drawGalley, HANGOUTS, route, sceneAnimating, SPOTS, targetFor, VIEW, type Actor, type AmbientPass, type Delivery, type Hit } from "./scene";
 
@@ -68,6 +68,8 @@ export function GalleyCanvas({ left, right }: { left: number; right: number }) {
     let ambient: AmbientPass | null = null;
     const actors = new Map<string, Actor>();
     const spotOf = new Map<string, number>();
+    /** A removed Master Prompter on its way out: it walks to the pod and beams out before it leaves the floor. */
+    const leaving = new Map<string, CrewMember>();
     const deliveries: Delivery[] = [];
     let hits: Hit[] = [];
     let scale = 1; // canvas pixels per logical unit in the Fit view
@@ -135,6 +137,13 @@ export function GalleyCanvas({ left, right }: { left: number; right: number }) {
       epoch = ep;
       const before = model;
       model = buildGalley(snap, podOf);
+      // The Master Prompter leaves through the transporter when it is removed (never when its session ends).
+      if (first || reduce) leaving.clear();
+      else for (const c of before?.crew ?? []) if (c.place === "prompter" && actors.has(c.id) && !model.crew.some((x) => x.id === c.id)) leaving.set(c.id, { ...c, place: "gone", running: false, state: "off", status: "leaving the kitchen" });
+      for (const [id, c] of leaving) {
+        if (!actors.has(id) || model.crew.some((x) => x.id === id)) leaving.delete(id);
+        else model.crew.push(c);
+      }
       podOf.clear();
       model.pods.forEach((p, i) => p.kind === "cook" && podOf.set(p.member.id, i));
       assignSpots(model);
@@ -151,6 +160,9 @@ export function GalleyCanvas({ left, right }: { left: number; right: number }) {
           const wasHere = before?.crew.some((x) => x.id === c.id && x.running);
           if (first || reduce || t.x < 0 || c.isLead || wasHere) {
             actors.set(c.id, { x: t.x, y: t.y, moving: false, seated: t.seated, alpha: c.running || c.place === "lounge" ? 1 : 0.45 });
+          } else if (c.place === "prompter") {
+            // The Master Prompter was just added: it beams in through the transporter too, then floats to its table.
+            actors.set(c.id, { x: SPOTS.tube.x, y: SPOTS.tube.y, moving: false, seated: false, alpha: 1, beam: slot(now, "in", c.id) });
           } else if (workflow && c.running) {
             // An observed session start: it beams in through the transporter, then walks to its station.
             actors.set(c.id, { x: SPOTS.tube.x, y: SPOTS.tube.y, moving: false, seated: false, alpha: 1, beam: slot(now, "in", c.id) });
@@ -165,7 +177,7 @@ export function GalleyCanvas({ left, right }: { left: number; right: number }) {
           actors.delete(c.id);
           continue;
         }
-        a.alpha = c.isLead && !c.running ? 0.45 : 1;
+        a.alpha = (c.isLead || c.place === "prompter") && !c.running ? 0.45 : 1;
       }
       for (const id of [...actors.keys()]) if (!seen.has(id)) actors.delete(id);
       // Deliveries into MAIN: only a ticket the workflow newly reports as integrated, never the history.

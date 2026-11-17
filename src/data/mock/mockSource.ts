@@ -6,6 +6,9 @@ import { defaultPresetId, presets, type Preset } from "./presets";
 import { Simulation } from "./simulation";
 import * as T from "./terminalScripts";
 import { mockSbx, mockSession, mockSetup, World } from "./world";
+import { CHARACTERS } from "../crew";
+import { FAMILY_COLOR } from "../crewContract";
+import { isPrompter, PROMPTER_ID, PROMPTER_ROLE_MD, PROMPTER_TITLE, prompterAddProblem, prompterCliProblem, prompterCrew } from "../prompter";
 
 const TICK_MS = 50;
 const TERM_MS = 30;
@@ -201,7 +204,7 @@ export function createMockSource(): OfficeDataSource {
     assignTask(taskId, agentId) {
       const task = world.task(taskId);
       const agent = world.cfg(agentId);
-      if (!task || !agent || agent.isLead || task.status !== "todo") return;
+      if (!task || !agent || agent.isLead || isPrompter(agent) || task.status !== "todo") return;
       world.patchTask(taskId, { ownerId: agentId });
       world.activity("task.assigned", null, `You assigned ${taskId} ${task.title} to ${agent.name}`);
       if (!sim.hasJob(agentId) && world.status(agentId)?.state === "idle") {
@@ -240,9 +243,31 @@ export function createMockSource(): OfficeDataSource {
       sim.startWorker(id, 2);
     },
 
+    addPrompter() {
+      // The demo kitchen follows the server's rule: one Master Prompter, never given a task.
+      const team = world.snap.config.team;
+      const refused = prompterAddProblem(team);
+      if (refused) return world.activity("config", null, refused);
+      const lead = world.lead();
+      const agent: AgentConfig = {
+        id: PROMPTER_ID, name: CHARACTERS.alien.name, role: PROMPTER_TITLE, isLead: false, cli: "claude", model: "", mode: lead.mode, color: FAMILY_COLOR.prompter,
+        skills: [], roleMd: PROMPTER_ROLE_MD, sandbox: structuredClone(lead.sandbox), workspacePath: null, crew: prompterCrew(),
+      };
+      team.push(agent);
+      world.snap.agents.push({ agentId: agent.id, state: "idle", currentTaskId: null, stateSince: new Date().toISOString(), note: "Ready to help write a prompt", session: mockSession(world.snap.config.project.name, agent.id) });
+      world.configChanged();
+      world.emit({ type: "agent.updated", agent: { ...world.snap.agents[world.snap.agents.length - 1] } });
+      world.syncEnvironments();
+      world.activity("config", null, `Added ${agent.name}, the ${PROMPTER_TITLE}`);
+      syncSbx();
+    },
+
     updateAgent(id, patch: AgentPatch) {
       const agent = world.cfg(id);
       if (!agent) return;
+      // The server's rule: the Master Prompter stays on Claude Code.
+      const cliRefused = isPrompter(agent) ? prompterCliProblem(patch.cli) : null;
+      if (cliRefused) return world.activity("config", id, cliRefused);
       Object.assign(agent, patch);
       world.configChanged();
     },

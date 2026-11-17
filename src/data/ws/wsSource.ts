@@ -98,6 +98,7 @@ export function createWsSource(token: string): OfficeDataSource {
     recheckSetup: () => send("recheckSetup"),
     runSetupFix: (id) => send("runSetupFix", id),
     addAgent: (input) => send("addAgent", input),
+    addPrompter: () => send("addPrompter"),
     updateAgent: (id, patch) => send("updateAgent", id, patch),
     removeAgent: (id, opts) => send("removeAgent", id, opts),
     inspectWorkspace: (id) => send("inspectWorkspace", id),

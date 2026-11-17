@@ -20,6 +20,7 @@ import { log } from "./lib/log";
 import { projectHome, sessionName } from "./paths";
 import { POLICY_NOT_INITIALIZED, policyVerdict, runSetupChecks } from "./setup";
 import { ensureWorkspace, workspaceFor } from "./workspace";
+import { isPrompter, prompterCliProblem } from "../src/data/prompter";
 
 const TERM_ENV = { ...process.env, TERM: "xterm-256color", COLORTERM: "truecolor" } as Record<string, string>;
 /**
@@ -91,6 +92,9 @@ export class Sessions {
       hub.activity("session", id, `${agent.name} could not start: ${detail.split("\n")[0]}`);
     };
     if (!setup.checks.find((c) => c.id === "tmux" && c.status === "ok")) return fail("tmux is not installed. See the setup checklist.");
+    // Backstop: a Master Prompter on anything but Claude Code would launch without its editing-tool guard.
+    const prompterCli = isPrompter(agent) ? prompterCliProblem(agent.cli) : null;
+    if (prompterCli) return fail(prompterCli);
     if (agent.mode === "sandbox" && !setup.sandboxReady) return fail("Docker Sandboxes isn't ready on this machine. Finish the setup checklist, or switch this agent to Local mode.");
     const check = (cid: string) => setup.checks.find((c) => c.id === cid)?.status;
     if (agent.mode === "local" && agent.cli === "claude" && check("claude") !== "ok") return fail("Claude Code isn't installed. See the setup checklist.");

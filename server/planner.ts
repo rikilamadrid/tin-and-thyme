@@ -2,6 +2,7 @@
 // (agents) and the browser commands (you), so both follow the same rules.
 
 import type { Board, Task, TaskStatus } from "../src/data/types";
+import { isPrompter, PROMPTER_NO_TASKS } from "../src/data/prompter";
 import type { Hub } from "./hub";
 import type { ActionItems } from "./actionItems";
 import type { Inbox } from "./inbox";
@@ -110,6 +111,8 @@ export class Planner {
     if (!task) throw new Error(`No task ${taskId}`);
     if (!agentId) throw new Error(`No agent "${agentRef}". Team: ${this.snap.config.team.map((a) => a.id).join(", ")}`);
     const agent = this.hub.cfg(agentId)!;
+    // The Master Prompter coaches prompts and never takes ticket work (Feature 04).
+    if (isPrompter(agent)) throw new Error(PROMPTER_NO_TASKS);
     task.ownerId = agentId;
     if (task.status === "done") task.status = "todo";
     this.hub.emit({ type: "task.updated", task: { ...task } });

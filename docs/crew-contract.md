@@ -39,9 +39,11 @@ already put them there.
 | helper | **whisk**, **ladle**, **scoop**, **tongs** | live: non-brief subagents of the coordinator or a worker (`pendingHelpers`) |
 | planner | **sage** | human-led (to-specs, to-tickets). Not seen in the kitchen today. |
 | integrator | **clove** | integrate runs inside the coordinator, so it is shown on Basil. Clove is only for a kit that dispatches an integrator worker. |
+| prompter | **alien** (04.1) | live: the Master Prompter's own session (`kind: "prompter"`, stage `prompt`), which the kitchen launches when the human adds it. Never dispatched, never given a ticket. |
 | unknown | unit, **bolt**, **cog** | any role or stage that is not recognized |
 
-New ids are in bold. Each variant has a distinct name, a job, a `base` silhouette (dash, pinch
+New ids are in bold. `alien` (04.1, Feature 04) is the one base character that is not a robot: the
+visiting Master Prompter, with its own silhouette in `robots.ts` and no variants. Each variant has a distinct name, a job, a `base` silhouette (dash, pinch
 or unit), an `accessory` and an `accent` (`CREW_VARIANTS`), which together form 09.2's art brief.
 No name repeats, and no name ends in a digit.
 
@@ -132,6 +134,9 @@ The `CrewSession` id rules are below. A session record is never re-keyed or dele
     use today.
   - **Coordinator:** `coordinator:<transcript file name without .jsonl>`. Until its transcript is
     known, Basil shows `unknown` and no session record is written.
+  - **Master Prompter (04.1):** `prompter:<ISO time the kitchen launched it>`. Its `kind` is
+    `prompter`, its stage `prompt`, its `hqId` `prompter`, and it never has a ticket. Found running
+    after a restart, the same conversation goes on as a linked continuation.
 - `id` is the occurrence. A conversation's first occurrence has `id` equal to `conversation`, so
   every id written before this amendment stays valid. A continuation is `<conversation>#<n>`, where
   n is its place in the chain (2, 3 and so on).
@@ -386,6 +391,10 @@ record, not a state (`retireCharacter`). A session that ends never beams the rob
 3. The coordinator session (`kind: "coordinator"`) always gets `basil`. Basil is reserved: no
    other session wears him, whatever its family. Any other orchestrator-family session is
    overflow (`allocateCharacter(book, family, ticket, kind)`; `kind` defaults to `worker`).
+   The prompter family is reserved the same way (04.1): only a `kind: "prompter"` session takes
+   `alien`, and any other session of that family (a brief with `Role: prompter` or `Session:
+   prompt`) is overflow, so dispatched ticket work never lands on the Master Prompter. Its pool is
+   the alien alone, so a second live prompter session is overflow too.
 4. The candidates are the family's own pool, minus characters that are retired or that hold a live
    session. Families never borrow characters from each other. A character whose session just ended
    is a candidate at once. The 6 s linger is only an animation (`finished → assigned`).
@@ -647,6 +656,20 @@ character taken by a fresh session swaps its row, and the earlier session stays 
 09.5 draws the overflow layout, a session with no character is listed as the plain crew bot under
 its role name: every live one, and only the latest ended one of each family. `AgentStatus` entries
 stay keyed by `hqId`, one per conversation, in memory only.
+
+### The Master Prompter in Pathfinder mode (04.1)
+
+Pathfinder kitchens keep no team config, so the prompter lives in the crew book (`server/prompter.ts`):
+
+- **Added** means the `alien` record exists and is not retired. Settings → Team → "Add the Master
+  Prompter" creates or un-retires it through `retireCharacter`. A second add is refused while it is
+  on the floor. Removing it stops its session and retires it, and its record and history are kept.
+- Its team row (`prompter`, right after the coordinator) follows the record, and while its session
+  is still live. It is restored from the book on a restart, during the restore pass, so its running
+  tmux session is reattached. Its session is recorded only once the pass has closed, and the
+  reconcile counts it as running when its process is.
+- Arrivals and departures are the ordinary transporter rule below: adding it is an arrival, removing
+  it is a departure after its handoff pose, and its session ending beams nothing out.
 
 ### Transporter (decision for 09.5)
 

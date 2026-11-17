@@ -388,6 +388,148 @@ check("beam lengths unchanged (520 ms, 300 ms when queued)", BEAM_MS === 520 && 
   check(`the queue spot's robot box overlaps no hangout's (${kinds.length} robot sizes × ${HANGOUTS.length} hangouts, ${pairs} pairs)`, bad.length === 0 && pairs === kinds.length * kinds.length * HANGOUTS.length, bad.slice(0, 5));
 }
 
+// ---------------------------------------------------------------- the Master Prompter's corner (04.1)
+
+section("Master Prompter: its own spot, clear of everything, reached through the pod");
+{
+  const { prompterSnapshot } = await import("../src/data/fixture/busyFixture");
+  const { PROMPTER_ID } = await import("../src/data/prompter");
+  const { BELT, BELT_Y, PROMPTER_TABLE, PROMPTER_TAGS_X, SUBS, SUBS_Y, prompterBadge } = scene;
+  type Hit = import("../src/galley/scene").Hit;
+  type CrewMember = import("../src/galley/model").CrewMember;
+  const P = SPOTS.prompter;
+  const withPrompter = buildGalley(prompterSnapshot("work"));
+  const alien = withPrompter.prompter;
+  check("the prompter fixture puts the alien in the model, at its own place", !!alien && alien.place === "prompter" && alien.character === "alien" && withPrompter.crew.filter((c) => c.place === "prompter").length === 1);
+  check("its target is its own spot (P), in every state, running or not", ["work", "idle", "needs", "off"].every((ph) => {
+    const m = buildGalley(prompterSnapshot(ph));
+    const t = targetFor(m, m.prompter!, new Map());
+    return t.x === P.x && t.y === P.y && m.prompter!.place === "prompter";
+  }));
+  check("a session ending never sends it to the pod (it stays at its table, dimmed and 'not running')", buildGalley(prompterSnapshot("off")).prompter!.place === "prompter" && prompterBadge(buildGalley(prompterSnapshot("off")).prompter!).words === "not running");
+  check("the spot is in the open floor between the subagent stations and the belt, at the left", P.y > SUBS_Y + SUBS.h && P.y < BELT_Y - 1 && P.x > SUBS.x && P.x < SPOTS.passQueue.x - 40);
+
+  // Walk paths: to and from the pod and its queue spot (the only walks it makes: it arrives and leaves through
+  // the pod), and every upper-band station, along the aisle and down the lane, no diagonal steps. Walks between
+  // two lower-band spots (the pass) are route()'s own straight line and the alien never makes one.
+  const bad: string[] = [];
+  for (const goal of [SPOTS.tube, SPOTS.tubeQueue, SPOTS.door, SPOTS.island, ...[0, 1, 2, 3, 4].map((i) => SPOTS.pod(i)), ...HANGOUTS.filter((h) => h.y < SUBS_Y)])
+    for (const [from, to] of [[P, goal], [goal, P]] as const) {
+      const path = route(from, to);
+      const end = path[path.length - 1];
+      if (end.x !== to.x || end.y !== to.y) bad.push(`→ ${to.x},${to.y}: ends at ${end.x},${end.y}`);
+      let prev = from;
+      for (const q of path) {
+        if (q.x !== prev.x && q.y !== prev.y) bad.push(`diagonal ${prev.x},${prev.y} → ${q.x},${q.y}`);
+        // As for every station: only the island, the door and the couch seats are themselves in the top band.
+        const inTop = [SPOTS.island, SPOTS.door, ...HANGOUTS].some((s) => s === to || s === from);
+        if (q.x === prev.x && Math.min(q.y, prev.y) < TOP_BAND_END && q.x !== TUBE.cx && !inTop) bad.push(`crosses the top band at x ${q.x}`);
+        // Down in the lower band it walks only along its own row or the lane, never through the stations.
+        if (q.y === prev.y && q.y > SUBS_Y && q.y < BELT_Y && q.y !== P.y && !SPOTS.pass.some((s) => s.y === q.y) && q.y !== SPOTS.passQueue.y) bad.push(`walks across the lower band at y ${q.y}`);
+        prev = q;
+      }
+    }
+  check("walk paths reach the alien's spot from the pod, its queue spot and every station, and back (no diagonals, top band only up the pod)", bad.length === 0, bad.slice(0, 5));
+  const fromPod = route(SPOTS.tube, P);
+  check("arriving from the pod it goes down the pod's column, along the aisle, down the lane, then along its own row", JSON.stringify(fromPod) === JSON.stringify([{ x: TUBE.cx, y: AISLE_Y }, { x: 336, y: AISLE_Y }, { x: 336, y: P.y }, { x: P.x, y: P.y }]), fromPod);
+
+  // Overlap: the alien, its table, badge and plate against everything else drawn, in a full kitchen, at the
+  // room's robot scale and at the largest scale pixel art rounds a sprite to (k × 1.15).
+  const area = (a: { x: number; y: number; w: number; h: number }, b: { x: number; y: number; w: number; h: number }) =>
+    Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x)) * Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+  const robotOf = (h: Hit) => ({ x: h.x + 2, y: h.y + 2, w: h.w - 4, h: h.h - 4 });
+  const cook = withPrompter.crew.find((c) => c.place === "pod")!;
+  const rev = withPrompter.crew.find((c) => c.place === "pass")!;
+  const problems: string[] = [];
+  let compared = 0;
+  for (const grow of [1, 1.15])
+    for (const phase of ["work", "idle", "needs", "off"]) {
+      const base = buildGalley(prompterSnapshot(phase));
+      // Every pod taken, every hangout taken, both pass spots and the pass queue, a queued beam-out, every helper station.
+      const cooks: CrewMember[] = [0, 1, 2, 3, 4].map((i) => ({ ...cook, id: `cook-${i}`, ticket: `9${i}.10`, state: i === 1 ? "needs" : "work" }));
+      const reviewers: CrewMember[] = [0, 1, 2].map((i) => ({ ...rev, id: `rev-${i}`, ticket: `8${i}.10`, state: i === 2 ? "needs" : "review" }));
+      const parked: CrewMember[] = HANGOUTS.map((_h, i) => ({ ...cook, id: `park-${i}`, place: "lounge", running: false, ticket: `7${i}.1`, state: "off" }));
+      const queued: CrewMember = { ...cook, id: "queued", ticket: "60.1" };
+      const helpers = [0, 1, 2, 3, 4].map((i) => ({ ...(base.allHelpers[0] ?? { id: "h", type: "Explore", label: "search", parent: "coordinator", finished: false }), id: `helper-${i}`, type: "general-purpose", finished: false }));
+      const m: GalleyModel = {
+        ...base, pods: cooks.map((c) => ({ kind: "cook", member: c })), reviewers, lounge: parked, helpers, podOverflow: 2,
+        crew: [...base.crew.filter((c) => c.place === "island" || c.place === "prompter"), ...cooks, ...reviewers, ...parked, queued],
+      };
+      const actors = new Map<string, Actor>();
+      const spotOf = new Map<string, number>();
+      for (const c of m.crew) {
+        const t = targetFor(m, c, spotOf);
+        actors.set(c.id, { x: t.x, y: t.y, moving: false, seated: t.seated, alpha: 1 });
+      }
+      parked.forEach((c, i) => (spotOf.set(c.id, i), actors.set(c.id, { x: HANGOUTS[i].x, y: HANGOUTS[i].y, moving: false, seated: HANGOUTS[i].kind !== "floor", alpha: 1 })));
+      actors.set(queued.id, { x: SPOTS.tube.x, y: SPOTS.tube.y, moving: false, seated: false, alpha: 1, beam: { kind: "out", t0: 99_999, dur: BEAM_BUSY_MS } });
+      const B = recorder();
+      B.spriteK = (k) => k * grow;
+      const hits = drawGalley(B, m, { now: 1000, actors, selected: null, hover: null, deliveries: [{ ticket: "29.12", t0: 0 }], spotOf, reduce: false, view: { ...VIEW }, ambient: null });
+      const mine = hits.filter((h) => h.id === PROMPTER_ID);
+      const body = mine.find((h) => h.kind === "agent" && h.sub?.includes("never takes a ticket") && h.w < 40 && h.h > 20);
+      if (mine.length < 3 || !body) {
+        problems.push(`${phase}×${grow}: the alien, its plate and its badge are not all drawn (${mine.length} hits)`);
+        continue;
+      }
+      const tb = { x: PROMPTER_TABLE.cx - 14, y: PROMPTER_TABLE.y - 27, w: 28, h: 30 };
+      const ours = [{ name: "robot", box: robotOf(body) }, { name: "table", box: tb }, ...mine.filter((h) => h !== body).map((h, i) => ({ name: `tag ${i}`, box: h }))];
+      // Others: every other hit (robots, plates, badges, board, pass, MAIN, helpers, the pod), plus the belt and the stations area.
+      const others = [
+        ...hits.filter((h) => h.id !== PROMPTER_ID).map((h) => ({ name: `${h.kind}:${h.id ?? h.title}`, box: h.kind === "agent" && h.h > 20 && h.w < 40 ? robotOf(h) : h })),
+        { name: "belt", box: { x: BELT.x0, y: BELT.y - 1, w: BELT.x1 - BELT.x0 + 4, h: 14 } },
+        { name: "subagent stations", box: { x: SUBS.x, y: SUBS.y, w: SUBS.w, h: SUBS.h } },
+        { name: "pass queue", box: { x: SPOTS.passQueue.x - 16, y: SPOTS.passQueue.y - 40, w: 32, h: 40 } },
+        { name: "tube queue", box: { x: SPOTS.tubeQueue.x - 16, y: SPOTS.tubeQueue.y - 40, w: 32, h: 40 } },
+      ];
+      for (const o of ours)
+        for (const x of others) {
+          compared++;
+          const a = area(o.box, x.box);
+          if (a > 0) problems.push(`${phase}×${grow}: alien ${o.name} overlaps ${x.name} by ${a.toFixed(1)}`);
+        }
+      // Its own parts stay apart too: the robot never stands on its table or under its tags.
+      for (const [i, o] of ours.entries()) for (const p of ours.slice(i + 1)) if (o.name === "robot" || p.name === "robot") if (area(o.box, p.box) > 0) problems.push(`${phase}×${grow}: robot overlaps its ${o.name === "robot" ? p.name : o.name}`);
+      if (Math.min(...mine.filter((h) => h !== body).map((h) => h.x)) < PROMPTER_TAGS_X - 0.5) problems.push(`${phase}×${grow}: a tag starts left of PROMPTER_TAGS_X`);
+    }
+  check(`the alien, its table, badge and plate overlap nothing else in a full kitchen (4 states × 2 scales, ${compared} pairs)`, problems.length === 0 && compared > 400, problems.slice(0, 6));
+
+  // A custom name is shortened so the plate never runs into the pass queue.
+  {
+    const long = buildGalley(prompterSnapshot("idle"));
+    long.prompter = { ...long.prompter!, name: "Zorbo the Very Patient Al" };
+    long.crew = long.crew.map((c) => (c.id === PROMPTER_ID ? long.prompter! : c));
+    const hits = drawGalley(recorder(), long, { now: 1000, actors: standing(long), selected: null, hover: null, deliveries: [], spotOf: new Map(), reduce: false, view: { ...VIEW }, ambient: null });
+    const right = Math.max(...hits.filter((h) => h.id === PROMPTER_ID).map((h) => h.x + h.w));
+    check("a long custom name is shortened: its plate ends well before the pass queue", right < SPOTS.passQueue.x - 20, right);
+  }
+
+  // Cues: only for the observed working state; still under reduced motion.
+  const still = (m: GalleyModel): GalleyModel => {
+    const crew = m.crew.map((c) => (c.place === "prompter" ? c : { ...c, running: false, state: c.state === "work" ? ("idle" as const) : c.state }));
+    const out: GalleyModel = { ...m, helpers: [], reviewers: [], crew, prompter: crew.find((c) => c.place === "prompter") ?? null };
+    out.coordinator = crew.find((c) => c.place === "island") ?? null;
+    out.pods = m.pods.map((p) => (p.kind === "cook" ? { kind: "cook", member: crew.find((c) => c.id === p.member.id)! } : p));
+    return out;
+  };
+  for (const ph of ["idle", "needs", "off"]) {
+    const m = still(buildGalley(prompterSnapshot(ph)));
+    check(`prompter ${ph}: no working cue, and the scene holds still a minute later`, cueBeat(m.prompter!, 5000, false) === -1 && firstDiff(frame(m, 1000, false), frame(m, 61_337, false)) === null);
+  }
+  {
+    const m = still(buildGalley(prompterSnapshot("work")));
+    const frames = new Set([0, 250, 500, 750, 1000, 1250].map((t) => frame(m, t, false).join("\n")));
+    check("prompter working: its table's cue moves through beats", isWorking(m.prompter!) && frames.size > 1, frames.size);
+    const reduced = [0, 333, 1250, 61_000].map((t) => frame(m, t, true));
+    check("prompter working, reduced motion: one still pose at every moment", reduced.slice(1).every((l) => firstDiff(reduced[0], l) === null));
+  }
+
+  // Arrivals and departures go through the pod; a session ending does not beam it out.
+  const src = readFileSync(join(ROOT, "src/galley/GalleyCanvas.tsx"), "utf8");
+  check("arrival: a newly added prompter beams in at the pod (not on a first paint or with reduced motion)", src.includes(`} else if (c.place === "prompter") {\n            // The Master Prompter was just added: it beams in through the transporter too, then floats to its table.\n            actors.set(c.id, { x: SPOTS.tube.x, y: SPOTS.tube.y, moving: false, seated: false, alpha: 1, beam: slot(now, "in", c.id) });`));
+  check("departure: only a removed prompter walks to the pod and beams out (as a 'gone' member, then dropped)", src.includes(`if (c.place === "prompter" && actors.has(c.id) && !model.crew.some((x) => x.id === c.id)) leaving.set(c.id, { ...c, place: "gone"`) && src.includes(`if (first || reduce) leaving.clear();`));
+}
+
 // ---------------------------------------------------------------- crew panel collapse
 
 section("Crew panel: collapse is remembered, and storage failures fall back safely");

@@ -7,7 +7,9 @@
 // never connects to a server, and every action is a no-op.
 
 import { SETTLE_MS } from "../../audio/settle";
-import { assignCharacter, type CharacterId } from "../crew";
+import { assignCharacter, CHARACTERS, type CharacterId } from "../crew";
+import { FAMILY_COLOR } from "../crewContract";
+import { PROMPTER_ID, PROMPTER_ROLE_MD, PROMPTER_TITLE, prompterCrew } from "../prompter";
 import { presets } from "../mock/presets";
 import { World } from "../mock/world";
 import type { OfficeDataSource } from "../source";
@@ -15,11 +17,11 @@ import { attentionSnapshot } from "./attentionFixture";
 import { handoffScript } from "./handoffFixture";
 import type { ActionItem, ActivityEvent, AgentConfig, AgentStatus, OfficeSnapshot, Task } from "../types";
 
-export const FIXTURES = ["busy", "sounds", "handoff", "attention"] as const;
+export const FIXTURES = ["busy", "sounds", "handoff", "attention", "prompter"] as const;
 export type FixtureName = (typeof FIXTURES)[number];
 
 /** How the toolbar names each fixture. */
-export const FIXTURE_LABEL: Record<FixtureName, string> = { busy: "busy layout", sounds: "sound audition", handoff: "crew transporter handoff", attention: "truthful attention" };
+export const FIXTURE_LABEL: Record<FixtureName, string> = { busy: "busy layout", sounds: "sound audition", handoff: "crew transporter handoff", attention: "truthful attention", prompter: "Master Prompter" };
 
 const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
 
@@ -251,6 +253,25 @@ function soundScript(emit: Emit, status: Status): () => void {
 }
 
 /** A data source that shows one fixed scene (or plays the sound script). It talks to nothing; every command is ignored. */
+/**
+ * `?fixture=prompter[&phase=work|idle|needs|off]`: the busy run with the Master Prompter (Feature 04) at its
+ * table, in the given state (default: writing a prompt). Its row is the one a Pathfinder kitchen publishes.
+ */
+export function prompterSnapshot(phase: string | null = null): OfficeSnapshot {
+  const snap = busySnapshot();
+  const p = phase === "idle" || phase === "needs" || phase === "off" ? phase : "work";
+  const lead = snap.config.team[0];
+  snap.config.team.splice(1, 0, {
+    ...lead, id: PROMPTER_ID, name: CHARACTERS.alien.name, role: PROMPTER_TITLE, isLead: false, color: FAMILY_COLOR.prompter, roleMd: PROMPTER_ROLE_MD, workspacePath: "/fixture", crew: prompterCrew(),
+  });
+  snap.agents.push({
+    agentId: PROMPTER_ID, state: p === "needs" ? "needs-input" : p === "work" ? "working" : "idle", currentTaskId: null, stateSince: ago(2),
+    note: p === "needs" ? "Asking: may I read context/handoff.md? (fixture)" : p === "work" ? "Writing the next prompt for 18.10 (fixture)" : null,
+    session: { state: p === "off" ? "stopped" : "running", detail: null, workspace: "/fixture", sandbox: null },
+  });
+  return snap;
+}
+
 export function createFixtureSource(name: FixtureName): OfficeDataSource {
   const target = {
     dev: undefined,
@@ -262,7 +283,7 @@ export function createFixtureSource(name: FixtureName): OfficeDataSource {
         onStatus?.("open");
         return () => {};
       }
-      onEvent({ type: "snapshot", snapshot: busySnapshot() });
+      onEvent({ type: "snapshot", snapshot: name === "prompter" ? prompterSnapshot(new URL(location.href).searchParams.get("phase")) : busySnapshot() });
       onStatus?.("open");
       return () => {};
     },
