@@ -37,8 +37,22 @@ export function BoardsDrawer({ initialBoardId }: { initialBoardId?: string }) {
       </DrawerHeader>
       <div className="flex flex-wrap gap-1.5 border-b-[3px] border-line px-3 py-2">
         {boards.map((b) => (
-          <button key={b.id} className="btn px-2 text-[13px]" aria-pressed={b.id === boardId} onClick={() => setBoardId(b.id)}>
+          <button
+            key={b.id}
+            className={`btn px-2 text-[13px] ${b.status === "done" ? "text-[#8fa3c4]" : ""}`}
+            aria-pressed={b.id === boardId}
+            aria-label={b.status === "done" ? `${b.title} (done)` : undefined}
+            title={b.status === "done" ? "Done" : undefined}
+            onClick={() => setBoardId(b.id)}
+          >
             {b.status === "active" && <span className="mr-1 text-blue">●</span>}
+            {/* Done: a calm green check and quieter text. Not an alert: no pink, no motion. */}
+            {b.status === "done" && (
+              <svg className="mr-1 inline-block align-[-1px]" width="11" height="11" viewBox="0 0 12 12" aria-hidden>
+                <circle cx="6" cy="6" r="6" fill="#1f5c3c" />
+                <path d="M3.2 6.2 L5.2 8.2 L8.8 4.2" fill="none" stroke="#7fe0a8" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            )}
             {b.title}
           </button>
         ))}

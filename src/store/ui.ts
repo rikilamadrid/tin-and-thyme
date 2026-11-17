@@ -40,6 +40,8 @@ interface UiState {
   /** Side drawer width in px, remembered per browser; `maximized` fills the screen. */
   drawerWidth: number;
   drawerMaximized: boolean;
+  /** The crew panel folded to a slim rail (the galley takes the room). Remembered per browser. */
+  crewCollapsed: boolean;
 }
 
 const WIDTH_KEY = "jsmhq.drawerWidth";
@@ -60,6 +62,35 @@ function savedWidth(): number {
   }
 }
 
+const CREW_KEY = "thepass.crewCollapsed";
+type KeyStore = Pick<Storage, "getItem" | "setItem">;
+/** The browser's localStorage, or null where reading it throws (blocked site data, some private windows). */
+function browserStore(): KeyStore | null {
+  try {
+    return globalThis.localStorage ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether this browser last folded the crew panel. Any storage failure reads as expanded. */
+export function readCrewCollapsed(store: KeyStore | null = browserStore()): boolean {
+  try {
+    return store?.getItem(CREW_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/** Remembers the crew panel's state; a storage failure only means it is forgotten on reload. */
+export function writeCrewCollapsed(collapsed: boolean, store: KeyStore | null = browserStore()): void {
+  try {
+    store?.setItem(CREW_KEY, collapsed ? "1" : "0");
+  } catch {
+    /* private window: applies until reload */
+  }
+}
+
 export const useUi = create<UiState>(() => ({
   drawer: null,
   settings: null,
@@ -71,6 +102,7 @@ export const useUi = create<UiState>(() => ({
   setupOpen: false,
   drawerWidth: savedWidth(),
   drawerMaximized: false,
+  crewCollapsed: readCrewCollapsed(),
 }));
 
 let nonce = 0;
@@ -142,6 +174,13 @@ export const ui = {
   },
   toggleDrawerMaximized() {
     useUi.setState((s) => ({ drawerMaximized: !s.drawerMaximized }));
+  },
+  setCrewCollapsed(collapsed: boolean) {
+    useUi.setState({ crewCollapsed: collapsed });
+    writeCrewCollapsed(collapsed);
+  },
+  toggleCrew() {
+    ui.setCrewCollapsed(!useUi.getState().crewCollapsed);
   },
   toggleDebug() {
     useUi.setState((s) => ({ debugOpen: !s.debugOpen }));

@@ -1,6 +1,7 @@
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import type { ActivityEvent, ActivityType } from "../../data/types";
 import { useOffice } from "../../store/office";
+import { useUi } from "../../store/ui";
 import { ago, useNow } from "../kit";
 
 const ICON: Record<ActivityType, [string, string]> = {
@@ -31,7 +32,10 @@ export function ActivityFeed() {
   const activity = useOffice((s) => s.snap?.activity ?? EMPTY);
   const now = useNow(1000);
   const reduce = useReducedMotion();
+  // It shares the left column with the crew panel: folded, the column is a slim rail and the galley takes the room.
+  const folded = useUi((s) => s.crewCollapsed);
   const items = activity.slice(0, 50);
+  if (folded) return null;
 
   return (
     <section

@@ -10,6 +10,64 @@ import { effortLabel, modelLabel } from "./telemetry";
 
 /** The roster column at the left, outside the room (as in the original JSM HQ). */
 export const CREW_W = 280;
+/** The crew panel folded to a slim rail: the toggle, the counts and a portrait per session on shift. */
+export const CREW_RAIL_W = 44;
+
+/** The left column's width right now: every left inset (galley, drawer scrim, dock) uses this, never CREW_W. */
+export function useCrewWidth(): number {
+  return useUi((s) => s.crewCollapsed) ? CREW_RAIL_W : CREW_W;
+}
+
+/** Folds or unfolds the crew panel. Keyboard reachable; the label says what pressing it does. */
+function CrewToggle({ collapsed }: { collapsed: boolean }) {
+  return (
+    <button
+      type="button"
+      className="grid h-[24px] w-[24px] shrink-0 cursor-pointer place-items-center rounded-[4px] bg-[#141d3a] text-[#a8b8d8] ring-1 ring-[#26335c] hover:bg-[#1a2448] hover:text-[#eef6ff] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#ffc93a]"
+      aria-label={collapsed ? "Expand crew panel" : "Collapse crew panel"}
+      aria-expanded={!collapsed}
+      title={collapsed ? "Show the crew panel" : "Fold the crew panel to give the galley more room"}
+      onClick={() => ui.toggleCrew()}
+    >
+      <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden>
+        <path d={collapsed ? "M4 2 L8 6 L4 10" : "M8 2 L4 6 L8 10"} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    </button>
+  );
+}
+
+/** The folded crew panel: who is on shift (a portrait each, needs-you ringed in pink), and the way back out. */
+function CrewRail({ onShift, needs }: { onShift: CrewMember[]; needs: number }) {
+  return (
+    <section aria-label="Crew (folded)" className="fixed bottom-4 left-4 top-[74px] z-10 flex flex-col items-center gap-2 font-[system-ui]" style={{ width: CREW_RAIL_W }}>
+      <CrewToggle collapsed />
+      <span className="text-[11px] font-extrabold tabular-nums text-[#a8b8d8]" title={`${onShift.length} on shift`} aria-label={`${onShift.length} on shift`}>
+        {onShift.length}
+      </span>
+      {needs > 0 && (
+        <span className="inline-flex items-center gap-0.5 text-[11px] font-extrabold text-[#ff4f7b]" title={`${needs} need you`} aria-label={`${needs} need you`}>
+          <MarkIcon k="needs" color="#ff4f7b" />
+          {needs}
+        </span>
+      )}
+      <ul className="scroll-thin m-0 flex min-h-0 list-none flex-col items-center gap-1.5 overflow-y-auto p-0">
+        {onShift.map((c) => (
+          <li key={c.id}>
+            <button
+              type="button"
+              className={`block cursor-pointer rounded-[4px] p-0 outline-offset-1 ${c.state === "needs" ? "outline outline-2 outline-[#ff4f7b]" : ""} focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#ffc93a]`}
+              onClick={() => ui.openAgent(c.id)}
+              aria-label={`${c.name}, ${c.job}. ${c.status}.`}
+              title={`${c.name} · ${c.status}`}
+            >
+              <RobotPortrait character={c.character} size={32} accent={c.color} />
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
 
 type Mark = "needs" | "work" | "review" | "off" | "wait" | "idle";
 
@@ -327,6 +385,7 @@ function TicketCardView({ t, helpers, selected }: { t: TicketCard; helpers: Work
 export function CrewPanel() {
   const snap = useOffice((s) => s.snap);
   const drawer = useUi((s) => s.drawer);
+  const collapsed = useUi((s) => s.crewCollapsed);
   const model = useMemo(() => (snap ? buildGalley(snap) : null), [snap]);
   if (!model) return null;
   const selected = drawer?.kind === "agent" ? drawer.id : null;
@@ -339,11 +398,12 @@ export function CrewPanel() {
   const gated = model.tickets.filter((t) => t.needsYou).length;
   const helpers = model.allHelpers;
   const coordinatorHelpers = helpers.filter((h) => (h.parent ?? "coordinator") === (model.coordinator?.id ?? "coordinator"));
+  if (collapsed) return <CrewRail onShift={onShift} needs={needs} />;
 
   return (
     <section aria-label="Crew" className="fixed left-4 top-[74px] z-10 flex flex-col gap-2 font-[system-ui]" style={{ width: CREW_W, bottom: 16 + ACTIVITY_H + 10 }}>
-      <div className="scroll-thin flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto pr-1">
-        <h2 className="m-0 flex items-baseline gap-2 text-[12px] font-extrabold uppercase tracking-[0.08em] text-[#a8b8d8]">
+      <div className="flex shrink-0 items-center gap-2 pr-1">
+        <h2 className="m-0 flex min-w-0 flex-1 items-baseline gap-2 text-[12px] font-extrabold uppercase tracking-[0.08em] text-[#a8b8d8]">
           Crew · {onShift.length} on shift
           {needs > 0 && (
             <span className="inline-flex items-center gap-1 text-[#ff4f7b]">
@@ -352,6 +412,9 @@ export function CrewPanel() {
             </span>
           )}
         </h2>
+        <CrewToggle collapsed={false} />
+      </div>
+      <div className="scroll-thin flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto pr-1">
         {rosterOnly.length ? (
           <div className="flex flex-col gap-2">
             {rosterOnly.map((c) => (

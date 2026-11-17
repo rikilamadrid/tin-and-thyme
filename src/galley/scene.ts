@@ -5,8 +5,8 @@
 // narrow margin. Areas explain themselves with furniture, not captions: the only
 // words on the floor are ORDERS, MAIN, ticket IDs, names and alerts.
 //
-//   windows ▸ ORDERS rail │ HEAD CHEF office (glass) │ fridge │ windows ▸ co-op couch
-//                                                     │ transporter tube
+//   windows ▸ ORDERS rail │ HEAD CHEF office (glass) │ transport │ windows ▸ co-op couch
+//                                                     │    pod    │
 //   ─────────────── aisle ──────────────────────────────────────────────────────────
 //   cooktop pods × 5                                  │ café: range, coffee, stools
 //   ─────────────── aisle ──────────────────────────────────────────────────────────
@@ -24,9 +24,9 @@ import { C, drawRobot, icon, robotSize, type IconKind } from "./robots";
 // plus its gap, so a band can grow (or a new one be inserted) without hand-moving everything below it.
 // Every position further down is written against these anchors, never as a bare room coordinate.
 //
-//   top band     windows, ORDERS, HEAD CHEF office, fridge, lounge     y 32 … TOP_BAND_END
-//   GAP.top      open floor under the office
-//   prep band    upper aisle, transporter, cooktop pods, café          AISLE_Y …
+//   top band     windows, ORDERS, HEAD CHEF office, transport pod, lounge   y 32 … TOP_BAND_END
+//   GAP.top      open floor under the office and the pod
+//   prep band    upper aisle, cooktop pods, café                            AISLE_Y …
 //   GAP.line     open floor between the prep line and the lower band
 //   lower band   subagent stations (left), reviewers at the pass        SUBS_Y …
 //   GAP.lower    open floor above the belt
@@ -86,15 +86,143 @@ const SCAN = { cx: 395, w: 30 };
 /** How far each reviewer stands from the scanner's centre: far enough that their name tags clear its hood. */
 const PASS_DX = 46;
 /**
- * The crew transporter: a glass tube on the upper aisle beside the prep line. Sessions beam in here when
- * they start and beam out when they end; work itself only travels by belt, scanner and the MAIN hatch.
+ * The crew transporter: a glass pod on a pad, in the top band between the office and the lounge. Sessions
+ * beam in here when they start and beam out when they end; work itself only travels by belt, scanner and
+ * the MAIN hatch. `y` is the pad (the pod's base); the column above it holds the waiting tags.
  */
-export const TUBE = { cx: 358, y: AISLE_Y - 2, w: 30, h: 46 };
+export const TUBE = { cx: 357, y: TOP_BAND_END - 10, w: 30, h: 44 };
 /** Walking routes: the upper aisle (AISLE_Y), and the lane down past the prep line to the scanner. */
 export const LANE_X = 336;
 /** How long one beam lasts, and when several queue up. */
 export const BEAM_MS = 520;
 export const BEAM_BUSY_MS = 300;
+
+/**
+ * Books the transporter for one beam. Beams run one at a time: one that has to wait starts when the pod is
+ * next free and runs the shorter BEAM_BUSY_MS. `q.free` is when the pod is next free (performance.now()).
+ */
+export function beamSlot(q: { free: number }, now: number, kind: "in" | "out"): Beam {
+  const t0 = Math.max(now, q.free);
+  const dur = t0 > now ? BEAM_BUSY_MS : BEAM_MS;
+  q.free = t0 + dur;
+  return { kind, t0, dur };
+}
+
+// ---------------------------------------------------------------- decoration timing (Feature 11)
+//
+// Everything here is decoration. The working cue follows observed state only (CrewMember.state), the chef's
+// idle runs only while his session does, and the ambient objects are pure scenery. All of it is static or
+// off under reduced motion, and none of it holds back or stands in for real state.
+
+/** A stable per-character phase (ms), so working cues never move in step. Allocation-free. */
+export function phaseOf(id: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < id.length; i++) h = Math.imul(h ^ id.charCodeAt(i), 16777619);
+  return (h >>> 0) % 1500;
+}
+
+/** The model marks this character as working right now (a live session, state "work"). */
+export const isWorking = (c: CrewMember) => c.running && c.state === "work";
+
+/** One working-cue beat lasts this long; a cue cycle is WORK_BEATS beats. */
+export const WORK_BEAT_MS = 250;
+const WORK_BEATS = 6;
+
+/**
+ * The working cue's beat for a character: -1 = no cue (not working), otherwise 0 … WORK_BEATS-1.
+ * Reduced motion gets beat 0 at every moment: a static pose with a still wisp, never a loop.
+ */
+export function cueBeat(c: CrewMember, now: number, reduce: boolean): number {
+  if (!isWorking(c)) return -1;
+  if (reduce) return 0;
+  return Math.floor((now + phaseOf(c.id)) / WORK_BEAT_MS) % WORK_BEATS;
+}
+
+/** The head chef's idle offsets for this frame (filled in place by chefIdle; never reallocated). */
+export const CHEF_IDLE = { dx: 0, dy: 0, sip: false };
+
+/**
+ * Basil's relaxed idle while his session runs: a slow breath, a glance toward a screen every few seconds,
+ * and now and then a sip of coffee (a wisp off his mug). Decorative; still when he isn't running or
+ * under reduced motion.
+ */
+export function chefIdle(c: CrewMember | null, now: number, reduce: boolean, moving: boolean) {
+  CHEF_IDLE.dx = 0;
+  CHEF_IDLE.dy = 0;
+  CHEF_IDLE.sip = false;
+  if (!c || !c.running || reduce || moving) return CHEF_IDLE;
+  CHEF_IDLE.dy = Math.floor(now / 1200) % 2 === 1 ? -1 : 0;
+  const glance = now % 9000;
+  if (glance > 6800 && glance < 8200) CHEF_IDLE.dx = Math.floor(now / 9000) % 2 ? 1 : -1;
+  CHEF_IDLE.sip = now % 14000 > 11500;
+  return CHEF_IDLE;
+}
+
+/** Ambient scenery: how rare and how brief. Times in ms. */
+export const AMBIENT = { gapMin: 120_000, gapMax: 360_000, passMin: 6_000, passMax: 12_000 };
+export const AMBIENT_KINDS = ["duck", "toaster", "comet", "satellite"] as const;
+export type AmbientKind = (typeof AMBIENT_KINDS)[number];
+
+/** One object drifting past: through the back-wall windows, or across space above the hull. */
+export interface AmbientPass {
+  kind: AmbientKind;
+  lane: "windows" | "space";
+  t0: number;
+  dur: number;
+  /** Height of its track (logical units). */
+  y: number;
+  /** 1 = left to right. */
+  dir: 1 | -1;
+}
+
+export interface AmbientState {
+  /** PRNG state (mulberry32). */
+  seed: number;
+  /** When the next object may appear. */
+  next: number;
+  cur: AmbientPass | null;
+}
+
+/** mulberry32: a tiny seeded PRNG; advances `s.seed` and returns [0, 1). */
+function rand(s: AmbientState): number {
+  s.seed = (s.seed + 0x6d2b79f5) | 0;
+  let t = s.seed;
+  t = Math.imul(t ^ (t >>> 15), t | 1);
+  t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+}
+
+const ambientGap = (s: AmbientState) => AMBIENT.gapMin + rand(s) * (AMBIENT.gapMax - AMBIENT.gapMin);
+
+/** A scheduler that shows nothing for the first gap. Deterministic for a given seed and start time. */
+export function ambientInit(seed: number, now: number): AmbientState {
+  const s: AmbientState = { seed: seed | 0, next: 0, cur: null };
+  s.next = now + ambientGap(s);
+  return s;
+}
+
+/**
+ * Advances the scheduler to `now` and returns the object on screen, if any. One at a time: the next gap is
+ * drawn only when the current pass ends. With reduced motion nothing ever appears.
+ */
+export function ambientStep(s: AmbientState, now: number, reduce: boolean): AmbientPass | null {
+  if (reduce) {
+    s.cur = null;
+    return null;
+  }
+  if (s.cur && now >= s.cur.t0 + s.cur.dur) {
+    s.next = s.cur.t0 + s.cur.dur + ambientGap(s);
+    s.cur = null;
+  }
+  if (!s.cur && now >= s.next) {
+    const kind = AMBIENT_KINDS[Math.floor(rand(s) * AMBIENT_KINDS.length)];
+    const lane = rand(s) < 0.6 ? "windows" : "space";
+    const dur = AMBIENT.passMin + rand(s) * (AMBIENT.passMax - AMBIENT.passMin);
+    const y = lane === "windows" ? 41 + Math.round(rand(s) * 8) : VIEW.y + 3 + Math.round(rand(s) * 4);
+    s.cur = { kind, lane, t0: now, dur, y, dir: rand(s) < 0.5 ? 1 : -1 };
+  }
+  return s.cur;
+}
 
 /** Where each crew member stands (feet, centre). */
 export const SPOTS = {
@@ -109,10 +237,10 @@ export const SPOTS = {
   passQueue: { x: LANE_X, y: BELT_Y - 44 },
   /** The door in the left wall, on the upper aisle. */
   door: { x: 38, y: AISLE_Y - 8 },
-  /** Inside the transporter tube (feet). */
+  /** Inside the transport pod (feet). */
   tube: { x: TUBE.cx, y: TUBE.y - 2 },
-  /** Beside the tube, for a session waiting its turn to beam out. */
-  tubeQueue: { x: TUBE.cx - 20, y: AISLE_Y },
+  /** In front of the pod, just off its pad: a session waiting its turn to beam out stands here. */
+  tubeQueue: { x: TUBE.cx, y: TOP_BAND_END + 22 },
 };
 
 export type HangoutKind = "couch" | "stool" | "floor";
@@ -183,6 +311,8 @@ export interface FrameState {
   reduce: boolean;
   /** The logical rectangle on screen (it can extend past VIEW). */
   view: { x: number; y: number; w: number; h: number };
+  /** The ambient object drifting past right now (decoration only; always null under reduced motion). */
+  ambient?: AmbientPass | null;
 }
 
 // ---------------------------------------------------------------- labels and robots
@@ -362,6 +492,64 @@ function window(B: Backend, x: number, y: number, w: number, h: number, P: boole
   B.rect(x + 2, y + 2, w - 4, 1, "#9fb4e8", 0.25);
 }
 
+/** The back-wall window panes (inner glass): ambient objects in the windows lane show only through these. */
+const PANES = [
+  [44, 36, 58, 20],
+  [114, 36, 58, 20],
+  [392, 36, 60, 22],
+  [460, 36, 60, 22],
+] as const;
+
+/** What the ambient drawers read (kept in one place so a frame allocates nothing for them). */
+const AMB = { B: null as Backend | null, kind: "duck" as AmbientKind, x: 0, y: 0, k: 0, dir: 1 as 1 | -1 };
+
+/** One small piece of scenery at (AMB.x, AMB.y), about 10×8 units, facing its direction of travel. */
+function ambientObject() {
+  const B = AMB.B!;
+  const { x, y, k, dir } = AMB;
+  const bob = Math.round(Math.sin(k * Math.PI * 6));
+  if (AMB.kind === "duck") {
+    B.ell(x, y + 1 + bob, 4, 2.6, C.yellow, { ink: true });
+    B.ell(x + dir * 3, y - 2 + bob, 2.2, 2, C.yellow, { ink: true });
+    B.rect(dir > 0 ? x + 5 : x - 7, y - 2 + bob, 2, 1, C.orange);
+    B.rect(x + dir * 3, y - 3 + bob, 1, 1, "#141a2e");
+  } else if (AMB.kind === "toaster") {
+    B.box(x - 4, y - 1 + bob, 8, 5, "#c9d3e0", { ink: true, r: 1, shade: true });
+    B.rect(x - 3, y - 1 + bob, 2, 1, INK);
+    B.rect(x + 1, y - 1 + bob, 2, 1, INK);
+    // the toast pops, now and then
+    if (Math.floor(k * 6) % 2) B.rect(x - 3, y - 3 + bob, 2, 2, "#d9a35a");
+  } else if (AMB.kind === "satellite") {
+    B.box(x - 1.5, y - 1.5, 3, 3, "#e8eef6", { ink: true });
+    B.rect(x - 7, y - 1, 5, 2, "#3f74c8");
+    B.rect(x + 2, y - 1, 5, 2, "#3f74c8");
+    B.rect(x, y - 4, 1, 2, "#8f9cb2");
+    if (Math.floor(k * 20) % 2) B.rect(x, y - 5, 1, 1, ALERT);
+  } else {
+    // a comet: a bright head with a fading tail behind it
+    for (let i = 1; i <= 4; i++) B.rect(x - dir * (i * 2 + 1), y - 0.5, 2, 1, "#9fe7ff", 0.7 - i * 0.15);
+    B.ell(x, y, 1.6, 1.6, "#f4f8ff");
+  }
+}
+
+/** Draws the ambient object, behind the hull (space lane) or inside the window panes (windows lane). */
+function ambient(B: Backend, f: FrameState, lane: AmbientPass["lane"]) {
+  const a = f.ambient;
+  if (!a || a.lane !== lane || f.reduce) return;
+  const k = Math.min(1, Math.max(0, (f.now - a.t0) / a.dur));
+  const x0 = lane === "windows" ? ROOM.x + 8 : f.view.x - 12;
+  const x1 = lane === "windows" ? ROOM.x + ROOM.w - 8 : f.view.x + f.view.w + 12;
+  AMB.B = B;
+  AMB.kind = a.kind;
+  AMB.x = a.dir > 0 ? x0 + (x1 - x0) * k : x1 - (x1 - x0) * k;
+  AMB.y = a.y;
+  AMB.k = k;
+  AMB.dir = a.dir;
+  if (lane === "space") ambientObject();
+  else for (const [px, py, pw, ph] of PANES) if (AMB.x > px - 10 && AMB.x < px + pw + 10) B.clip(px + 1, py + 1, pw - 2, ph - 2, ambientObject);
+  AMB.B = null;
+}
+
 function porthole(B: Backend, cx: number, cy: number, r: number, P: boolean) {
   B.ell(cx, cy, r + 2, r + 2, "#4a5876", { ink: true });
   B.ell(cx, cy, r, r, "#060a1e");
@@ -384,10 +572,7 @@ function hull(B: Backend, P: boolean) {
   B.rect(FLOOR.x, FLOOR.y, FLOOR.w, 30, "#2c3a5e");
   for (let gx = FLOOR.x; gx < FLOOR.x + FLOOR.w; gx += 38) B.rect(gx, FLOOR.y, 1, 30, "#22304f");
   B.rect(FLOOR.x, FLOOR.y + 30, FLOOR.w, 1, C.teal);
-  window(B, 44, 36, 58, 20, P);
-  window(B, 114, 36, 58, 20, P);
-  window(B, 392, 36, 60, 22, P);
-  window(B, 460, 36, 60, 22, P, true);
+  PANES.forEach(([wx, wy, ww, wh], i) => window(B, wx, wy, ww, wh, P, i === PANES.length - 1));
   // portholes along the right wall by the lounge, and one on the left aisle
   porthole(B, 524, 112, 6, P);
   porthole(B, 524, 150, 6, P);
@@ -426,12 +611,15 @@ function orderBoard(B: Backend, m: GalleyModel, P: boolean, hits: Hit[]) {
       const sy = top + 11 + k * (slipH + 2);
       const sw = cw - 6;
       const alert = s.mark === "needs";
+      // Served: a calm, finished slip (muted green paper, a check, quieter ink). Never mistakable for an alert.
+      const served = i === 3 && !alert;
       B.alpha(s.dim ? 0.55 : 1, () => {
         B.rect(sx + sw / 2 - 0.5, sy - 2, 1, 2, "#8f9cb2"); // clip
-        B.box(sx, sy, sw, slipH, alert ? T.alert : i === 3 ? "#d9f2e3" : "#f4f1e6", { ink: !P, r: 1 });
+        B.box(sx, sy, sw, slipH, alert ? T.alert : served ? "#cfe9d8" : "#f4f1e6", { ink: !P, r: 1 });
         // The column says the stage; a slip only adds the needs mark (so the alert reads without colour too).
         if (alert) icon(B, "needs", sx + 1.6, sy + 3.6, 4.4, INK, T.alert);
-        B.text(sx + (alert ? 7 : 2.2), sy + 2.4, s.id, INK, alert ? 6.6 : 7.2, 900);
+        if (served) icon(B, "done", sx + 1.6, sy + 3.6, 4.4, "#2f8a55");
+        B.text(sx + (alert || served ? 7 : 2.2), sy + 2.4, s.id, served ? "#3d6650" : INK, alert || served ? 6.6 : 7.2, 900);
       });
     });
     if (over) {
@@ -474,19 +662,33 @@ function headChef(B: Backend, m: GalleyModel, f: FrameState, P: boolean, hits: H
   // the command console: a wide curved desk with screens and a ticket printer
   B.box(x + 16, 92, w - 32, 22, "#3a4660", { ink: true, r: 6, shade: true, hi: true });
   B.rect(x + 22, 96, w - 44, 2, C.teal);
+  const coord = m.coordinator;
+  // Working cue: while the coordinator really works, one console line ticks along (static with reduced motion).
+  const beat = coord ? cueBeat(coord, f.now, f.reduce) : -1;
   for (let k = 0; k < 4; k++) {
     const sx = x + 24 + k * 26;
     B.box(sx, 84, 20, 12, INK, { r: 1 });
     B.rect(sx + 1, 85, 18, 10, k === 1 ? "#1d3a5a" : "#0f2a4a");
     B.rect(sx + 3, 87 + (k % 3), 10, 1, k % 2 ? T.accent : C.teal);
+    if (beat >= 0 && k === (beat >> 1) + 1) B.rect(sx + 3, 91, 4 + (beat % 2) * 6, 1, "#bff8f2");
   }
   B.box(x + w - 30, 98, 12, 10, "#c9d3e0", { ink: true, r: 1 });
   B.rect(x + w - 28, 106, 8, 6, "#f4f1e6");
-  const coord = m.coordinator;
+  // Basil's coffee on the console, and a wisp when he takes a sip.
+  const idle = chefIdle(coord, f.now, f.reduce, !!(coord && f.actors.get(coord.id)?.moving));
+  B.box(x + w - 42, 101, 5, 6, "#f6eedd", { ink: true, r: 1 });
+  B.rect(x + w - 37, 103, 1, 2, "#f6eedd");
+  if (idle.sip) B.rect(x + w - 40, 97 - (Math.floor(f.now / 400) % 2), 1, 2, "#e8eef6", 0.7);
+  // a swivel stool at the console, left of where he stands
+  B.rect(cx - 31, 132, 2, 9, "#8f9cb2");
+  B.ell(cx - 30, 141, 6, 1.6, "#3a4766");
+  B.ell(cx - 30, 131, 7, 2.6, "#c0304a", { ink: !P });
+  B.box(cx - 37, 119, 14, 9, "#a0283f", { ink: true, r: 3 });
   let top = 124;
   if (coord) {
-    const box = actorAt(B, coord, f, hits);
-    if (box) top = box.y;
+    // The idle shifts only the robot; the badges and the plate keep their places.
+    const box = actorAt(B, coord, f, hits, idle.dx, idle.dy);
+    if (box) top = box.y - idle.dy;
   }
   // the glass front, with the open entrance in the middle
   const gy = y + h - 10;
@@ -533,16 +735,6 @@ function headChef(B: Backend, m: GalleyModel, f: FrameState, P: boolean, hits: H
       hits.push({ ...b, kind: "needs", title: `${coord.name} needs you`, sub: coord.agent.note ?? "Answer the coordinator in its terminal" });
     }
   }
-}
-
-/** Upper right, by the office: the fridge and the water cooler. */
-function kitchen(B: Backend) {
-  B.box(338, 36, 20, 44, "#d6dde8", { ink: true, r: 2, shade: true, hi: true });
-  B.rect(340, 52, 16, 1, "#9aa6ba");
-  B.rect(354, 42, 1, 6, "#6f7c94");
-  B.rect(354, 56, 1, 10, "#6f7c94");
-  B.box(364, 52, 13, 28, "#c9d3e0", { ink: true, r: 2, shade: true });
-  B.box(366, 42, 9, 11, "#8fd8ff", { ink: true, r: 3 });
 }
 
 /** Off-shift crew parked at a hangout of this kind, with their actors. */
@@ -732,38 +924,89 @@ function belt(B: Backend, f: FrameState) {
  * MAIN: a galley service hatch at the end of the belt. A metal frame, a plate-sized opening the
  * belt runs into, a shutter, and a warm light inside. The shutter lifts only for a confirmed merge.
  */
+/** True while a confirmed delivery is going through the hatch (its shutter is up). */
+export const delivering = (f: Pick<FrameState, "now" | "deliveries">) => f.deliveries.some((d) => f.now - d.t0 > 2000 && f.now - d.t0 < 5200);
+
+/** The marquee's chase step while a real delivery goes through; -1 = the bulbs hold still (always, under reduced motion). */
+export const marqueeChase = (f: Pick<FrameState, "now" | "deliveries" | "reduce">) => (!f.reduce && delivering(f) ? Math.floor(f.now / 110) : -1);
+
+/** How far into its confetti puff a delivery is (ms), or -1 when it shows none (outside the window, or reduced motion). */
+export function confettiAge(f: Pick<FrameState, "now" | "reduce">, d: Delivery): number {
+  const age = f.now - d.t0 - CONFETTI_AT;
+  return f.reduce || age < 0 || age > CONFETTI_MS ? -1 : age;
+}
+
 function hatch(B: Backend, f: FrameState, served: number, hits: Hit[]) {
   const { x, y, w, h } = HATCH;
-  const delivering = f.deliveries.some((d) => f.now - d.t0 > 2000 && f.now - d.t0 < 5200);
+  const open = delivering(f);
   B.box(x, y, w, h, "#55607e", { ink: true, r: 5, shade: true, hi: true });
-  B.box(x + 3, y + 3, w - 6, 14, INK, { r: 2 });
-  B.text(x + w / 2, y + 5, "MAIN", T.accent, 8.6, 900, { anchor: "middle" });
+  // The MAIN marquee: a lit sign ringed with bulbs. They hold still (every other one bright) and chase only
+  // while a confirmed merge goes through; with reduced motion they never move.
+  B.box(x + 3, y + 3, w - 6, 17, INK, { r: 2 });
+  const chase = marqueeChase(f);
+  for (let i = 0, bx = x + 6; bx <= x + w - 6; bx += 4, i++) {
+    const top = chase >= 0 ? (((i - chase) % 3) + 3) % 3 === 0 : i % 2 === 0;
+    const bottom = chase >= 0 ? (i + chase) % 3 === 0 : i % 2 === 1;
+    B.rect(bx, y + 4.5, 1.2, 1.2, top ? "#fff2b0" : "#8a6a2a");
+    B.rect(bx, y + 17.5, 1.2, 1.2, bottom ? "#fff2b0" : "#8a6a2a");
+  }
+  if (open && !f.reduce) B.glow(x + w / 2, y + 11, 16, T.accent, B.kind === "pixel" ? 0.22 : 0.16);
+  B.text(x + w / 2, y + 7, "MAIN", T.accent, 8.6, 900, { anchor: "middle" });
   // the opening, at belt height, with warm light inside
   const ox = x + 4;
   const oy = BELT.y - 8;
   const ow = w - 8;
   const oh = 22;
   B.box(ox, oy, ow, oh, "#1a0f08", { ink: true, r: 3 });
-  B.glow(ox + ow / 2, oy + oh / 2, 16, T.warm, delivering ? 0.65 : 0.35);
-  B.rect(ox + 2, oy + 2, ow - 4, oh - 4, delivering ? "#ffcf8a" : "#5a2f14", delivering ? 0.85 : 0.6);
+  B.glow(ox + ow / 2, oy + oh / 2, 16, T.warm, open ? 0.65 : 0.35);
+  B.rect(ox + 2, oy + 2, ow - 4, oh - 4, open ? "#ffcf8a" : "#5a2f14", open ? 0.85 : 0.6);
   // shutter: down to just above the belt, lifted while a delivery goes through
-  const lift = delivering ? 0 : 1;
+  const lift = open ? 0 : 1;
   const sh = Math.round((oh - 12) * lift);
   if (sh > 0) {
     B.box(ox + 1, oy + 1, ow - 2, sh, "#8f9cb2", { r: 1 });
     for (let k = 0; k < sh; k += 3) B.rect(ox + 2, oy + 2 + k, ow - 4, 1, "#6f7c94");
   }
   // status lights and a hazard stripe under the opening
-  B.ell(x + 8, y + h - 8, 2.2, 2.2, delivering ? "#4fe07a" : "#2f6a48", { ink: true });
+  B.ell(x + 8, y + h - 8, 2.2, 2.2, open ? "#4fe07a" : "#2f6a48", { ink: true });
   B.ell(x + w - 8, y + h - 8, 2.2, 2.2, T.warm, { ink: true });
   for (let k = 0; k < ow - 6; k += 6) B.rect(ox + 3 + k, oy + oh + 3, 3, 2, k % 12 ? INK : T.accent);
   hits.push({ x, y, w, h, kind: "main", title: "MAIN · service hatch", sub: `${served} tickets integrated (Pathfinder confirms each merge)` });
+}
+
+const CONFETTI = [C.pink, C.yellow, C.teal, "#7fe0a8", "#fff2b0"] as const;
+/** When the confetti puff starts (as the shutter lifts) and how long it lasts, after a delivery's t0. */
+export const CONFETTI_AT = 2000;
+export const CONFETTI_MS = 1400;
+
+/**
+ * MAIN's flourish: a small confetti puff out of the hatch as the shutter lifts for a confirmed merge. It only
+ * ever plays inside a real delivery's window (FrameState.deliveries), and never with reduced motion.
+ */
+function confetti(B: Backend, f: FrameState, d: Delivery) {
+  const age = confettiAge(f, d);
+  if (age < 0) return;
+  const t = age / 1000;
+  const ox = HATCH.x + HATCH.w / 2;
+  const oy = BELT.y - 2;
+  B.alpha(Math.min(1, 1.6 - age / CONFETTI_MS), () => {
+    for (let j = 0; j < 14; j++) {
+      const r = hash(j * 13 + d.ticket.length * 7);
+      const vx = -12 - (r % 34) + (j % 4 === 0 ? 26 : 0);
+      const vy = -34 - ((r >>> 8) % 30);
+      const px = ox + vx * t;
+      const py = oy + vy * t + 46 * t * t;
+      const flip = (Math.floor(age / 90) + j) % 2;
+      B.rect(px, py, flip ? 2 : 1, flip ? 1 : 2, CONFETTI[j % CONFETTI.length]);
+    }
+  });
 }
 
 /** A confirmed merge rides the belt from the scanner into the MAIN hatch. Nothing else uses this animation. */
 function deliveries(B: Backend, f: FrameState) {
   const sy = BELT.y + 6;
   const dist = HATCH.x + 10 - SCAN.cx;
+  for (const d of f.deliveries) confetti(B, f, d);
   for (const d of f.deliveries) {
     const k = Math.min(1, (f.now - d.t0) / 3000);
     if (k >= 1) continue;
@@ -860,10 +1103,11 @@ const hash = (n: number) => {
 };
 
 /**
- * The crew transporter. A glass tube on a pad, a cap with an emitter ring, and a quick teal beam when a
- * session arrives or leaves: a column of light, scan lines running through it, a few sparkles, and the robot
- * resolving (or dissolving) row by row. Brief by design; with reduced motion there is no beam at all.
- * Above it hang the tickets waiting for their next session, and those the plan holds for the next round.
+ * The crew transporter: a glass pod on a round pad, an emitter ring over it fed by a conduit from the back
+ * wall, and a soft teal glow. A quick beam when a session arrives or leaves: a column of light, scan lines
+ * running through it, a few sparkles, and the robot resolving (or dissolving) row by row. Brief by design;
+ * with reduced motion there is no beam at all. Up the conduit hang the tickets waiting for their next
+ * session, and those the plan holds for the next round.
  */
 function transporter(B: Backend, m: GalleyModel, f: FrameState, P: boolean, hits: Hit[]) {
   const { cx, y: base, w, h } = TUBE;
@@ -877,11 +1121,22 @@ function transporter(B: Backend, m: GalleyModel, f: FrameState, P: boolean, hits
     beaming.push({ c, a, k: (f.now - a.beam.t0) / a.beam.dur });
   }
   const on = beaming.length > 0;
-  // pad and rear glass
-  B.ell(cx, base, w / 2 + 5, 5, "#3a4766", { ink: true });
-  B.ell(cx, base, w / 2 + 1, 3.4, on ? C.teal : "#26506a", { ink: !P });
-  B.box(x0, top + 4, w, h - 6, "#0d2a36", { r: 3 });
-  B.glow(cx, base - h / 2, 24, C.teal, on ? (P ? 0.32 : 0.22) : P ? 0.1 : 0.06);
+  // the conduit from the back wall down to the emitter ring
+  B.rect(cx - 2, FLOOR.y + 30, 4, top - 4 - (FLOOR.y + 30), "#3a4766");
+  B.rect(cx - 0.5, FLOOR.y + 30, 1, top - 4 - (FLOOR.y + 30), C.teal, on ? 0.9 : 0.4);
+  B.box(cx - 5, FLOOR.y + 28, 10, 5, "#55607e", { ink: true, r: 1 });
+  B.rect(cx - 2, FLOOR.y + 30, 4, 1, on ? "#bff8f2" : C.teal);
+  // the pad: a steel disc with a lit ring and four rim lights
+  B.ell(cx, base + 1, w / 2 + 7, 5.5, "#3a4766", { ink: true, shade: true });
+  B.ell(cx, base, w / 2 + 3, 3.6, on ? "#bff8f2" : C.teal, { ink: !P });
+  B.ell(cx, base, w / 2 - 2, 2.4, "#16303c");
+  B.rect(cx - w / 2 - 5, base + 1, 1, 1, C.teal);
+  B.rect(cx + w / 2 + 4, base + 1, 1, 1, C.teal);
+  B.rect(cx - 9, base + 4, 1, 1, C.teal);
+  B.rect(cx + 8, base + 4, 1, 1, C.teal);
+  // rear glass and the soft glow
+  B.box(x0, top + 4, w, h - 6, "#0d2a36", { r: 6 });
+  B.glow(cx, base - h / 2, 26, C.teal, on ? (P ? 0.32 : 0.22) : P ? 0.12 : 0.08);
   for (const { c, a, k } of beaming) {
     const kind = a.beam!.kind;
     const vis = kind === "in" ? k : 1 - k;
@@ -905,26 +1160,27 @@ function transporter(B: Backend, m: GalleyModel, f: FrameState, P: boolean, hits
     }
     hits.push({ ...box, kind: "agent", id: c.id, title: `${c.name} · ${c.job}`, sub: kind === "in" ? `beaming in · ${c.role}${c.ticket ? ` · ${c.ticket}` : ""}` : `beaming out · ${c.status}` });
   }
-  // sessions waiting their turn to beam out stand beside the tube
+  // front glass: a faint pane with two highlights, and the two posts
+  B.alpha(0.18, () => B.box(x0, top + 4, w, h - 6, "#cdf0ff", { r: 6 }));
+  B.rect(x0 + 4, top + 8, 1.5, h - 16, "#e8fbff", 0.55);
+  B.rect(x0 + w - 7, top + 10, 1, h - 20, "#e8fbff", 0.35);
+  B.box(x0 - 1, top + 4, 3, h - 5, "#55607e", { ink: true, r: 1 });
+  B.box(x0 + w - 2, top + 4, 3, h - 5, "#55607e", { ink: true, r: 1 });
+  // the emitter ring over the pod, and its light
+  B.ell(cx, top + 2, w / 2 + 4, 4.4, "#c9d3e0", { ink: true, shade: true });
+  B.ell(cx, top + 2, w / 2, 2.4, on ? "#bff8f2" : C.teal);
+  B.ell(cx, top + 2, w / 2 - 4, 1.2, "#0d2a36");
+  B.ell(cx, top - 4, 2.2, 2.2, on ? "#bff8f2" : C.teal, { ink: true });
+  hits.push({ x: x0 - 7, y: top - 8, w: w + 14, h: h + 16, kind: "tube", title: "Crew transporter", sub: on ? `Beaming: ${beaming.map((b) => `${b.c.name} ${b.a.beam!.kind}`).join(", ")}` : "Sessions beam in when they start and out when they end" });
+  // sessions waiting their turn to beam out stand in front of the pod, just off its pad
   for (const c of m.crew) {
     const a = f.actors.get(c.id);
     if (a?.beam?.kind !== "out" || f.now >= a.beam.t0) continue;
     const box = crewBot(B, c, SPOTS.tubeQueue.x, SPOTS.tubeQueue.y);
     hits.push(agentHit(box, c, `about to beam out · ${c.status}`));
   }
-  // front glass: a faint pane with two highlights, and the frame
-  B.alpha(0.18, () => B.rect(x0, top + 4, w, h - 6, "#cdf0ff"));
-  B.rect(x0 + 4, top + 7, 1.5, h - 14, "#e8fbff", 0.55);
-  B.rect(x0 + w - 7, top + 9, 1, h - 18, "#e8fbff", 0.35);
-  B.box(x0 - 1, top + 2, 3, h - 3, "#55607e", { ink: true, r: 1 });
-  B.box(x0 + w - 2, top + 2, 3, h - 3, "#55607e", { ink: true, r: 1 });
-  // the cap with its emitter ring
-  B.box(x0 - 3, top - 4, w + 6, 8, "#c9d3e0", { ink: true, r: 3, shade: true, hi: true });
-  B.rect(x0 + 1, top + 3, w - 2, 1, on ? "#bff8f2" : C.teal);
-  B.ell(cx, top - 6, 2.4, 2.4, on ? "#bff8f2" : C.teal, { ink: true });
-  hits.push({ x: x0 - 3, y: top - 8, w: w + 6, h: h + 12, kind: "tube", title: "Crew transporter", sub: on ? `Beaming: ${beaming.map((b) => `${b.c.name} ${b.a.beam!.kind}`).join(", ")}` : "Sessions beam in when they start and out when they end" });
 
-  // Tickets waiting for their next session, then those held for the next round: dashed tags above the tube.
+  // Tickets waiting for their next session, then those held for the next round: dashed tags up the conduit.
   const tags: { id: string; words: string; sub: string }[] = [
     ...m.waiting.map((t) => ({ id: t.key, words: `→ ${t.label.replace(/^Waiting for /, "")}`, sub: `${t.label} · ${t.title}` })),
     ...m.nextRound.map((id) => ({ id, words: "next round", sub: "Ready for next round: eligible, waiting for another approved dispatch" })),
@@ -932,12 +1188,12 @@ function transporter(B: Backend, m: GalleyModel, f: FrameState, P: boolean, hits
   const max = 4;
   const shown = tags.length > max ? tags.slice(0, max - 1) : tags;
   shown.forEach((t, i) => {
-    const ty = top - 26 - i * 20;
+    const ty = top - 25 - i * 19;
     waitBadge(B, cx, ty, t.id, t.words);
     hits.push({ x: cx - 30, y: ty, w: 60, h: 17, kind: "board", title: `${t.id} · ${t.words}`, sub: t.sub });
   });
   if (tags.length > max) {
-    const ty = top - 26 - (max - 1) * 20;
+    const ty = top - 25 - (max - 1) * 19;
     B.box(cx - 18, ty + 3, 36, 10, T.plate, { r: 2, ink: !P });
     B.text(cx, ty + 4.6, `+${tags.length - (max - 1)} more`, T.plateFg, 5.2, 900, { anchor: "middle" });
   }
@@ -960,8 +1216,11 @@ function line(B: Backend, m: GalleyModel, f: FrameState, P: boolean, hits: Hit[]
     const member = pod.kind === "cook" ? pod.member : null;
     const a = member ? f.actors.get(member.id) : null;
     const atPod = !!member && !!a && !a.moving && Math.abs(a.x - cx) < 1 && Math.abs(a.y - spot.y) < 1;
+    // Working cue (observed state only, phase-offset per cook): a small bob and steam off the counter.
+    const beat = member && atPod ? cueBeat(member, f.now, f.reduce) : -1;
+    const bob = beat === 1 || beat === 2 ? -1 : 0;
     // The cook stands at the counter's top edge: the cooktop sits below its feet and hides nothing.
-    const box = member && atPod ? crewBot(B, member, cx, spot.y) : null;
+    const box = member && atPod ? crewBot(B, member, cx, spot.y + bob) : null;
     // cooktop: steel counter with two burners (lit when cooking)
     B.box(x + 3, LY + 22, POD_W - 6, 12, "#c9d3e0", { ink: true, r: 3, shade: true, hi: true });
     for (const bx of [x + 13, x + POD_W - 13]) {
@@ -972,11 +1231,17 @@ function line(B: Backend, m: GalleyModel, f: FrameState, P: boolean, hits: Hit[]
       const prop = POD_PROPS[member.character];
       if (prop) B.sprite(x, LY, 1, prop);
     }
+    if (beat >= 0) {
+      for (let k = 0; k < 2; k++) {
+        const step = (beat + k * 3) % 6;
+        B.rect(x + 39 + (step % 2), LY + 18 - step * 2, step < 3 ? 2 : 1, 2, "#f4f8ff", 0.85 - step * 0.12);
+      }
+    }
     if (member) {
       const sub = `${member.role} · ${member.ticket ?? "no ticket"} · ${member.status}`;
       if (box) {
         if (f.selected === member.id) brackets(B, box);
-        const b = badge(B, cx, box.y - 16, member.state === "needs" ? "needs" : "work", member.ticket, "", { alert: member.state === "needs" });
+        const b = badge(B, cx, box.y - bob - 16,member.state === "needs" ? "needs" : "work", member.ticket, "", { alert: member.state === "needs" });
         hits.push({ ...b, kind: "agent", id: member.id, title: `${member.name} · ${member.job}`, sub });
         hits.push(agentHit(box, member, sub));
       }
@@ -995,11 +1260,11 @@ function line(B: Backend, m: GalleyModel, f: FrameState, P: boolean, hits: Hit[]
 }
 
 /** A crew member wherever its actor currently is (walking, in the office, beside the scanner). */
-function actorAt(B: Backend, c: CrewMember, f: FrameState, hits: Hit[]): Box | null {
+function actorAt(B: Backend, c: CrewMember, f: FrameState, hits: Hit[], dx = 0, dy = 0): Box | null {
   const a = f.actors.get(c.id);
   if (!a || a.x < 0 || inBeam(a, f.now)) return null;
   const bob = a.moving && !f.reduce ? (Math.floor(f.now / 160) % 2) * -1 : 0;
-  const box = crewBot(B, c, a.x, a.y + bob, a.alpha);
+  const box = crewBot(B, c, a.x + dx, a.y + bob + dy, a.alpha);
   if (f.selected === c.id) brackets(B, box);
   hits.push(agentHit(box, c, `${c.role}${c.ticket ? ` · ${c.ticket}` : ""} · ${c.status}`));
   if (c.place === "pass" && !a.moving) {
@@ -1031,9 +1296,10 @@ export function drawGalley(B: Backend, m: GalleyModel, f: FrameState): Hit[] {
   const P = B.kind === "pixel";
   const hits: Hit[] = [];
   space(B, f.view);
+  ambient(B, f, "space");
   hull(B, P);
+  ambient(B, f, "windows");
   orderBoard(B, m, P, hits);
-  kitchen(B);
   lounge(B, m, f, P, hits);
   belt(B, f);
   hatch(B, f, m.served, hits);
