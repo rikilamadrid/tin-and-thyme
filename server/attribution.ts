@@ -138,7 +138,10 @@ export type Verdict = "DONE" | "PASS" | "FINDINGS" | "GATE" | "FAILED";
  *
  * An explicit `VERDICT: …` line wins (a review may quote the developer's `DONE:` or say "GATE: none raised"
  * before it). Otherwise the LAST report line (`DONE: …`, `GATE: …`, `FAILED: …`) is the session's own
- * ending; a `**Result: FINDINGS.**` headline counts only when there is neither.
+ * ending; a `**Result: FINDINGS.**` headline counts only when there is neither. Last of all, a review's own
+ * headline: the report's first line being `PASS` or `FINDINGS` alone (as the review instructions ask), whose
+ * text is the line after it. A verdict word anywhere else (prose, a `>` quotation, a fenced code block) is not
+ * a headline.
  */
 export function readReport(report: string | null | undefined): { verdict: Verdict; text: string } | null {
   if (!report) return null;
@@ -149,6 +152,12 @@ export function readReport(report: string | null | undefined): { verdict: Verdic
   const lead = [...report.matchAll(/^[\s>*_]*(DONE|PASS|FINDINGS|GATE|FAILED)\s*:\s*(.*)$/gm)].at(-1);
   if (lead) return { verdict: lead[1] as Verdict, text: strip(lead[2]) || strip(lead[0]) };
   const result = /\bResult\s*:\s*\**\s*(DONE|PASS|FINDINGS|GATE|FAILED)\b/.exec(report);
-  if (!result) return null;
-  return { verdict: result[1].toUpperCase() as Verdict, text: firstLine() };
+  if (result) return { verdict: result[1].toUpperCase() as Verdict, text: firstLine() };
+  // The headline: the first non-blank line is the bare word (optionally bold, or a Markdown heading), nothing else.
+  const lines = report.split("\n").map(strip);
+  const at = lines.findIndex((l) => l);
+  const headline = /^(?:#{1,6} )?(PASS|FINDINGS)\.?$/.exec(lines[at] ?? "");
+  if (!headline) return null;
+  const next = lines.slice(at + 1).find((l) => l && !/^(#|```|~~~)/.test(l));
+  return { verdict: headline[1] as Verdict, text: next ?? headline[1] };
 }
