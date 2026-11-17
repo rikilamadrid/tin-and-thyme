@@ -17,7 +17,7 @@ import { newAgent } from "./store";
 import { mergeByNotice } from "./githubSync";
 import { CHARACTERS } from "../src/data/crew";
 import { FAMILY_COLOR } from "../src/data/crewContract";
-import { isPrompter, PROMPTER_ID, PROMPTER_NO_TASKS, PROMPTER_ROLE_MD, PROMPTER_TITLE, prompterAddProblem, prompterCrew } from "../src/data/prompter";
+import { isPrompter, PROMPTER_CLI, PROMPTER_ID, PROMPTER_NO_TASKS, PROMPTER_ROLE_MD, PROMPTER_TITLE, prompterAddProblem, prompterCliProblem, prompterCrew } from "../src/data/prompter";
 
 /** A stack from the browser, checked against the catalog. Null when nothing is chosen. */
 function cleanStack(raw: unknown): StackConfig | null {
@@ -111,23 +111,24 @@ export function makeCommands(hub: Hub, sessions: Sessions, planner: Planner, inb
 
     /**
      * Settings → Team → "Add the Master Prompter" (Feature 04). At most one per kitchen: a second add is
-     * refused (returned, and said in the activity feed). It runs where the lead runs, reads the project and
-     * never takes tasks; Start launches it like any agent. Returns the refusal, or null once it is added.
+     * refused (returned, and said in the activity feed), and so is any coding agent but Claude Code. It runs
+     * where the lead runs, reads the project and never takes tasks; Start launches it like any agent.
+     * Returns the refusal, or null once it is added.
      */
     addPrompter: (raw) => {
-      const refused = prompterAddProblem(team());
+      const input = (raw ?? {}) as Partial<NewAgentInput>;
+      const refused = prompterAddProblem(team()) ?? prompterCliProblem(input.cli);
       if (refused) {
         hub.activity("config", null, refused);
         return refused;
       }
-      const input = (raw ?? {}) as Partial<NewAgentInput>;
       let id = PROMPTER_ID;
       for (let i = 2; team().some((a) => a.id === id); i++) id = `${PROMPTER_ID}-${i}`;
       const lead = team().find((a) => a.isLead);
       const agent = newAgent(id, CHARACTERS.alien.name, PROMPTER_TITLE, FAMILY_COLOR.prompter, false);
       agent.crew = prompterCrew();
       agent.roleMd = PROMPTER_ROLE_MD;
-      agent.cli = "claude";
+      agent.cli = PROMPTER_CLI;
       agent.model = str(input.model, 60).trim();
       agent.mode = input.mode === "local" || input.mode === "sandbox" ? input.mode : (lead?.mode ?? "sandbox");
       if (lead) agent.sandbox = structuredClone(lead.sandbox);
@@ -144,6 +145,12 @@ export function makeCommands(hub: Hub, sessions: Sessions, planner: Planner, inb
       const agent = hub.cfg(str(id));
       if (!agent) return;
       const p = (patch ?? {}) as AgentPatch;
+      // The Master Prompter stays on Claude Code, whose flag blocks its editing tools: the whole change is refused.
+      const cliRefused = isPrompter(agent) ? prompterCliProblem(p.cli) : null;
+      if (cliRefused) {
+        hub.activity("config", agent.id, cliRefused);
+        return cliRefused;
+      }
       const before = `${agent.cli}/${agent.mode}`;
       for (const k of ["name", "role", "model", "color", "roleMd"] as const) if (typeof p[k] === "string") agent[k] = str(p[k], 8000);
       if (p.mode === "sandbox" || p.mode === "local") agent.mode = p.mode;

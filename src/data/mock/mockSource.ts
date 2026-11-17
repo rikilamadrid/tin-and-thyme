@@ -8,7 +8,7 @@ import * as T from "./terminalScripts";
 import { mockSbx, mockSession, mockSetup, World } from "./world";
 import { CHARACTERS } from "../crew";
 import { FAMILY_COLOR } from "../crewContract";
-import { isPrompter, PROMPTER_ID, PROMPTER_ROLE_MD, PROMPTER_TITLE, prompterAddProblem, prompterCrew } from "../prompter";
+import { isPrompter, PROMPTER_ID, PROMPTER_ROLE_MD, PROMPTER_TITLE, prompterAddProblem, prompterCliProblem, prompterCrew } from "../prompter";
 
 const TICK_MS = 50;
 const TERM_MS = 30;
@@ -265,6 +265,9 @@ export function createMockSource(): OfficeDataSource {
     updateAgent(id, patch: AgentPatch) {
       const agent = world.cfg(id);
       if (!agent) return;
+      // The server's rule: the Master Prompter stays on Claude Code.
+      const cliRefused = isPrompter(agent) ? prompterCliProblem(patch.cli) : null;
+      if (cliRefused) return world.activity("config", id, cliRefused);
       Object.assign(agent, patch);
       world.configChanged();
     },

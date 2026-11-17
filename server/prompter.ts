@@ -12,13 +12,13 @@
 //                prompter family's only character, reserved for that kind) once per occurrence;
 //   - roster   = one team row, PROMPTER_ID, while the alien is added or its session is still live.
 //
-// It writes nothing into the project: its hooks and role go in ~/.controlroom/<key>/, and its role is the
-// coaching contract (src/data/prompter.ts). Pathfinder never dispatches it, so it never takes a ticket.
+// The kitchen writes nothing into the project for it: its hooks and role go in ~/.controlroom/<key>/, and its
+// role is the coaching contract (src/data/prompter.ts). Pathfinder never dispatches it, so it never takes a ticket.
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { crewName, FAMILY_COLOR, PROMPTER_CHARACTER, type CrewSession } from "../src/data/crewContract";
-import { PROMPTER_DISALLOWED_TOOLS, PROMPTER_ID, PROMPTER_ROLE, PROMPTER_ROLE_MD, PROMPTER_TITLE, prompterCrew } from "../src/data/prompter";
+import { PROMPTER_DISALLOWED_TOOLS, PROMPTER_ID, PROMPTER_PERMISSION_MODE, PROMPTER_ROLE, PROMPTER_ROLE_MD, PROMPTER_TITLE, prompterCrew } from "../src/data/prompter";
 import type { AgentConfig } from "../src/data/types";
 import type { CrewRegistry } from "./crew";
 import { Hub } from "./hub";
@@ -44,7 +44,7 @@ export interface PrompterDeps {
   changed: () => void;
 }
 
-/** The `--settings` file for the prompter's session: hook reporting, and every editing tool denied. */
+/** The `--settings` file for the prompter's session: hook reporting, and Claude Code's editing tools denied. */
 export function writePrompterSettings(dir: string, hookUrl: string, agentToken: string): string {
   mkdirSync(dir, { recursive: true });
   const post = (event: string) => ({
@@ -59,12 +59,13 @@ export function writePrompterSettings(dir: string, hookUrl: string, agentToken: 
 }
 
 /**
- * The command the prompter's session runs: Claude Code with the coaching role and no editing tools. Its
- * permission mode is pinned to `default`, so a user's global auto or bypass mode never lets it run a
- * command unasked: anything beyond reading waits for the human.
+ * The command the prompter's session runs: Claude Code with the coaching role and its editing tools denied.
+ * Its permission mode is pinned to `manual`, so a user's global auto or bypass mode never lets it run a
+ * command unasked: anything beyond reading (a Bash call included) waits for the human. Bash is not
+ * removed, so this is not a read-only filesystem (ticket 04.3).
  */
 export function prompterLaunchArgs(settings: string): string[] {
-  return ["--settings", settings, "--append-system-prompt", PROMPTER_ROLE_MD, "--disallowedTools", PROMPTER_DISALLOWED_TOOLS.join(","), "--permission-mode", "default"];
+  return ["--settings", settings, "--append-system-prompt", PROMPTER_ROLE_MD, "--disallowedTools", PROMPTER_DISALLOWED_TOOLS.join(","), "--permission-mode", PROMPTER_PERMISSION_MODE];
 }
 
 export class PathfinderPrompter {

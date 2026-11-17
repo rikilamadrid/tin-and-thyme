@@ -2,7 +2,8 @@
 //
 // One per kitchen, added from Settings → Team and removed like any agent. It is flagged by its crew
 // role (`crew.role === "prompter"`), wears the `alien` character (the prompter family's only member,
-// reserved for it in crewContract.ts), never takes a ticket and never edits files. Shared by the
+// reserved for it in crewContract.ts), never takes a ticket, and is told not to edit files (Claude Code's
+// editing tools are denied; see PROMPTER_DISALLOWED_TOOLS for what that does and doesn't cover). Shared by the
 // server (adding it, launching it, keeping assignment away from it) and the UI (Settings, galley).
 
 import { CHARACTERS } from "./crew";
@@ -33,8 +34,25 @@ export function prompterAddProblem(team: readonly Pick<AgentConfig, "crew" | "na
   return p ? `The kitchen already has its ${PROMPTER_TITLE} (${p.name}). There is at most one.` : null;
 }
 
-/** Tools the prompter's session may never use: it reads and advises, and never edits a file (Claude Code's editing tools). */
+/**
+ * Claude Code's file-editing tools, which the prompter's session is denied. This is a tool guard, not a
+ * read-only filesystem: Bash stays available, so a shell command could still write. Its permission mode is
+ * pinned to `manual` so each such command asks the human first (ticket 04.3 tracks a real read-only sandbox).
+ */
 export const PROMPTER_DISALLOWED_TOOLS = ["Edit", "Write", "NotebookEdit"] as const;
+
+/** The permission mode the prompter's Claude Code session is pinned to: every command beyond reading asks the human. */
+export const PROMPTER_PERMISSION_MODE = "manual";
+
+/** The only coding agent the prompter runs on: its editing-tool guard is a Claude Code flag that Codex has no equivalent of. */
+export const PROMPTER_CLI = "claude" as const;
+
+/** Why the prompter can't run on this coding agent (anything but Claude Code), or null when it can. Absent means "unchanged". */
+export function prompterCliProblem(cli: unknown): string | null {
+  if (cli === undefined || cli === PROMPTER_CLI) return null;
+  const name = cli === "codex" ? "Codex" : typeof cli === "string" && cli.trim() ? `"${cli.slice(0, 40)}"` : "another agent";
+  return `The ${PROMPTER_TITLE} runs only on Claude Code: its editing tools are blocked with a Claude Code setting that ${name} doesn't have. It can't be switched to ${name}.`;
+}
 
 /** Why the prompter can't be given a ticket. */
 export const PROMPTER_NO_TASKS = `The ${PROMPTER_TITLE} coaches prompt-writing and never takes tasks. Assign the work to a teammate instead.`;

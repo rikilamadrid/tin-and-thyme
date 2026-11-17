@@ -90,7 +90,7 @@ section("Contract: the alien is catalogued and reserved for the prompter's own s
 
 // ---------------------------------------------------------------- 2. role
 
-section("Role: Feature 04's coaching contract, read-only");
+section("Role: Feature 04's coaching contract, editing tools denied (not a read-only filesystem; 04.3)");
 {
   const md = P.PROMPTER_ROLE_MD;
   check("it reads only what is needed, and names that context", /Read only the project context that request needs/.test(md) && ["CLAUDE.md", "AGENTS.md", "context/project-overview.md", "context/current-ticket.md", "context/features/", "context/tickets/", "context/handoff.md"].every((f) => md.includes(f)) && /Never load the whole repository/.test(md));
@@ -108,15 +108,20 @@ section("Role: Feature 04's coaching contract, read-only");
   check("the lead's ROLE.md says never to assign it a task, and marks it in the team list", lead.includes("Never assign a task to the Master Prompter") && lead.includes("Zorbo — Master Prompter (Master Prompter: coaches the user's prompts, never takes tasks)"));
   check("a teammate's ROLE.md is unchanged by it (still its worker rules)", roleMd(config.team[1], config).includes("call get_my_task first"));
   const args = adapters.claude.launch(agent).args;
-  check("native launch: Claude Code gets every editing tool disallowed", args.join(" ").includes("--disallowedTools Edit,Write,NotebookEdit"), args);
+  check("native launch: Claude Code gets its editing tools disallowed", args.join(" ").includes("--disallowedTools Edit,Write,NotebookEdit"), args);
   check("…and a teammate's launch is unchanged", !adapters.claude.launch(config.team[1]).args.includes("--disallowedTools"));
+  const localArgs = adapters.claude.launch({ ...agent, mode: "local" }).args.join(" ");
+  check("native Local launch: permission mode pinned to manual (a user's global auto or bypass mode never runs a command unasked)", localArgs.endsWith("--disallowedTools Edit,Write,NotebookEdit --permission-mode manual"), localArgs);
+  check("…a Sandbox launch keeps the sandbox's own permissions (no mode flag)", !adapters.claude.launch({ ...agent, mode: "sandbox" }).args.includes("--permission-mode"));
+  check("…and a Local teammate's launch is unchanged", !adapters.claude.launch({ ...config.team[1], mode: "local" }).args.includes("--permission-mode"));
+  check("its CLI rule: only Claude Code (absent = unchanged), anything else says why", P.PROMPTER_CLI === "claude" && P.prompterCliProblem(undefined) === null && P.prompterCliProblem("claude") === null && /runs only on Claude Code.*can't be switched to Codex/.test(P.prompterCliProblem("codex") ?? "") && !!P.prompterCliProblem("gemini") && !!P.prompterCliProblem(""));
 
   const settings = writePrompterSettings(join(HOME, "state"), "http://127.0.0.1:7999/hook/prompter", "tok");
   const json = JSON.parse(readFileSync(settings, "utf8"));
   check("Pathfinder launch: settings deny every editing tool and report hooks to /hook/prompter", JSON.stringify(json.permissions.deny) === JSON.stringify([...P.PROMPTER_DISALLOWED_TOOLS]) && JSON.stringify(json.hooks.Stop).includes("/hook/prompter/Stop") && settings.startsWith(HOME));
   const la = prompterLaunchArgs(settings);
   check("Pathfinder launch: the role goes in as an appended system prompt, nothing is written into the project", la[0] === "--settings" && la.includes("--append-system-prompt") && la[la.indexOf("--append-system-prompt") + 1] === md && la[la.indexOf("--disallowedTools") + 1] === "Edit,Write,NotebookEdit");
-  check("Pathfinder launch: permission mode pinned to default (a global auto mode never lets it act unasked)", la.join(" ").endsWith("--permission-mode default"));
+  check("Pathfinder launch: permission mode pinned to manual, the documented name (a global auto mode never lets it act unasked)", P.PROMPTER_PERMISSION_MODE === "manual" && la.join(" ").endsWith("--permission-mode manual") && !la.includes("default"), la.slice(-2));
 }
 
 // ---------------------------------------------------------------- 3. native (server command path)
@@ -165,6 +170,23 @@ section("Native team: Settings → Team → Add the Master Prompter (server comm
   await commands.removeAgent("prompter", { deleteSandbox: false, deleteFolder: false });
   check("removed like any agent", !P.findPrompter(hub.snap.config.team) && removed.includes("prompter") && !hub.status("prompter"));
   check("once removed it can be added again", commands.addPrompter() === null && hub.snap.config.team.filter(P.isPrompter).length === 1);
+
+  // Review Low 1: Settings could switch it to Codex, whose launch has no tool guard. The server refuses.
+  const cliRefused = commands.updateAgent("prompter", { cli: "codex" });
+  const kept = hub.cfg("prompter")!;
+  check("switching it to Codex is refused on update, says why, and it stays on Claude Code", typeof cliRefused === "string" && /runs only on Claude Code/.test(cliRefused) && kept.cli === "claude" && P.isPrompter(kept) && hub.snap.activity.some((e) => e.text === cliRefused), cliRefused);
+  check("…so its launch keeps the editing-tool guard", adapters.claude.launch(kept).args.join(" ").includes("--disallowedTools Edit,Write,NotebookEdit"));
+  const name = kept.name;
+  check("…and a patch carrying the Codex switch is refused whole (nothing else in it applies)", typeof commands.updateAgent("prompter", { cli: "codex", name: "Renamed" } as never) === "string" && hub.cfg("prompter")!.name === name && hub.cfg("prompter")!.cli === "claude");
+  check("…any other non-Claude value is refused too", typeof commands.updateAgent("prompter", { cli: "gemini" } as never) === "string" && hub.cfg("prompter")!.cli === "claude");
+  check("…while a patch keeping Claude Code, or without a CLI, still applies", commands.updateAgent("prompter", { cli: "claude", name: "Zed" }) === undefined && hub.cfg("prompter")!.name === "Zed" && commands.updateAgent("prompter", { model: "sonnet" }) === undefined && hub.cfg("prompter")!.model === "sonnet");
+  const mate = hub.snap.config.team.find((a) => !a.isLead && !P.isPrompter(a))!;
+  commands.updateAgent(mate.id, { cli: "codex" });
+  check("…and a teammate can still switch to Codex", hub.cfg(mate.id)!.cli === "codex");
+  await commands.removeAgent("prompter", { deleteSandbox: false, deleteFolder: false });
+  const addCodex = commands.addPrompter({ cli: "codex" });
+  check("adding it as Codex is refused, says why, and adds nothing", typeof addCodex === "string" && /runs only on Claude Code/.test(addCodex) && !P.findPrompter(hub.snap.config.team), addCodex);
+  check("…while adding it as Claude Code (or with no CLI) is accepted", commands.addPrompter({ cli: "claude" }) === null && P.findPrompter(hub.snap.config.team)?.cli === "claude");
 }
 
 // ---------------------------------------------------------------- 4. Pathfinder (crew book)
@@ -229,7 +251,7 @@ section("Pathfinder kitchen: the prompter in the crew book (09.3's persistent cr
 
   await k.prompter.start();
   const live = Object.values(k.crew.book.sessions).find((s) => s.kind === "prompter" && s.phase === "live");
-  check("Start: one Claude Code session in the project root, with the coaching role and no editing tools", launched.length === 1 && launched[0].id === "prompter" && launched[0].dir === root && launched[0].args.includes("--append-system-prompt") && launched[0].args.includes("--disallowedTools"));
+  check("Start: one Claude Code session in the project root, with the coaching role and its editing tools denied", launched.length === 1 && launched[0].id === "prompter" && launched[0].dir === root && launched[0].args.includes("--append-system-prompt") && launched[0].args.includes("--disallowedTools"));
   check("its session is recorded once (kind prompter, stage prompt) and wears the alien", !!live && live.characterId === "alien" && live.stage === "prompt" && live.ticket === null && live.hqId === "prompter");
   hub.setStatus("prompter", { state: "working", note: "Using Read" });
   k.prompter.observe(k.crew, new Date().toISOString());

@@ -73,7 +73,7 @@ function AgentRow({ agent, expanded, onToggle, onRemove }: { agent: AgentConfig;
           Remove
         </button>
       </div>
-      <p className="mt-2 text-[12px] text-muted">Coaches your prompts from the project's context. Never takes a ticket and never edits files. Removing stops its session; its history stays in the crew book.</p>
+      <p className="mt-2 text-[12px] text-muted">Coaches your prompts from the project's context and never takes a ticket. Its editing tools are blocked, and any shell command asks you first. Removing stops its session; its history stays in the crew book.</p>
     </div>
   );
   if (pathfinder) return (
@@ -97,7 +97,12 @@ function AgentRow({ agent, expanded, onToggle, onRemove }: { agent: AgentConfig;
           )}
         </Field>
         <Field label="Agent">
-          <CliSelect value={agent.cli} onChange={(cli) => set({ cli })} />
+          {isPrompter(agent) ? (
+            // Its editing-tool guard is a Claude Code flag, so it stays on Claude Code (the server refuses a switch too).
+            <div className="field flex h-9 items-center bg-cream-2" title={`The ${PROMPTER_TITLE} runs only on ${CLI_LABEL.claude}`}>{CLI_LABEL.claude}</div>
+          ) : (
+            <CliSelect value={agent.cli} onChange={(cli) => set({ cli })} />
+          )}
         </Field>
         <Field label="Runs in">
           <select className="field" value={agent.mode} onChange={(e) => set({ mode: e.target.value as AgentMode })}>
@@ -194,7 +199,7 @@ function AddPrompter() {
         <p className="text-[12px] text-muted">
           {has
             ? `${has.name} is in the kitchen. There is at most one ${PROMPTER_TITLE}.`
-            : `${CHARACTERS.alien.name}, a visiting alien, reads the project's context and helps you write the next prompt: a ready-to-paste prompt plus why. It never takes a ticket and never edits files.`}
+            : `${CHARACTERS.alien.name}, a visiting alien, reads the project's context and helps you write the next prompt: a ready-to-paste prompt plus why. It never takes a ticket, and its editing tools are blocked.`}
         </p>
       </div>
       <button className="btn" disabled={!!has} title={has ? `The kitchen already has its ${PROMPTER_TITLE}` : undefined} onClick={() => officeActions.addPrompter()}>

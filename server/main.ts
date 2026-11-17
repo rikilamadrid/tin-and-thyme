@@ -33,7 +33,7 @@ import { Sessions } from "./sessions";
 import { runSetupChecks } from "./setup";
 import { loadConfig, loadPlan } from "./store";
 import { COORDINATOR_ID, detectPathfinder, PathfinderRun } from "./pathfinder";
-import { PROMPTER_ID } from "../src/data/prompter";
+import { PROMPTER_ID, prompterCliProblem } from "../src/data/prompter";
 import { attachDelivery } from "./delivery/preview";
 import { unavailableBoard, unavailableRpc } from "./delivery/service";
 import { adoptLegacyState, APP, canonicalRoot, claimStateDir, clearRecord, kitchenKey, writeRecord } from "./kitchen";
@@ -131,7 +131,11 @@ async function main() {
     commands.stopAgent = (id) => (id === COORDINATOR_ID || id === PROMPTER_ID ? native.stopAgent(id) : undefined);
     commands.assignTask = () => hub.activity("config", null, "Pathfinder owns assignment: start the orchestration instead");
     // The Master Prompter (Feature 04): kept in the crew book, launched by the kitchen, never dispatched.
-    commands.addPrompter = () => r.prompter.add();
+    commands.addPrompter = (raw) => {
+      // Launched as Claude Code only (its editing-tool guard is a Claude Code flag): any other agent is refused.
+      const refused = prompterCliProblem((raw as { cli?: unknown } | undefined)?.cli);
+      return refused ? (hub.activity("config", null, refused), refused) : r.prompter.add();
+    };
     commands.removeAgent = (id, opts) => (id === PROMPTER_ID ? r.prompter.remove() : native.removeAgent(id, opts));
     commands.setContextAlert = (pct) => r.setContextAlert(Number(pct));
     commands.ackContextAlert = (id) => typeof id === "string" && r.ackContextAlert(id);
