@@ -18,13 +18,12 @@
 // Run them with `pnpm exec tsx scripts/crew-scenarios.ts`.
 
 import type { ArtStyle } from "../../galley/backend";
-import { CREW_CHARACTERS } from "../crew";
 import {
-  beginRestore, CHARACTER_FAMILY, compareSessionAge, COORDINATOR_CHARACTER, CREW_STATE_BADGE, CREW_STATES, crewColor, crewFloorChanges, crewName, crewOnFloor,
-  crewTransitionKind, customizeCharacter, deriveCrewState, emptyCrewBook, endSession, FAMILY_POOLS, FAMILY_PRESENCE, familyFor, migrateLegacy, reconcileAfterRestore, restoreSession,
+  beginRestore, CHARACTER_FAMILY, COORDINATOR_CHARACTER, CREW_STATE_BADGE, CREW_STATES, crewColor, crewFloorChanges, crewName, crewOnFloor,
+  crewTransitionKind, customizeCharacter, emptyCrewBook, endSession, FAMILY_PRESENCE, familyFor, migrateLegacy, reconcileAfterRestore, restoreSession,
   retireCharacter, startSession,
-  type CrewBook, type CrewCharacterId, type CrewCharacterRecord, type CrewCharacterView, type CrewObservation, type CrewOutcome, type CrewSession, type CrewSessionFacts,
-  type CrewSessionView, type CrewSnapshot, type CrewState, type CrewTelemetry, type LegacyCrewJson, type LegacySessionsJson, type RoleFamily,
+  type CrewBook, type CrewCharacterId, type CrewCharacterRecord, type CrewObservation, type CrewOutcome, type CrewSession, type CrewSessionFacts,
+  type CrewSnapshot, type CrewState, type CrewTelemetry, type LegacyCrewJson, type LegacySessionsJson, type RoleFamily,
 } from "../crewContract";
 import type { SessionEnd } from "../types";
 
@@ -43,57 +42,9 @@ const ending = (outcome: CrewOutcome, sec: number, next: string | null = null): 
 
 // ---------------------------------------------------------------- Snapshot projection
 
-/**
- * A CrewSnapshot from a book and the observations of its live sessions, read off
- * docs/crew-contract.md ("Snapshot the UI reads"). 09.3 owns the real projection; this one exists so
- * the fixture can hand the UI tickets a snapshot and so the scenarios can check what a client
- * would see. Two readings of the doc are the fixture's own:
- *   - `stateSince` uses the after-restart rule, because a fixture keeps no poll history;
- *   - `lastOutcome` is the outcome of the character's latest ENDED session.
- */
-export function crewFixtureSnapshot(book: CrewBook, observations: Record<string, CrewObservation>, now: number): CrewSnapshot {
-  const sessions = Object.values(book.sessions);
-  const view = (s: CrewSession): CrewSessionView => ({
-    ...s,
-    characterName: s.characterId ? crewName(s.characterId, book.characters[s.characterId]) : null,
-    state: deriveCrewState(s, observations[s.id] ?? null, now),
-  });
-  const characters = Object.values(FAMILY_POOLS).flat().flatMap((id): CrewCharacterView[] => {
-    const rec = book.characters[id];
-    if (!rec) return [];
-    const session = (rec.sessionId ? book.sessions[rec.sessionId] : null) ?? (rec.lastSessionId ? book.sessions[rec.lastSessionId] : null) ?? null;
-    const obs = session ? observations[session.id] ?? null : null;
-    const state = deriveCrewState(session, obs, now, id);
-    const shown = state === "available" ? null : session;
-    const badge = CREW_STATE_BADGE[state];
-    const lastEnded = sessions.filter((s) => s.characterId === id && s.phase === "ended").sort((a, b) => b.seq - a.seq)[0] ?? null;
-    return [{
-      id,
-      family: rec.family,
-      name: crewName(id, rec),
-      job: CREW_CHARACTERS[id].job,
-      look: CREW_CHARACTERS[id].look,
-      accent: crewColor(id, rec),
-      customized: rec.name !== null || rec.color !== null,
-      retired: rec.retired,
-      state,
-      stateSince: state === "available" ? rec.availableSince ?? rec.firstSeen : state === "finished" && session?.endedAt ? session.endedAt : new Date(now).toISOString(),
-      badge: badge ? { kind: badge, reason: obs?.attention?.reason ?? null, ticket: shown?.ticket ?? null } : null,
-      sessionId: shown?.id ?? null,
-      ticket: shown?.ticket ?? null,
-      stage: shown?.stage ?? null,
-      role: shown?.role ?? null,
-      telemetry: shown?.telemetry ?? null,
-      lastOutcome: lastEnded?.end?.outcome ?? null,
-    }];
-  });
-  const current = sessions.filter((s) => s.phase === "live").sort(compareSessionAge).map(view);
-  const history = sessions
-    .filter((s) => s.phase === "ended")
-    .sort((a, b) => (Date.parse(b.endedAt ?? "") || 0) - (Date.parse(a.endedAt ?? "") || 0) || b.seq - a.seq)
-    .map(view);
-  return { version: book.version, characters, current, history, overflow: current.filter((s) => s.characterId === null).map((s) => s.id) };
-}
+// The fixture owns no alternative projection. Its default clock state uses restart semantics.
+export { crewSnapshot as crewFixtureSnapshot } from "../crewSnapshot";
+import { crewSnapshot as crewFixtureSnapshot } from "../crewSnapshot";
 
 // ---------------------------------------------------------------- Invariants (any book, fixture or live)
 
@@ -113,6 +64,19 @@ export function crewBookProblems(book: CrewBook, settled = true): string[] {
     if (id === COORDINATOR_CHARACTER) for (const s of live) if (s.kind !== "coordinator") problems.push(`${s.kind} session ${s.id} wears basil`);
   }
   if (sessions.filter((s) => s.phase === "live" && s.kind === "coordinator").length > 1) problems.push("more than one live coordinator session");
+  const running = new Map<string, string[]>();
+  for (const s of sessions) {
+    if (s.phase === "live") running.set(s.conversation, [...(running.get(s.conversation) ?? []), s.id]);
+    if (!s.continuation) {
+      if (s.conversation !== s.id) problems.push(`first occurrence ${s.id} is not keyed by its conversation ${s.conversation}`);
+      continue;
+    }
+    const of = book.sessions[s.continuation.of];
+    if (!of || of.conversation !== s.conversation) problems.push(`occurrence ${s.id} continues ${s.continuation.of}, which is not an occurrence of its conversation`);
+    else if (of.phase !== "ended") problems.push(`occurrence ${s.id} continues ${of.id}, which has not ended`);
+    if (sessions.some((o) => o !== s && o.continuation?.of === s.continuation!.of)) problems.push(`${s.continuation.of} is continued more than once`);
+  }
+  for (const [conversation, ids] of running) if (ids.length > 1) problems.push(`conversation ${conversation} has ${ids.length} live occurrences (${ids.join(", ")})`);
   const seqs = new Set<number>();
   for (const [key, s] of Object.entries(book.sessions)) {
     if (key !== s.id) problems.push(`session ${s.id} is filed under ${key}`);
@@ -155,6 +119,7 @@ export function crewHistoryProblems(before: CrewBook, after: CrewBook): string[]
     if (is.kind !== was.kind) problems.push(`session ${was.id} changed kind`);
     if (was.phase === "ended" && is.phase !== "ended") problems.push(`ended session ${was.id} is live again`);
     if (is.characterId !== was.characterId && is.reassignedFrom !== was.characterId) problems.push(`session ${was.id} changed character ${was.characterId} -> ${is.characterId}`);
+    if (is.conversation !== was.conversation || json(is.continuation) !== json(was.continuation)) problems.push(`session ${was.id} changed its conversation or continuation link`);
     for (const f of ["hqId", "role", "stage", "ticket", "title", "worktree", "parent", "transcript", "startedAt", "endedAt", "end", "report", "legacy"] as const) {
       if (was[f] !== null && json(is[f]) !== json(was[f])) problems.push(`session ${was.id} changed ${f}: ${json(was[f])} -> ${json(is[f])}`);
     }

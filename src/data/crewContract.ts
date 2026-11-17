@@ -3,7 +3,9 @@
 // Four identities, kept apart:
 //   role       the Pathfinder role contract (roles/<role>.md): read-only here, owned by Feature 07;
 //   character  a persistent visual robot (CrewCharacterId): name and colour customizable, never a role;
-//   session    one Pathfinder execution session (CrewSession): always fresh, never resumed;
+//   session    one execution occurrence (CrewSession): never revived once it has ended. Its own id is
+//              kept apart from the Claude conversation id: an observed resume of the same conversation
+//              is a NEW linked occurrence (`continuation`), labelled as the same conversation;
 //   ticket     durable, passes through many sessions.
 // A character holds at most one live session. Everything here is pure data and pure functions,
 // shared by the server (09.3 registry) and the UI (09.4 settings, 09.5 galley, 09.6 telemetry).
@@ -185,14 +187,36 @@ export interface CrewTelemetry {
   at: string;
 }
 
+/** The recorded evidence that opened a continuation occurrence. Nothing here is inferred or made up. */
+export interface CrewContinuation {
+  /** The occurrence this one continues: the ended occurrence of the same conversation just before it. */
+  of: string;
+  /**
+   * How the resume was seen: `tool` = a tool call the kitchen had not seen before (evidence: its
+   * tool_use_id); `transcript` = the conversation's transcript moved past the earlier turn (evidence:
+   * the transcript revision it moved past, or `terminal:<revision>` of a whole turn that finished
+   * unseen); `hook` = a start or activity hook that names no boundary.
+   */
+  via: "tool" | "transcript" | "hook";
+  /** The evidence itself. null when the hook named none: the boundary is unknown and stays unknown. */
+  evidence: string | null;
+}
+
 /**
- * One execution session. Id rules:
- * - worker / helper: the Claude Code subagent id (crew.json's and sessions.json's key today);
- * - coordinator: `coordinator:<transcript file name without .jsonl>`.
- * A session record is never deleted and never re-keyed.
+ * One execution occurrence: one uninterrupted run of a conversation. Two ids, kept apart:
+ * - `conversation` is the Claude conversation: the Claude Code subagent id for a worker or helper
+ *   (crew.json's and sessions.json's key), `coordinator:<transcript file name without .jsonl>` for
+ *   the coordinator;
+ * - `id` is this occurrence. The first occurrence of a conversation has `id === conversation`; a
+ *   continuation is `<conversation>#<n>` (n = 2, 3 …, its place in the chain).
+ * A session record is never deleted and never re-keyed, and an ended one never goes live again.
  */
 export interface CrewSession {
   id: string;
+  /** The Claude conversation this occurrence belongs to. Several occurrences may share one. */
+  conversation: string;
+  /** null for a conversation's first occurrence; else the link to the occurrence it continues. */
+  continuation: CrewContinuation | null;
   kind: CrewSessionKind;
   /** The id the rest of the snapshot uses: `w-<key>-<session>-<id10>` for workers, COORDINATOR_ID, or the helper id. */
   hqId: string | null;
@@ -501,7 +525,7 @@ export interface CrewSessionFacts {
 
 function blankSession(id: string, seq: number): CrewSession {
   return {
-    id, kind: "worker", hqId: null, role: null, stage: null, family: "unknown", ticket: null, title: null, worktree: null, parent: null,
+    id, conversation: id, continuation: null, kind: "worker", hqId: null, role: null, stage: null, family: "unknown", ticket: null, title: null, worktree: null, parent: null,
     characterId: null, reassignedFrom: null, phase: "live", seq, startedAt: null, endedAt: null, end: null, report: null, transcript: null, telemetry: null, legacy: null,
   };
 }
@@ -523,6 +547,89 @@ function newSession(book: CrewBook, id: string, facts: CrewSessionFacts): CrewSe
   return s;
 }
 
+/** Every occurrence of one Claude conversation, first to latest (the chain its continuations form). */
+export function conversationOccurrences(book: Pick<CrewBook, "sessions">, conversation: string): CrewSession[] {
+  const all = Object.values(book.sessions).filter((s) => (s.conversation ?? s.id) === conversation);
+  const next = new Map(all.flatMap((s) => (s.continuation ? [[s.continuation.of, s] as const] : [])));
+  const chain: CrewSession[] = [];
+  for (let s = all.find((x) => !x.continuation) ?? null; s && !chain.includes(s); s = next.get(s.id) ?? null) chain.push(s);
+  // A broken link is never expected; if one exists the stragglers still count, oldest first.
+  return [...chain, ...all.filter((s) => !chain.includes(s)).sort((a, b) => a.seq - b.seq)];
+}
+
+/** The occurrence a conversation is in now (or was last in); null for a conversation the book never saw. */
+export function latestOccurrence(book: Pick<CrewBook, "sessions">, conversation: string): CrewSession | null {
+  return conversationOccurrences(book, conversation).at(-1) ?? null;
+}
+
+/** "same conversation" for a continuation, "new conversation" otherwise. A resume is never shown as a new conversation. */
+export function occurrenceLabel(s: Pick<CrewSession, "continuation">): "same conversation" | "new conversation" {
+  return s.continuation ? "same conversation" : "new conversation";
+}
+
+/** The robot a continuation's conversation wore last, when it is still that family's, not retired and free; else null. */
+function keptCharacter(book: CrewBook, s: CrewSession): CrewCharacterId | null {
+  const kept = s.continuation ? book.sessions[s.continuation.of]?.characterId ?? null : null;
+  const free = kept && s.kind !== "coordinator" && kept !== COORDINATOR_CHARACTER && CHARACTER_FAMILY[kept] === s.family && !book.characters[kept]?.retired &&
+    !Object.values(book.sessions).some((o) => o.phase === "live" && o.characterId === kept);
+  return free ? kept : null;
+}
+
+/** A continuation keeps its conversation's robot when that robot is free; otherwise the ordinary rules decide. */
+function allocateOccurrence(book: CrewBook, s: CrewSession): CrewCharacterId | null {
+  return keptCharacter(book, s) ?? allocateCharacter(book, s.family, s.ticket, s.kind);
+}
+
+/** One coordinator per kitchen: `s` takes Basil, other live coordinator sessions end, a legacy worker on Basil moves to overflow. */
+function claimBasil(book: CrewBook, s: CrewSession, now: string): void {
+  for (const o of Object.values(book.sessions)) if (o !== s && o.kind === "coordinator" && o.phase === "live") endSession(book, o.id, null, now);
+  const moved = Object.values(book.sessions).filter((o) => o.phase === "live" && o.characterId === COORDINATOR_CHARACTER && o.kind !== "coordinator").map(moveOffBasil);
+  book.migrations.at(-1)?.conflicts.push(...moved);
+}
+
+/**
+ * An observed resume of a conversation the book already holds: the SAME Claude conversation is
+ * running again after its last occurrence ended. That occurrence and its outcome are left exactly
+ * as they are; a new occurrence is linked to it (`continuation`) and becomes the live one.
+ *
+ * Idempotent, so hooks delivered twice, late bookkeeping and a restart never add records:
+ *  - a resume whose `via` and non-null `evidence` already opened an occurrence of this conversation
+ *    returns that occurrence unchanged, live or ended (it is never revived);
+ *  - while the conversation's latest occurrence is live, every resume signal belongs to it and
+ *    returns it: a conversation has at most one live occurrence;
+ *  - otherwise the new occurrence is `<conversation>#<n>`, n being its place in the chain, so the
+ *    same resume recorded twice from the same book gives the same id.
+ * It copies the conversation's identity (kind, hqId, role, stage, ticket, title, worktree, parent,
+ * transcript) and starts no conversation of its own. The character: the one the conversation wore
+ * last when it is free, else allocateCharacter, so a worker that resumed never holds two robots
+ * and never takes a second one while its own is free. While the restore pass is open it gets no
+ * character yet (reconcileAfterRestore allocates it by the same rule).
+ * Returns null for a conversation the book has never seen: that is a new session (startSession).
+ */
+export function continueSession(book: CrewBook, conversation: string, resume: Pick<CrewContinuation, "via" | "evidence">, now: string): CrewSession | null {
+  const chain = conversationOccurrences(book, conversation);
+  const last = chain.at(-1);
+  if (!last) return null;
+  if (resume.evidence !== null) {
+    const same = chain.find((s) => s.continuation?.via === resume.via && s.continuation.evidence === resume.evidence);
+    if (same) return same;
+  }
+  if (last.phase === "live") return last;
+  const s = blankSession(`${conversation}#${chain.length + 1}`, nextSeq(book));
+  s.conversation = conversation;
+  s.continuation = { of: last.id, via: resume.via, evidence: resume.evidence };
+  for (const f of ["kind", "hqId", "role", "stage", "family", "ticket", "title", "worktree", "parent", "transcript"] as const) (s as unknown as Record<string, unknown>)[f] = last[f];
+  s.startedAt = now;
+  book.sessions[s.id] = s;
+  if (s.kind === "coordinator") {
+    claimBasil(book, s, now);
+    s.characterId = COORDINATOR_CHARACTER;
+  } else s.characterId = book.restorePass ? null : allocateOccurrence(book, s);
+  book.updatedAt = now;
+  refreshCharacters(book, now);
+  return s;
+}
+
 /**
  * Opens the startup restore pass (migrateLegacy calls it). Until reconcileAfterRestore closes it,
  * nothing is allocated, so the order in which sessions are restored can't decide who gets a
@@ -535,7 +642,8 @@ export function beginRestore(book: CrewBook): void {
 
 /**
  * A NEW live session: allocates its character once and records it. An id already in the book is
- * returned as it is (never re-allocated, never revived). A new coordinator session ends any other
+ * returned as it is (never re-allocated, never revived; a conversation seen running again after it
+ * ended goes through continueSession). A new coordinator session ends any other
  * live coordinator session (one coordinator per kitchen) and moves any live non-coordinator session
  * still on basil (a legacy worker) to overflow, recorded in the latest migration's `conflicts`, so
  * Basil is never shared.
@@ -561,9 +669,7 @@ export function startSession(book: CrewBook, id: string, facts: CrewSessionFacts
       refreshCharacters(book, now);
       return s;
     }
-    for (const o of live) endSession(book, o.id, null, now);
-    const moved = Object.values(book.sessions).filter((o) => o.phase === "live" && o.characterId === COORDINATOR_CHARACTER && o.kind !== "coordinator").map(moveOffBasil);
-    book.migrations.at(-1)?.conflicts.push(...moved);
+    claimBasil(book, s, now);
   }
   s.characterId = book.restorePass && s.kind !== "coordinator" ? null : allocateCharacter(book, s.family, s.ticket, s.kind);
   book.sessions[id] = s;
@@ -652,7 +758,8 @@ export function restoreSession(book: CrewBook, id: string, facts: CrewSessionFac
  *     no startedAt first, then startedAt, then seq). Each later one loses it (`reassignedFrom`, listed
  *     in the latest migration's `conflicts`) and joins the queue;
  *  5. the queue (those sessions, plus every live session this pass recorded with no character) is
- *     allocated oldest first against the reconciled book: a free character in its family, else
+ *     allocated oldest first against the reconciled book: first each continuation takes back the
+ *     character its conversation wore last when that is free, then a free character in its family, else
  *     overflow. So no live session is left without a character while its family has a free one,
  *     whatever the restore order. A session that was already overflow before the restart is not in
  *     the queue: it stays overflow (allocation rule 6).
@@ -696,8 +803,10 @@ export function reconcileAfterRestore(book: CrewBook, runningIds: Iterable<strin
     lost.set(s, c);
     queue.push(s);
   }
-  for (const s of queue.sort(compareSessionAge)) {
-    s.characterId = allocateCharacter(book, s.family, s.ticket, s.kind);
+  // A continuation first takes back the robot its conversation wore, so no other queued session is handed it.
+  for (const s of queue.sort(compareSessionAge)) s.characterId = keptCharacter(book, s);
+  for (const s of queue) {
+    s.characterId ??= allocateCharacter(book, s.family, s.ticket, s.kind);
     const c = lost.get(s);
     if (c) conflicts.push({ sessionId: s.id, characterId: c, reason: `${c} stays with older live session ${keeper.get(c)}; moved to ${s.characterId ?? "overflow"}` });
   }

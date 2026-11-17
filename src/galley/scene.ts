@@ -13,7 +13,7 @@
 //   subagent stations × 4          reviewer [scanner] reviewer        floor spot
 //   ═══════════════════════════ belt ═══════════════════════════════▶ [MAIN hatch]
 
-import type { CharacterId } from "../data/crew";
+import type { CrewCharacterId } from "../data/crewContract";
 import { INK, type Backend } from "./backend";
 import { COLUMN_NAMES, type CrewMember, type GalleyModel } from "./model";
 import { C, drawRobot, icon, robotSize, type IconKind } from "./robots";
@@ -214,7 +214,7 @@ interface Box {
 }
 
 /** Where a robot standing with its feet centred on (fx, fy) is drawn, at the room's robot scale. */
-function botBox(B: Backend, id: CharacterId, fx: number, fy: number, scale = BOT_K): Box {
+function botBox(B: Backend, id: CrewCharacterId, fx: number, fy: number, scale = BOT_K): Box {
   const k = B.spriteK(scale);
   const { w, h } = robotSize(id);
   return { x: fx - (w * k) / 2, y: fy - h * k, w: w * k, h: h * k };
@@ -224,7 +224,7 @@ function botBox(B: Backend, id: CharacterId, fx: number, fy: number, scale = BOT
  * Draws a robot with its feet centred on (fx, fy): a floor shadow, then the sprite at the room's robot scale.
  * `accent` is the agent's colour for the design's accent part; without it the design is drawn as is.
  */
-function bot(B: Backend, id: CharacterId, fx: number, fy: number, alpha = 1, scale = BOT_K, accent: string | null = null): Box {
+function bot(B: Backend, id: CrewCharacterId, fx: number, fy: number, alpha = 1, scale = BOT_K, accent: string | null = null): Box {
   const box = botBox(B, id, fx, fy, scale);
   B.alpha(alpha, () => {
     if (B.kind === "pixel") B.ell(fx, fy, box.w * 0.42, 1.6, "#0b1022");
@@ -823,7 +823,7 @@ function scanner(B: Backend, m: GalleyModel, f: FrameState, P: boolean, hits: Hi
 }
 
 /** What each cook works on, set on its counter top beside it (pod-local units; never over the robot). */
-const POD_PROPS: Partial<Record<CharacterId, (Z: Backend) => void>> = {
+const POD_PROPS: Partial<Record<CrewCharacterId, (Z: Backend) => void>> = {
   pepper: (Z) => {
     Z.box(31, 24, 12, 5, "#eef3f8", { ink: true, r: 1 });
     Z.rect(33, 26, 3, 1, "#f08a2a");

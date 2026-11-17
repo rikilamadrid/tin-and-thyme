@@ -1,5 +1,5 @@
 import type { DeliveryBoard } from "./delivery";
-import type { CharacterId } from "./crew";
+import type { CrewCharacterId, CrewSnapshot } from "./crewContract";
 import type { StackConfig } from "./stack";
 // Domain types shared by the data source, the store, the office and the HUD.
 
@@ -53,7 +53,7 @@ export interface AgentConfig {
 
 /** A visual alias (character, kitchen job) next to the real workflow role, session and ticket. */
 export interface CrewInfo {
-  character: CharacterId;
+  character: CrewCharacterId;
   /** Kitchen job shown under the name, e.g. "Saucier". */
   job: string;
   /** The real workflow role, e.g. "developer" (Pathfinder roles/<role>.md). */
@@ -489,6 +489,11 @@ export interface WorkflowInfo {
   helpers?: WorkflowHelper[];
   /** The coordinator's latest dispatch plan, as observed when it ran `orchestrate plan` (never computed here). */
   plan?: PlanSeen | null;
+  /**
+   * The persistent crew and their sessions (docs/crew-contract.md). Absent until the startup restore
+   * pass has closed, and when the crew book can't be opened.
+   */
+  crew?: CrewSnapshot;
 }
 
 export interface WorkflowHelper {

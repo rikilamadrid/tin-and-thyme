@@ -86,6 +86,8 @@ export function createWsSource(token: string): OfficeDataSource {
     startAgent: (id) => send("startAgent", id),
     setContextAlert: (pct) => send("setContextAlert", pct),
     ackContextAlert: (id) => send("ackContextAlert", id),
+    customizeCrew: (id, change) => send("customizeCrew", id, change),
+    retireCrew: (id, retired) => send("retireCrew", id, retired),
     summariseAgent: (id) => send("summariseAgent", id),
     freshContext: (id) => send("freshContext", id),
     checkpointFresh: (id) => send("checkpointFresh", id),

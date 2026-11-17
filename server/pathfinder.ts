@@ -23,13 +23,15 @@
 import { execFile } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { ACTIVE_POLICY_FILE, BLOCKED_COMMANDS, describePolicy, LOCAL_ONLY, originRepo, POLICY_LIMITS, policyArgs, PROTECTED_FILES, readPolicy, writePolicy } from "./runPolicy";
 import type { ActionItem, AgentConfig, AgentStatus, Board, PlanSeen, SessionEnd, Task, TaskStatus, WorkflowHelper } from "../src/data/types";
-import { assignCharacter, type CharacterId } from "../src/data/crew";
-import { awaitingHuman, findSession, sessionUse, subagentPickedModel, subagents } from "./transcripts";
+import { assignCharacter, CREW_CHARACTERS } from "../src/data/crew";
+import { crewName, familyFor, FAMILY_COLOR, isCrewCharacterId, type CrewCharacterId, type CrewContinuation, type CrewObservation, type CrewSession, type CrewTelemetry } from "../src/data/crewContract";
+import { CrewRegistry, type EndingEvidence } from "./crew";
+import { awaitingHuman, findSession, sessionUse, subagentPickedModel, subagents, type SubagentRecord } from "./transcripts";
 import type { Hub } from "./hub";
 import type { Inbox } from "./inbox";
 import { Handoffs, type HandoffWorker } from "./handoff";
@@ -40,7 +42,7 @@ import { log } from "./lib/log";
 import { Attribution, readReport, type Evidence, type Identity } from "./attribution";
 import { coordinatorAttention, gateOwner, sameQuestion, sessionEnding, ticketView, type GateCandidate } from "./workflowState";
 import { gateRevision, isGateOccurrence, readGateHistory, type GateHistory } from "./gateRecord";
-import { subagentMeta, subagentPrompt, subagentReport, subagentTerminalRevision, subagentToolIds, transcriptRevision } from "./transcripts";
+import { subagentMeta, subagentPrompt, subagentReport, subagentTerminalRevision, subagentToolIds, subagentTurns, subagentTurnStarts, transcriptRevision } from "./transcripts";
 import type { ActionAnswer, ActionRequest, DeliveryStage } from "../src/data/types";
 import { requestShelf } from "../src/data/requests";
 import { RoleContractObserver } from "./roleContracts";
@@ -89,9 +91,26 @@ interface Worker {
   resumeRevision?: string;
   /** Last settled terminal evidence, independent of subsequent bookkeeping bytes. */
   terminalRevision?: string | null;
+  /**
+   * The ended turn's own terminal record has not reached disk. It only says whose that record will be: it never
+   * hides a later turn, which is told apart by its own turn start (`turnStarts`), so it needs no expiry.
+   */
+  awaitingTerminal?: boolean;
+  /**
+   * Turn starts (`subagentTurns`) the transcript holds once every turn counted so far is on disk, the current or
+   * last one included even when its own bytes are late. A turn start beyond this count is a later turn.
+   */
+  turnStarts: number;
   seenToolIds: Set<string>;
+  /** Tool calls of the current turn seen through hooks; kept with a pending ending so a replay stays a replay. */
+  turnToolIds: Set<string>;
   tools: number;
-  character: CharacterId;
+  title: string;
+  /**
+   * The crew book's record of the run this conversation is in now (docs/crew-contract.md). A resumed
+   * conversation moves to a new linked occurrence; the earlier one keeps its outcome.
+   */
+  occurrence: string;
   transcript: string | null;
   /** How the session ended (its own report, else Pathfinder's checkpoint at that moment); null while live. */
   ended: SessionEnd | null;
@@ -110,8 +129,13 @@ interface Worker {
  * occurrence only, across restarts; an entry without one (any saved before occurrences) credits no gate.
  * `consumed` is what earlier versions kept instead; it is read past and never written.
  */
-type BookEntry = SessionEnd & { key?: string; session?: string; occurrence?: string; consumed?: string };
-const stripBook = ({ key: _key, session: _session, occurrence: _occurrence, consumed: _consumed, ...ended }: BookEntry): SessionEnd => ended;
+type BookEntry = EndingEvidence;
+/**
+ * When a continuation still live in the book began (ms), else 0. A `finished` flag in meta.json older than that
+ * belongs to an earlier turn, so it can't end this one, in this kitchen run or after a restart.
+ */
+const liveContinuationSince = (s: CrewSession | null | undefined): number => (s?.phase === "live" && s.continuation && s.startedAt ? Date.parse(s.startedAt) || 0 : 0);
+const stripBook = ({ key: _key, session: _session, occurrence: _occurrence, consumed: _consumed, terminalBoundary: _terminalBoundary, ...ended }: BookEntry): SessionEnd => ended;
 
 /** The gate open on a ticket right now, as Pathfinder's durable record states it. */
 interface GateNow {
@@ -160,7 +184,6 @@ export function parseBrief(prompt: string): { key: string; title: string; sessio
   return { key: head[1], title: head[2], session: field("Session") ?? "implementation", role: field("Role") ?? "developer", worktree: field("Worktree") };
 }
 
-const ROLE_COLOR: Record<string, string> = { developer: "#29adff", tester: "#00e436", adversary: "#ffa300", orchestrator: "#ff77a8", integrator: "#ffec27", planner: "#83769c" };
 const clip = (s: string, n = 90) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
 
 /** Bash commands a local-only run refuses for the coordinator and every worker (see runPolicy.ts). */
@@ -318,7 +341,19 @@ export class PathfinderRun {
   private integratedAtStart: Set<string> | null = null;
   private startedAt = Date.now();
   private coordinatorObservedRunning = false;
+  /** A hook tied the currently running process to this transcript; a saved path alone cannot. */
+  private coordinatorIdentityObserved = false;
   private roleContracts = new RoleContractObserver();
+  /**
+   * The persistent crew book (crew-book.json in the kitchen state folder). null when it can't be
+   * opened (a newer version, another kitchen's, unreadable storage, invalid legacy input): the file is
+   * then left exactly as it is, sessions are still observed, and no crew is shown or recorded.
+   */
+  private crew: CrewRegistry | null = null;
+  private crewProblem: string | null = null;
+  /** This run's latest ending per conversation, as it was settled (the book keeps each occurrence's own). */
+  private endings = new Map<string, BookEntry>();
+  private coordinatorTools = 0;
 
   constructor(
     private hub: Hub,
@@ -329,6 +364,17 @@ export class PathfinderRun {
     private agentToken: string,
     private prompt: string,
   ) {
+    try {
+      this.crew = new CrewRegistry(this.stateDir, this.hub.slug);
+    } catch (e) {
+      this.crewProblem = e instanceof Error ? e.message : String(e);
+      log.warn("crew book:", this.crewProblem);
+    }
+    // A session keeps its name after its robot has moved on to a later session and its row is gone.
+    this.hub.alias = (id) => {
+      const w = [...this.workers.values()].find((x) => x.hqId === id);
+      return w ? this.workerName(w) : null;
+    };
     this.handoffs = new Handoffs({
       root: this.hub.repo.root,
       engine: this.info.engine,
@@ -427,7 +473,7 @@ export class PathfinderRun {
   /** The configured roster: the coordinator. Workers join as their sessions start. */
   static coordinatorConfig(root: string): AgentConfig {
     const c = assignCharacter("orchestrator", []);
-    const a = newAgent(COORDINATOR_ID, c.name, "orchestrator", ROLE_COLOR.orchestrator, true);
+    const a = newAgent(COORDINATOR_ID, c.name, "orchestrator", FAMILY_COLOR.orchestrator, true);
     a.mode = "local";
     a.workspacePath = root;
     a.roleMd = "Pathfinder orchestrator (roles/orchestrator.md in the project).";
@@ -466,21 +512,15 @@ export class PathfinderRun {
   /** Tin & Thyme's own note of which transcript is the coordinator's (in ~/.controlroom, never the project). */
   private rememberTranscript(file: string) {
     if (this.transcript === file) return;
+    const previous = this.coordinatorSession();
+    if (previous) this.crew?.end(previous.id, null);
+    // A different observed parent conversation cannot own the old conversation’s helpers.
+    const subdir = join(file.replace(/\.jsonl$/, ""), "subagents");
+    for (const s of Object.values(this.crew?.book.sessions ?? {})) {
+      if (s.kind === "helper" && s.phase === "live" && s.transcript && dirname(s.transcript) !== subdir) this.crew?.end(s.id, null);
+    }
     this.transcript = file;
     writeFileSync(join(this.stateDir, "coordinator.json"), JSON.stringify({ transcript: file, at: new Date().toISOString() }, null, 2));
-  }
-
-  private crewBook(next?: Record<string, { id: CharacterId; name: string; job: string }>) {
-    const file = join(this.stateDir, "crew.json");
-    if (next) {
-      writeFileSync(file, JSON.stringify(next, null, 2));
-      return next;
-    }
-    try {
-      return JSON.parse(readFileSync(file, "utf8")) as Record<string, { id: CharacterId; name: string; job: string }>;
-    } catch {
-      return {};
-    }
   }
 
   private recallTranscript() {
@@ -533,8 +573,14 @@ export class PathfinderRun {
   onHook(event: string, body: Record<string, unknown>) {
     const agentId = typeof body.agent_id === "string" ? body.agent_id : null;
     if (agentId) return this.workerHook(agentId, event, body);
-    if (typeof body.transcript_path === "string" && body.transcript_path) this.rememberTranscript(body.transcript_path);
+    if (typeof body.transcript_path === "string" && body.transcript_path) {
+      this.rememberTranscript(body.transcript_path);
+      // Only a hook handled while the process is seen running ties that process to the transcript. One handled
+      // while nothing runs is the previous process's last word, and says nothing about whichever starts next.
+      if (this.hub.status(COORDINATOR_ID)?.session.state === "running") this.coordinatorIdentityObserved = true;
+    }
     if (event === "UserPromptSubmit") this.turnEnded = false;
+    if (event === "PreToolUse") this.coordinatorTools += 1;
 
     // The coordinator itself. An Agent call is remembered by its tool_use_id, never queued by position.
     if (event === "PreToolUse" && (body.tool_name === "Agent" || body.tool_name === "Task")) {
@@ -614,25 +660,39 @@ export class PathfinderRun {
     const b = parseBrief(prompt);
     if (!b) return null;
     const role = b.role; // The recorded role is authoritative even when a stage has a different name.
-    // One id per session, from its own subagent id: the same session keeps it across restarts and reconnects.
+    // One id per conversation, from its own subagent id: it keeps it across restarts, reconnects and resumes.
     const hqId = `w-${b.key.replace(".", "-")}-${b.session}-${agentId.replace(/[^a-z0-9]/gi, "").slice(0, 10) || ++this.seq}`;
-    // The character is chosen once per session and kept in ~/.controlroom, so restarts give the same one.
-    // Finished sessions have left the floor, so only live crew hold a character.
-    const saved = this.crewBook()[agentId];
-    const c = saved ?? assignCharacter(role, [...this.workers.values()].filter((x) => x.live).map((x) => x.character));
-    if (!saved) this.crewBook({ ...this.crewBook(), [agentId]: c });
     const transcript = this.subagentTranscript(agentId);
-    const ended = finished ? this.restoredEnding(agentId, b.key, b.session, transcript) : null;
-    const w: Worker = { agentId, hqId, key: b.key, session: b.session, role, worktree: b.worktree, live: !finished && !unknown, livenessUnknown: unknown && !finished, tools: 0, character: c.id, transcript, ended, gateSeen: null,
-      transcriptRevision: transcript ? transcriptRevision(transcript) : "", terminalRevision: finished && transcript ? subagentTerminalRevision(transcript) : null, seenToolIds: transcript ? subagentToolIds(transcript) : new Set() };
+    // The crew book records the session and allocates its character, once per occurrence and never while the
+    // startup restore pass is open. No team row is added per session: the roster follows the characters.
+    const facts = { kind: "worker" as const, hqId, role, stage: b.session, ticket: b.key, title: b.title, worktree: b.worktree, transcript, startedAt: this.subagentStarts.get(agentId) || undefined };
+    const s = this.crew?.restore(agentId, { ...facts, phase: finished ? "ended" : "live" }) ?? null;
+    // A replayed launch/start may identify an old conversation, but cannot prove a resume.
+    if (s?.phase === "ended") { finished = true; unknown = false; }
+    const ended = finished ? this.restoredEnding(agentId, b.key, b.session, transcript, s) : null;
+    const boundary = (s?.end as BookEntry | null)?.terminalBoundary;
+    const { turns: starts, legacy } = transcript ? subagentTurns(transcript) : { turns: 0, legacy: 0 };
+    const terminalNow = transcript ? subagentTerminalRevision(transcript) : null;
+    // Every turn already in the file is counted, so nothing on disk now can look like a resume. A pending
+    // ending also counts the turn starts it was still owed:
+    // - `turns` (this version) is the count itself;
+    // - `starts` (6552316) counted every prompt-shaped record, mid-turn ones included, so it is never compared with
+    //   a turn count. What it still owed is what the file lacks against it by that same measure (`legacy`);
+    // - a book from before either was kept: owed while the transcript still ends at the earlier turn's terminal
+    //   record, or for a continuation opened by a tool call none of whose bytes are on disk yet, live or ended (an
+    //   ending from before `terminalBoundary` was kept has nothing else to tell it by).
+    const counted = boundary?.turns ?? (boundary?.starts !== undefined ? starts + Math.max(0, boundary.starts - legacy)
+      : boundary?.pending && boundary.revision !== null && terminalNow === boundary.revision ? starts + 1 : this.owesPrompt(agentId, transcript) ? starts + 1 : starts);
+    const seenToolIds = transcript ? subagentToolIds(transcript) : new Set<string>();
+    // Tool calls a pending ending saw through hooks only: after a restart a replay of one is still a replay.
+    for (const e of this.crew?.endings(agentId) ?? []) for (const id of e.terminalBoundary?.tools ?? []) seenToolIds.add(id);
+    const w: Worker = { agentId, hqId, key: b.key, title: b.title, session: b.session, role, worktree: b.worktree, live: !finished && !unknown, livenessUnknown: unknown && !finished, tools: 0, occurrence: s?.id ?? agentId, transcript, ended, gateSeen: null,
+      transcriptRevision: transcript ? transcriptRevision(transcript) : "", terminalRevision: finished ? terminalNow : null, seenToolIds, turnStarts: Math.max(1, starts, counted), turnToolIds: new Set(),
+      // A continuation still live in the book began when it was recorded: an older `finished` flag is not its own.
+      resumedAt: liveContinuationSince(s) || undefined };
+    w.awaitingTerminal = finished && !!boundary?.pending && (starts < w.turnStarts || terminalNow === null);
     this.workers.set(agentId, w);
-    const cfg = newAgent(hqId, c.name, role, ROLE_COLOR[role] ?? "#c2c3c7", false);
-    cfg.mode = "local";
-    cfg.workspacePath = b.worktree;
-    cfg.roleMd = `Pathfinder ${b.session} session, role ${b.role}, for ${b.key} ${b.title}`;
-    cfg.crew = { character: c.id, job: c.job, role, session: b.session, ticket: b.key, worktree: b.worktree };
     const hub = this.hub;
-    hub.snap.config.team.push(cfg);
     const st: AgentStatus = {
       agentId: hqId, state: w.live ? "working" : "idle", currentTaskId: b.key, stateSince: new Date().toISOString(),
       note: w.livenessUnknown ? "Session liveness unknown — awaiting new activity or completion evidence" : finished ? "Session ended — restoring its outcome" : `Started ${b.session} session`,
@@ -641,9 +701,9 @@ export class PathfinderRun {
       ended,
     };
     hub.snap.agents.push(st);
-    hub.configChanged();
     hub.emit({ type: "agent.updated", agent: structuredClone(st) });
-    if (w.live) hub.activity("task.started", hqId, `${cfg.name} (${role}, ${b.session} ${b.key}) started in ${b.worktree ?? "its worktree"}`);
+    this.crewChanged();
+    if (w.live) hub.activity("task.started", hqId, `${this.workerName(w)} (${role}, ${b.session} ${b.key}) started in ${b.worktree ?? "its worktree"}`);
     if (w.live) this.handoffs.onWorkerStarted(b.key, hqId);
     hub.terminal(hqId, `\x1b[1mPathfinder ${b.session} session for ${b.key}\x1b[0m — ${b.title}\r\nsubagent ${agentId}\r\nworktree ${b.worktree}\r\n${finished ? "\r\n\x1b[1m■ session finished\x1b[0m (restored from its transcript)\r\n" : ""}\r\n`);
     this.applyAttention();
@@ -651,32 +711,306 @@ export class PathfinderRun {
     return w;
   }
 
+  // ---------------------------------------------------------------- crew book
+
+  /** What a session is called: its robot's name; a session with no robot (overflow, or restored already ended) says its role. */
+  private workerName(w: Worker): string {
+    const s = this.crew?.book.sessions[w.occurrence];
+    if (s?.characterId) return crewName(s.characterId, this.crew!.book.characters[s.characterId]);
+    return s?.legacy?.name || `${w.role.charAt(0).toUpperCase()}${w.role.slice(1)} session`;
+  }
+
+  private coordinatorConversation(): string | null {
+    return this.transcript ? `coordinator:${basename(this.transcript, ".jsonl")}` : null;
+  }
+
+  /** The coordinator's live crew session, when its transcript is known and it was seen running. */
+  private coordinatorSession(): CrewSession | null {
+    const conversation = this.coordinatorConversation();
+    const s = conversation ? (this.crew?.latest(conversation) ?? null) : null;
+    return s?.phase === "live" ? s : null;
+  }
+
   /**
-   * A finished session restored after a restart: the outcome saved for this session and ticket, else its own
-   * report. A saved outcome from before tickets were recorded with it is used only when there is no report.
+   * The team rows follow the crew, never the sessions: the coordinator, and one row per character for the
+   * session it holds now or held last, under that session's id. A character taken by a fresh session swaps its
+   * row; earlier sessions stay in the crew book's history. A session with no robot (overflow, or one first seen
+   * already ended) is listed as the plain crew bot under its role, never as a character it didn't wear: every
+   * live one, because real concurrency is never capped, and only the latest ended one of each role family.
    */
-  private restoredEnding(agentId: string, key: string, session: string, transcript: string | null): SessionEnd | null {
-    const saved = this.endBook()[agentId];
+  private syncRoster() {
+    const crew = this.crew;
+    if (!crew || crew.book.restorePass) return;
+    const byOccurrence = new Map([...this.workers.values()].map((w) => [w.occurrence, w]));
+    const wanted = new Map<string, AgentConfig>();
+    const row = (w: Worker, character: CrewCharacterId) => {
+      const cfg = newAgent(w.hqId, this.workerName(w), w.role, FAMILY_COLOR[familyFor(w.role, w.session)], false);
+      cfg.mode = "local";
+      cfg.workspacePath = w.worktree;
+      cfg.roleMd = `Pathfinder ${w.session} session, role ${w.role}, for ${w.key} ${w.title}`;
+      // The role, stage and ticket are this session's own, never the last one the character wore.
+      cfg.crew = { character, job: CREW_CHARACTERS[character].job, role: w.role, session: w.session, ticket: w.key, worktree: w.worktree };
+      wanted.set(w.hqId, cfg);
+    };
+    for (const rec of Object.values(crew.book.characters)) {
+      const s = crew.book.sessions[rec.sessionId ?? rec.lastSessionId ?? ""];
+      const w = s ? byOccurrence.get(s.id) : undefined;
+      if (s && w && s.kind === "worker") row(w, rec.id);
+    }
+    const bare = [...byOccurrence].flatMap(([id, w]) => {
+      const s = crew.book.sessions[id];
+      return s && s.kind === "worker" && !s.characterId ? [{ w, s }] : [];
+    });
+    for (const { w, s } of bare) if (s.phase === "live" || !bare.some((o) => o.s.phase === "ended" && o.s.family === s.family && o.s.seq > s.seq)) row(w, "unit");
+    const team = this.hub.snap.config.team;
+    const next = [
+      ...team.filter((a) => !this.isExternal(a.id)),
+      ...team.filter((a) => this.isExternal(a.id) && wanted.has(a.id)).map((a) => wanted.get(a.id)!),
+      ...[...wanted.values()].filter((a) => !team.some((t) => t.id === a.id)),
+    ];
+    if (JSON.stringify(next) === JSON.stringify(team)) return;
+    this.hub.snap.config.team = next;
+    this.hub.configChanged();
+  }
+
+  /** What the kitchen observes now for each live crew session: its process, its agent state and Feature 06's attention. */
+  private observeCrew() {
+    const crew = this.crew;
+    if (!crew) return;
+    const at = new Date().toISOString();
+    const read = (id: string, hqId: string, tools: number, attention: CrewObservation["attention"]) => {
+      const st = this.hub.status(hqId);
+      if (!st) return;
+      const telemetry: CrewTelemetry = { context: st.context ?? null, model: st.telemetry ?? null, tokens: null, costUsd: null, tools: tools || null, at };
+      crew.observe(id, { session: st.session.state, agent: st.state, tools, attention, at }, telemetry);
+    };
+    for (const w of this.workers.values()) {
+      // A worker needs you only at its own open gate (the state applyBoard set); nothing else turns it pink.
+      const st = this.hub.status(w.hqId);
+      read(w.occurrence, w.hqId, Math.max(w.tools, w.seenToolIds.size), st?.state === "needs-input" && st.relaying?.length ? { kind: "needs-you", reason: `${w.key} gate` } : null);
+    }
+    const lead = this.coordinatorSession();
+    const st = this.hub.status(COORDINATOR_ID);
+    // The coordinator's attention is the state Feature 06 already decided (applyAttention, or a real ask a hook raised).
+    if (lead && st) read(lead.id, COORDINATOR_ID, Math.max(this.coordinatorTools, 1), st.state === "needs-input" ? { kind: "needs-you", reason: st.note ?? "needs you" } : st.state === "waiting" ? { kind: "waiting", reason: st.note ?? "waiting" } : null);
+    for (const id of this.liveHelpers) crew.observe(id, { session: "running", agent: "working", tools: 1, attention: null, at });
+  }
+
+  /** After any change to the crew book: the roster rows, the observations, the file, then the published snapshot. */
+  private crewChanged() {
+    const crew = this.crew;
+    if (!crew) return;
+    this.syncRoster();
+    this.observeCrew();
+    try {
+      crew.save();
+    } catch (e) {
+      const problem = e instanceof Error ? e.message : String(e);
+      if (problem !== this.crewProblem) this.hub.activity("config", null, `Crew book not saved: ${problem}`);
+      this.crewProblem = problem;
+    }
+    const workflow = this.hub.snap.workflow;
+    const snapshot = crew.snapshot();
+    if (!workflow || !snapshot || JSON.stringify(snapshot) === JSON.stringify(workflow.crew ?? null)) return;
+    this.hub.snap.workflow = { ...workflow, crew: snapshot };
+    this.emitWorkflow();
+  }
+
+  /** The coordinator and the helpers in the crew book, then the end of the startup restore pass. */
+  private syncCrew(coordAlive: boolean) {
+    const crew = this.crew;
+    if (!crew) return;
+    const elapsed = Date.now() - this.startedAt >= 15_000;
+    // The reattach window is over once the coordinator is running again, was seen running and stopped, or the grace passed.
+    const decided = coordAlive || this.coordinatorObservedRunning || elapsed;
+    const conversation = this.coordinatorConversation();
+    const last = conversation ? crew.latest(conversation) : null;
+    if (conversation && coordAlive && this.coordinatorIdentityObserved) {
+      if (!last) crew.start(conversation, { kind: "coordinator", hqId: COORDINATOR_ID, role: "orchestrator", stage: "coordinate", worktree: this.root, transcript: this.transcript });
+      else if (last.phase === "ended") crew.resume(conversation, { via: "hook", evidence: null });
+    } else if (decided && !coordAlive && last?.phase === "live") crew.end(last.id, null);
+    // A background worker can't outlive its parent process: one whose liveness was never observed ends, outcome unknown.
+    if (decided && !coordAlive) for (const w of this.workers.values()) if (w.livenessUnknown) crew.end(w.occurrence, null);
+    // Reconcile only once every transcript has been read and every session's liveness is decided.
+    if (crew.book.restorePass && decided && (this.transcript || elapsed)) {
+      const lead = this.coordinatorSession();
+      const running = [...this.workers.values()].filter((w) => w.live || w.livenessUnknown).map((w) => w.occurrence);
+      crew.reconcile([...running, ...this.liveHelpers, ...(lead ? [lead.id] : [])]);
+    }
+    this.crewChanged();
+  }
+
+  /**
+   * Helpers the kitchen has identified, in the crew book: a running one holds a helper character, a finished one
+   * is history. A helper has no ending evidence of its own, so its turns are counted the way a worker's are: its
+   * own late and mid-turn bytes add no turn start and are never a resume; a later turn start, or a tool call no hook
+   * showed before, is. A `finished` flag written before a resume says nothing about the resumed turn.
+   */
+  private noteHelpers(recs: SubagentRecord[], coordAlive: boolean) {
+    const crew = this.crew;
+    this.liveHelpers.clear();
+    if (!crew) return;
+    const decided = coordAlive || this.coordinatorObservedRunning || Date.now() - this.startedAt >= 15_000;
+    const parentGone = !coordAlive && decided;
+    for (const r of recs) {
+      const seen = this.helperInfo.get(r.agentId);
+      if (!seen || this.workers.has(r.agentId)) continue;
+      const priorRevision = this.helperRevisions.get(r.agentId);
+      this.helperRevisions.set(r.agentId, r.revision);
+      const toolEvidence = this.helperActivity.get(r.agentId);
+      this.helperActivity.delete(r.agentId);
+      // First sight: every turn already in the file is counted, so nothing on disk now can look like a resume,
+      // and so is a prompt the latest occurrence still owes. A continuation still live in the book began when
+      // it was recorded, so a `finished` flag older than that is not its own (as after a kitchen restart).
+      const latest = crew.latest(r.agentId);
+      const turns = this.helperTurns.get(r.agentId) ??
+        { starts: Math.max(1, r.starts + (this.owesPrompt(r.agentId, r.file) ? 1 : 0)), resumedAt: liveContinuationSince(latest) };
+      this.helperTurns.set(r.agentId, turns);
+      if (latest?.phase === "ended") {
+        const allowed = !parentGone && this.coordinatorIdentityObserved;
+        const laterTurn = r.starts > turns.starts;
+        // A fresh tool call is recorded when it is seen, bytes or none. A later turn start is a turn in
+        // progress, or, with its terminal record already there, a whole turn that ran between two polls.
+        const resume: Pick<CrewContinuation, "via" | "evidence"> | null = !allowed ? null
+          : toolEvidence ? { via: "tool", evidence: toolEvidence }
+          : !laterTurn ? null
+          : r.terminalRevision === null ? { via: "transcript", evidence: priorRevision ?? r.revision } : { via: "transcript", evidence: `terminal:${r.terminalRevision}` };
+        const opened = resume ? crew.resume(r.agentId, resume) : null;
+        const live = opened?.phase === "live";
+        // Evidence that could not count (no identified running parent, or a resume already recorded) is dropped.
+        turns.starts = live && resume?.via === "tool" ? Math.max(r.starts, turns.starts + 1) : Math.max(r.starts, turns.starts);
+        if (live) { turns.resumedAt = Date.now(); seen.finished = false; }
+      }
+      // The latest terminal record is the current turn's own only once that turn's prompt is on disk.
+      const ownTerminal = r.transcriptEnded && r.starts >= turns.starts;
+      const flagged = seen.finished || (r.finished && !(turns.resumedAt && r.metaUpdatedAt < turns.resumedAt + 1000));
+      const s = crew.restore(r.agentId, { kind: "helper", hqId: r.agentId, stage: "helper", parent: seen.parent, transcript: r.file, startedAt: r.startedAt || undefined, phase: ownTerminal || flagged || parentGone ? "ended" : "live" });
+      // Turn starts never count a record inside a turn, so a helper's own late or mid-turn bytes leave `r.starts`
+      // where it was. One the poll that saw the ending did not count is a later turn: it started after a terminal
+      // record, so the next poll records it, whole or in progress.
+      if (s.phase !== "live") continue;
+      turns.starts = Math.max(turns.starts, r.starts);
+      this.liveHelpers.add(s.id);
+    }
+  }
+  /**
+   * The latest occurrence is a continuation opened by a tool call whose record is not in the transcript, which
+   * still ends at a terminal record: none of that turn's bytes are on disk, so the terminal record is the
+   * earlier turn's and the continuation's prompt record is still owed. Read from the book, so it holds across
+   * a kitchen restart.
+   */
+  private owesPrompt(agentId: string, file: string | null): boolean {
+    const s = this.crew?.latest(agentId);
+    const tool = s?.continuation?.via === "tool" ? s.continuation.evidence : null;
+    return !!tool && !!file && subagentTerminalRevision(file) !== null && !subagentToolIds(file).has(tool);
+  }
+
+  /**
+   * Whether a subagent first seen in this kitchen run has ended, from its files. A continuation still live in
+   * the book is not ended by a `finished` flag written before it began, nor by the earlier turn's terminal record.
+   */
+  private restoredEnded(rec: SubagentRecord): boolean {
+    const s = this.crew?.latest(rec.agentId);
+    const resumed = liveContinuationSince(s);
+    const flag = rec.finished && !(resumed && rec.metaUpdatedAt < resumed + 1000);
+    return flag || (rec.transcriptEnded && !(s?.phase === "live" && this.owesPrompt(rec.agentId, rec.file)));
+  }
+
+  private liveHelpers = new Set<string>();
+  private helperRevisions = new Map<string, string>();
+  /** Per helper: the turn starts counted so far (as `Worker.turnStarts`), and when a resume was last recorded. */
+  private helperTurns = new Map<string, { starts: number; resumedAt: number }>();
+  private helperActivity = new Map<string, string>();
+  private helperToolIds = new Set<string>();
+
+  /**
+   * Settings → Crew (09.4): the only write path for a robot's name and colour. Visual only: it never changes a
+   * role, a session or a ticket. Returns why it was refused, or null.
+   */
+  customizeCrew(id: unknown, change: unknown): string | null {
+    const c = (change && typeof change === "object" ? change : {}) as { name?: unknown; color?: unknown };
+    const text = (v: unknown) => (v === null || typeof v === "string" ? v : undefined);
+    return this.crewWrite(id, (crew, character) => crew.customize(character, { name: text(c.name), color: text(c.color) }));
+  }
+
+  /** Settings → Crew (09.4): take a robot off the floor, or bring it back. Its history is kept. */
+  retireCrew(id: unknown, retired: unknown): string | null {
+    return this.crewWrite(id, (crew, character) => crew.retire(character, retired === true));
+  }
+
+  private crewWrite(id: unknown, write: (crew: CrewRegistry, character: Parameters<CrewRegistry["retire"]>[0]) => string | null): string | null {
+    let problem: string | null;
+    try {
+      problem = !this.crew ? `The crew book can't be opened: ${this.crewProblem ?? "unknown reason"}` : !isCrewCharacterId(id) ? "Unknown character." : write(this.crew, id);
+    } catch (e) {
+      problem = e instanceof Error ? e.message : String(e);
+    }
+    if (problem) this.hub.activity("config", null, `Crew not changed: ${problem}`);
+    else this.crewChanged();
+    return problem;
+  }
+
+  // ---------------------------------------------------------------- session endings
+
+  /**
+   * A finished session restored after a restart: the outcome the crew book holds for this occurrence and ticket,
+   * else its own report. A saved outcome from before tickets were recorded with it is used only when there is no
+   * report. Never an earlier occurrence's outcome: a continuation's own ending is its own.
+   */
+  private restoredEnding(agentId: string, key: string, session: string, transcript: string | null, s: CrewSession | null): SessionEnd | null {
+    const saved = (s?.end ?? undefined) as BookEntry | undefined;
     if (saved?.key === key) return stripBook(saved);
     const report = transcript ? subagentReport(transcript) : null;
-    if (readReport(report)) return this.settleAs(agentId, key, sessionEnding(session, report, this.recorded(key)));
+    if (readReport(report)) return this.settleAs(agentId, key, sessionEnding(session, report, this.recorded(key)), session, null, s?.id);
     return saved && !saved.key ? stripBook(saved) : null;
   }
 
-  /** A finished session is running again (resumed with the same subagent id): it keeps only its own identity. */
-  private resumeWorker(w: Worker) {
+  /**
+   * A conversation that ended is running again (resumed under the same subagent id): the same conversation,
+   * never a new one. The crew book links a new occurrence to the ended one, whose outcome stays as recorded.
+   * False when this very resume was already recorded and has ended (a duplicate event): nothing changes.
+   */
+  private resumeWorker(w: Worker, resume: Pick<CrewContinuation, "via" | "evidence">): boolean {
+    if (!this.continueOccurrence(w, resume)) return false;
+    // A turn after an ending has its own prompt record, on disk already or still to come. A session whose
+    // liveness was only unknown is seen in the turn it was already counted in.
+    const onDisk = w.transcript ? subagentTurnStarts(w.transcript) : 0;
+    w.turnStarts = w.livenessUnknown ? Math.max(w.turnStarts, onDisk) : Math.max(onDisk, w.turnStarts + 1);
+    w.turnToolIds = new Set(resume.via === "tool" && resume.evidence ? [resume.evidence] : []);
     w.live = true;
     w.livenessUnknown = false;
     w.ended = null;
+    w.awaitingTerminal = false;
     w.gateSeen = null;
     w.resumedAt = Date.now();
     // Keep the last observed version as the old turn's boundary. Recovery can arrive after new current-turn
     // output is already on disk; taking the current file here would wrongly discard that new report.
     w.resumeRevision = w.transcriptRevision ?? (w.transcript ? transcriptRevision(w.transcript) : "");
     this.hub.setSession(w.hqId, { state: "running", detail: `Background subagent ${w.agentId} of the coordinator (resumed)` });
-    this.hub.setStatus(w.hqId, { state: "working", note: `Resumed ${w.session} session`, ended: null, currentTaskId: w.key });
-    this.hub.activity("task.started", w.hqId, `${this.hub.name(w.hqId)} (${w.role}, ${w.session} ${w.key}) resumed`);
+    this.hub.setStatus(w.hqId, { state: "working", note: `Resumed ${w.session} session (same conversation)`, ended: null, currentTaskId: w.key });
+    this.crewChanged();
+    this.hub.activity("task.started", w.hqId, `${this.workerName(w)} (${w.role}, ${w.session} ${w.key}) resumed the same conversation`);
     this.applyAttention();
+    return true;
+  }
+
+  /**
+   * Records are appended in order, so a tool record of the current turn on disk means its prompt record is on
+   * disk too, or never will be. Nothing more is owed then: the count is what the transcript holds.
+   */
+  private ownBytesOnDisk(w: Worker, starts: number) {
+    if (starts >= w.turnStarts || !w.turnToolIds.size || !w.transcript) return;
+    const written = subagentToolIds(w.transcript);
+    if ([...w.turnToolIds].some((id) => written.has(id))) w.turnStarts = Math.max(1, starts);
+  }
+
+  /** Moves a worker to the occurrence this resume opens, or already opened. False when that occurrence has ended. */
+  private continueOccurrence(w: Worker, resume: Pick<CrewContinuation, "via" | "evidence">): boolean {
+    const s = this.crew?.resume(w.agentId, resume);
+    if (!s) return true; // No crew book, or a conversation it never recorded: nothing to link.
+    if (s.phase === "ended") return false;
+    w.occurrence = s.id;
+    return true;
   }
 
   /** What was requested for this worker itself: the model Claude Code picked at launch. Effort isn't recorded until a call runs. */
@@ -696,18 +1030,12 @@ export class PathfinderRun {
     return { context: u.context, telemetry };
   }
 
-  /** Session outcomes, kept in ~/.controlroom by subagent id (with its ticket) so a restart reads the same history. */
-  private endBook(next?: Record<string, BookEntry>) {
-    const file = join(this.stateDir, "sessions.json");
-    if (next) {
-      writeFileSync(file, JSON.stringify(next, null, 2));
-      return next;
-    }
-    try {
-      return JSON.parse(readFileSync(file, "utf8")) as Record<string, BookEntry>;
-    } catch {
-      return {};
-    }
+  /**
+   * The latest ending settled for a conversation: this run's, else the newest the crew book holds for any of its
+   * occurrences. The legacy sessions.json is a frozen migration input and is never written again.
+   */
+  private savedEnding(agentId: string): BookEntry | undefined {
+    return this.endings.get(agentId) ?? this.crew?.lastEnding(agentId) ?? undefined;
   }
 
   /** What Pathfinder recorded for this ticket right now: its checkpoint, else the engine's row. */
@@ -723,20 +1051,24 @@ export class PathfinderRun {
   }
 
   /**
-   * Keep one session's outcome under its own subagent id, with its own ticket and stage. `occurrence` is the gate
+   * Keep one session's outcome with its own occurrence in the crew book, with its own ticket and stage. `occurrence` is the gate
    * occurrence its GATE report was made in, when the kitchen saw that (`reportedIn`). A report that states the same
    * GATE question as the entry already saved for this session is not taken as a new report: it may be the old one
    * read again (a repeated stop, or a resumed session whose transcript still ends with it), so it keeps what the
    * saved entry had, an occurrence or none, and is never moved to a later occurrence.
    */
-  private settleAs(agentId: string, key: string, ended: SessionEnd, session?: string, occurrence: string | null = null): SessionEnd {
+  private settleAs(agentId: string, key: string, ended: SessionEnd, session?: string, occurrence: string | null = null, into?: string, terminalBoundary?: EndingEvidence["terminalBoundary"]): SessionEnd {
     const w = this.workers.get(agentId);
     if (w) w.ended = ended;
-    const book = this.endBook();
-    const was = book[agentId]?.key === key ? book[agentId] : undefined;
+    const saved = this.savedEnding(agentId);
+    const was = saved?.key === key ? saved : undefined;
     const same = ended.verdict === "GATE" && was?.verdict === "GATE" && sameQuestion(ended.result ?? "", was.result ?? "");
     const made = same ? (isGateOccurrence(was?.occurrence) ? was.occurrence : null) : occurrence;
-    this.endBook({ ...book, [agentId]: { ...ended, key, session: session ?? w?.session, ...(made ? { occurrence: made } : {}) } });
+    const entry: BookEntry = { ...ended, ...(terminalBoundary ? { terminalBoundary } : {}), key, ...((session ?? w?.session) ? { session: session ?? w?.session } : {}), ...(made ? { occurrence: made } : {}) };
+    this.endings.set(agentId, entry);
+    // The crew book ends the occurrence with this outcome, or fills an unknown one. A recorded outcome is never rewritten.
+    const id = into ?? w?.occurrence;
+    if (id) this.crew?.end(id, entry);
     return ended;
   }
 
@@ -764,7 +1096,17 @@ export class PathfinderRun {
     // Losing the parent proves interruption, not completion of whatever later stage the ticket now records.
     const rec = lostCoordinator ? { state: null, last: null, gate: null } : this.recorded(w.key);
     const ending = sessionEnding(w.session, own ?? report, rec);
-    const ended = this.settleAs(w.agentId, w.key, ending, w.session, this.reportedIn(w, ending));
+    const terminal = w.transcript ? subagentTerminalRevision(w.transcript) : null;
+    const starts = w.transcript ? subagentTurnStarts(w.transcript) : 0;
+    this.ownBytesOnDisk(w, starts);
+    // The latest terminal record is this turn's own only when this turn's prompt record is on disk too.
+    const pending = terminal === null || starts < w.turnStarts;
+    w.turnStarts = Math.max(w.turnStarts, starts);
+    const written = pending && w.transcript ? subagentToolIds(w.transcript) : new Set<string>();
+    const unwritten = pending ? [...w.turnToolIds].filter((id) => !written.has(id)) : [];
+    const ended = this.settleAs(w.agentId, w.key, ending, w.session, this.reportedIn(w, ending), undefined, { revision: terminal, pending, turns: w.turnStarts, ...(unwritten.length ? { tools: unwritten } : {}) });
+    w.awaitingTerminal = pending;
+    w.turnToolIds.clear();
     if (w.transcript) {
       w.transcriptRevision = transcriptRevision(w.transcript);
       w.terminalRevision = subagentTerminalRevision(w.transcript);
@@ -788,6 +1130,7 @@ export class PathfinderRun {
             ? `${name} reported ${w.key} failed; a human decides`
             : `${name}'s ${w.session} session on ${w.key} was interrupted (no handoff recorded)`;
     hub.activity(ended.outcome === "handed-off" ? "review.started" : ended.outcome === "interrupted" ? "session" : "agent.needs-input", w.hqId, text);
+    this.crewChanged();
     this.applyAttention();
   }
 
@@ -821,6 +1164,7 @@ export class PathfinderRun {
     const hub = this.hub;
     const coordAlive = hub.status(COORDINATOR_ID)?.session.state === "running";
     if (coordAlive) this.coordinatorObservedRunning = true;
+    else this.coordinatorIdentityObserved = false;
     if (this.transcript) {
       // Delegated helpers: the coordinator's running subagents that aren't Pathfinder workers.
       // Running ones work at the subagent stations; finished ones (the latest few) are their launcher's history.
@@ -833,24 +1177,45 @@ export class PathfinderRun {
         if (!known) {
           // An unfinished file proves identity, not liveness. The coordinator may be a different process after
           // a restart. Wait for this worker's own hook or observed transcript advancement before counting it.
-          const finished = rec.finished || rec.transcriptEnded;
+          const finished = this.restoredEnded(rec);
           const restored = this.adopt(rec.agentId, this.attribution.identify(rec.agentId, this.evidence(rec.agentId, rec.file)), finished, !finished);
           if (restored) restored.transcriptRevision = rec.revision;
           continue;
         }
-        // A resumed session's earlier `finished` predates its resume: only a clearly newer one ends it (its
-        // SubagentStop hook ends it in any case).
         const advanced = !!known.transcriptRevision && rec.revision !== known.transcriptRevision;
-        // An ended session can resume without SubagentStart. New nonterminal content is positive evidence;
-        // an unchanged old finished flag is then subject to the same resume guard as an explicit start.
-        if (!known.live && advanced && !rec.transcriptEnded && coordAlive) this.resumeWorker(known);
+        const settled = !known.live && !known.livenessUnknown;
+        // An ended session can resume without SubagentStart. A turn start beyond every turn already counted
+        // is a later turn. The ended turn's own late bytes never add one, however long they take and whether or
+        // not its terminal record ever arrives, so they are not a resume and they hide none. A session whose
+        // liveness was never observed needs only its transcript to move.
+        if (coordAlive && !rec.transcriptEnded && (settled ? rec.starts > known.turnStarts : !known.live && advanced)) this.resumeWorker(known, { via: "transcript", evidence: known.transcriptRevision ?? null });
+        // A resumed session's earlier `finished` predates its resume: only a clearly newer one ends it (its
+        // SubagentStop hook ends it in any case). A terminal record ends it only when it is this turn's own.
+        if (known.live || known.livenessUnknown) this.ownBytesOnDisk(known, rec.starts);
         const finishedNow = (rec.finished && !(known.resumedAt && rec.metaUpdatedAt < known.resumedAt + 1000)) ||
-          (rec.transcriptEnded && rec.revision !== known.resumeRevision);
-        // A whole resumed turn may finish between polls, with neither start nor stop delivered. Settle its
-        // own new terminal record now, consuming its tool IDs before delayed report hooks can revive it.
-        // File advancement alone is insufficient: bookkeeping must not rewrite historical outcomes.
-        const newEnding = advanced && rec.terminalRevision !== null && rec.terminalRevision !== known.terminalRevision;
-        if (((known.live || known.livenessUnknown) && finishedNow) || (!known.live && newEnding)) this.endWorker(known, `Session ended after ${known.tools} tool calls (transcript)`);
+          (rec.transcriptEnded && rec.revision !== known.resumeRevision && rec.starts >= known.turnStarts);
+        const newTerminal = rec.terminalRevision !== null && rec.terminalRevision !== known.terminalRevision;
+        if (known.live || known.livenessUnknown) {
+          if (finishedNow) this.endWorker(known, `Session ended after ${known.tools} tool calls (transcript)`);
+        } else if (newTerminal && rec.starts > known.turnStarts) {
+          // A whole later turn started and finished with neither start nor stop seen: its own linked occurrence,
+          // keyed by its terminal record so reading it again adds nothing, settled now with its own report.
+          const opened = this.continueOccurrence(known, { via: "transcript", evidence: `terminal:${rec.terminalRevision}` });
+          known.turnStarts = rec.starts;
+          known.turnToolIds.clear();
+          if (opened) this.endWorker(known, `Session ended after ${known.tools} tool calls (transcript)`);
+          else { known.terminalRevision = rec.terminalRevision; known.awaitingTerminal = false; }
+        } else if (newTerminal && rec.starts === known.turnStarts) {
+          // The ended turn's own terminal record. With an ending already recorded it is consumed: no occurrence,
+          // no change of outcome, and its tool calls can no longer pass for new ones. An ending that had no
+          // terminal evidence at all (restored from a `finished` flag) is settled from it, filling only an unknown.
+          if (known.awaitingTerminal || known.terminalRevision) {
+            known.awaitingTerminal = false;
+            known.terminalRevision = rec.terminalRevision;
+            for (const id of subagentToolIds(rec.file)) known.seenToolIds.add(id);
+          } else this.endWorker(known, `Session ended after ${known.tools} tool calls (transcript)`);
+        }
+        // Fewer turn starts than counted: the ended turn's own bytes are still owed, and nothing is read from older ones.
         known.transcriptRevision = rec.revision;
       }
       const all: WorkflowHelper[] = recs
@@ -865,6 +1230,7 @@ export class PathfinderRun {
       for (const [id, u] of this.unknownAgents) {
         if (!recs.some((r) => r.agentId === id)) all.push({ id, label: "Unidentified subagent", type: u.type || "subagent", finished: u.finished || !coordAlive, unknown: true });
       }
+      this.noteHelpers(recs, coordAlive);
       const helpers = [...all.filter((h) => !h.finished), ...all.filter((h) => h.finished).slice(-8)];
       if (hub.snap.workflow && JSON.stringify(helpers) !== JSON.stringify(hub.snap.workflow.helpers ?? [])) {
         hub.snap.workflow = { ...hub.snap.workflow, helpers };
@@ -876,6 +1242,14 @@ export class PathfinderRun {
     // process cannot keep its background workers alive. Allow the initial session reattachment to finish.
     if (!coordAlive && (this.coordinatorObservedRunning || Date.now() - this.startedAt >= 15_000)) {
       for (const w of this.workers.values()) if (w.live) this.endWorker(w, "Coordinator process stopped; no worker stop hook was received", null, true);
+    }
+    try {
+      this.syncCrew(coordAlive);
+    } catch (e) {
+      // The crew book is never allowed to stop the kitchen reading its sessions.
+      const problem = e instanceof Error ? e.message : String(e);
+      if (problem !== this.crewProblem) this.hub.activity("config", null, `Crew book: ${problem}`);
+      this.crewProblem = problem;
     }
     // Context in use, from each session's own transcript.
     // Context, model and effort, each from that session's own transcript (never another agent's).
@@ -972,6 +1346,11 @@ export class PathfinderRun {
       // A delegated helper (e.g. a search), or a subagent not identified yet: it shows at the subagent stations.
       const h = this.helperInfo.get(agentId);
       if (h && event === "SubagentStop") h.finished = true;
+      if (h && (event === "PreToolUse" || event === "PostToolUse") && typeof body.tool_use_id === "string") {
+        const evidence = `${agentId}:${body.tool_use_id}`;
+        if (!this.helperToolIds.has(evidence) && !subagentToolIds(this.subagentTranscript(agentId) ?? "").has(body.tool_use_id)) this.helperActivity.set(agentId, body.tool_use_id);
+        this.helperToolIds.add(evidence);
+      }
       // A helper's own Agent calls: their subagents are its helpers.
       if (h && event === "PreToolUse" && (body.tool_name === "Agent" || body.tool_name === "Task")) this.attribution.launch(body.tool_use_id, (body.tool_input ?? {}) as Record<string, unknown>, h.parent);
       if (h && event === "PostToolUse" && (body.tool_name === "Agent" || body.tool_name === "Task")) this.agentLaunched(h.parent, body);
@@ -985,7 +1364,12 @@ export class PathfinderRun {
     if (toolId) w.seenToolIds.add(toolId);
     // A replay cannot change an ended turn's status, tool count or gate evidence either.
     if (!w.live && !w.livenessUnknown && toolActivity && !freshTool) return { ok: true };
-    if (!w.live && (event === "SubagentStart" || freshTool || (w.livenessUnknown && toolActivity))) this.resumeWorker(w);
+    // A bare start has no delivery identity: after an ending it may be a delayed duplicate.
+    // Wait for a fresh tool or transcript advancement before reserving a robot.
+    if (!w.live && event === "SubagentStart" && !w.livenessUnknown) return { ok: true };
+    if (!w.live && (freshTool || (w.livenessUnknown && toolActivity)) && !this.resumeWorker(w, toolId ? { via: "tool", evidence: toolId } : { via: "hook", evidence: null })) return { ok: true };
+    // Only this turn's own calls: a replay of an earlier turn's call is not evidence about this one.
+    if (toolId && freshTool && w.live) w.turnToolIds.add(toolId);
     // A hook event from the session itself shows it is running now: note which gate occurrence is open on its ticket.
     if (event !== "SubagentStop") w.gateSeen = this.openOccurrence(w.key);
     switch (event) {
@@ -1055,6 +1439,7 @@ export class PathfinderRun {
       if (event.type === "delivery.updated") this.applyBoard();
     });
     this.hub.snap.workflow = { kind: "pathfinder", mode: this.info.mode, store: "", roles: PathfinderRun.readRoles(this.root), contextAlertPct: this.loadSettings().contextAlertPct, handoffs: {}, plan: this.savedPlan() };
+    if (this.crewProblem) this.hub.activity("config", null, `Crew book not opened, so no crew is shown or recorded: ${this.crewProblem}`);
     void this.refresh();
     this.polling = setInterval(() => void this.refresh(), 5000);
   }
@@ -1159,6 +1544,8 @@ export class PathfinderRun {
       log.warn("transcripts:", e);
     }
     this.applyBoard();
+    // The board may just have put a worker at its gate: the published crew shows it on this same poll.
+    this.crewChanged();
   }
 
   private ownerFor(key: string): string | null {
@@ -1358,8 +1745,7 @@ export class PathfinderRun {
   private gateRequest(key: string, gate: { text: string; occurrence: string | null; resolved: string[] }, gateStage: string | null): ActionRequest {
     const base = { kind: "gate" as const, key, revision: gateRevision(key, gate.text, gate.occurrence), occurrence: gate.occurrence };
     const ws = [...this.workers.values()].filter((w) => w.key === key);
-    const book = this.endBook();
-    const candidates = ws.map((w): GateCandidate & { w: Worker } => ({ w, ...this.gateCandidate(w, book[w.agentId]) }));
+    const candidates = ws.map((w): GateCandidate & { w: Worker } => ({ w, ...this.gateCandidate(w, this.savedEnding(w.agentId)) }));
     const { owner, diagnostic } = gateOwner(key, gate, candidates);
     if (!owner) return { ...base, stage: gateStage, owner: null, session: null, diagnostic };
     const w = (owner as GateCandidate & { w: Worker }).w;

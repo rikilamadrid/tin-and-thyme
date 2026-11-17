@@ -12,7 +12,7 @@ this document and the code disagree, fix one of them. Neither one wins by defaul
 | --- | --- | --- |
 | Role | The Pathfinder role contract (`roles/<role>.md`). Read-only here. | Feature 07 |
 | Crew character | A persistent robot (`CrewCharacterId`). Its name and colour can be customized. | this contract |
-| Execution session | One Pathfinder session (`CrewSession`). Always fresh, never resumed. | Pathfinder |
+| Execution session | One execution occurrence (`CrewSession`): one uninterrupted run. Never revived once ended. | Pathfinder |
 | Ticket | Durable. Passes through many sessions. | Pathfinder |
 
 - A character holds **at most one live session**.
@@ -20,7 +20,10 @@ this document and the code disagree, fix one of them. Neither one wins by defaul
 - A ticket has many sessions. Each session names at most one ticket. The coordinator and
   helpers may name none.
 - Reusing a character for a new session starts a new conversation. Nothing carries over except the
-  look.
+  look. The kitchen itself never resumes a conversation.
+- A session's own id (the **occurrence**) is kept apart from the **Claude conversation** id. When
+  Pathfinder resumes a conversation, the kitchen records a new occurrence linked to the ended one
+  (see Linked continuations). It is labelled the same conversation, never a new one.
 
 ## Characters and families
 
@@ -124,10 +127,16 @@ The orchestrator pool is Basil alone, and families never borrow, so it gets no r
 
 The `CrewSession` id rules are below. A session record is never re-keyed or deleted.
 
-- **Worker or helper:** the Claude Code subagent id. This is the key crew.json and sessions.json use
-  today.
-- **Coordinator:** `coordinator:<transcript file name without .jsonl>`. Until its transcript is
-  known, Basil shows `unknown` and no session record is written.
+- `conversation` is the Claude conversation:
+  - **Worker or helper:** the Claude Code subagent id. This is the key crew.json and sessions.json
+    use today.
+  - **Coordinator:** `coordinator:<transcript file name without .jsonl>`. Until its transcript is
+    known, Basil shows `unknown` and no session record is written.
+- `id` is the occurrence. A conversation's first occurrence has `id` equal to `conversation`, so
+  every id written before this amendment stays valid. A continuation is `<conversation>#<n>`, where
+  n is its place in the chain (2, 3 and so on).
+- `continuation` is `null` for a first occurrence. For a continuation it is `{ of, via, evidence }`:
+  the occurrence it continues, and the recorded evidence of the resume.
 - `hqId` keeps today's snapshot id: `w-<key>-<session>-<id10>`, `coordinator`, or the helper's id.
 - `stage` and `role` are verbatim. Stages that are not known are kept as written. Both are `null`
   for a migrated session until the restore fills them.
@@ -137,7 +146,8 @@ The `CrewSession` id rules are below. A session record is never re-keyed or dele
   family. The character is never changed to match.
 - `seq` is the book-wide creation order: 0, 1, 2 and so on. Migrated sessions take crew.json key
   order, which is start order, because `addWorker` appends at session start. It breaks ties of age.
-- `phase` only goes `live` → `ended`. Nothing moves a session back to `live`.
+- `phase` only goes `live` → `ended`. Nothing moves a session back to `live`. A resumed
+  conversation gets a new occurrence instead.
 - `endedAt` is set once, when the session goes `live` → `ended` (or filled when it was null), and
   is never moved afterwards. If reconcile ended a session with `end: null` and a sessions.json
   ending arrives later, that ending fills `end`, and its own time stays in `end.at`. `endedAt`
@@ -152,6 +162,163 @@ The `CrewSession` id rules are below. A session record is never re-keyed or dele
   cost and tool count. A value that is not available is `null`, never 0. This includes `tools`, which
 is `null` for a restored session whose count was never read. The readings freeze when
   the session ends and stay in History. A character that is available shows no readings.
+
+### Linked continuations (amendment, 09.3; human decision 2026-11-16)
+
+Pathfinder can resume a worker under the same Claude subagent id after it ended. The kitchen only
+observes that; it never causes it. `continueSession(book, conversation, { via, evidence }, now)`
+records it:
+
+- The ended occurrence is left exactly as it is: its `phase`, `end`, `endedAt` and readings.
+- A **new occurrence** is created, `<conversation>#<n>`, with `continuation.of` naming the ended
+  one. It copies the conversation's identity (kind, hqId, role, stage, ticket, title, worktree,
+  parent and transcript) and takes `startedAt` = now. `hqId` is the conversation's, so the rest of
+  the snapshot keeps one id for it.
+- **It is labelled the same conversation** (`occurrenceLabel`: `same conversation` when
+  `continuation` is set, `new conversation` otherwise). No view may show a continuation as a
+  newly created conversation.
+- **One live occurrence per conversation, and one per character.** The continuation takes the
+  character its conversation wore last when that character is free. If another session holds it by
+  then, the ordinary allocation rules pick (a free character of the family, else overflow). So a
+  resume never gives a worker a second robot, and never takes a different robot while its own is
+  free. While the restore pass is open it waits for reconcile like any session (rule 10), and
+  reconcile applies the same preference.
+- **Processing the same resume again adds nothing:**
+  - a resume whose `via` and non-null `evidence` already opened an occurrence of the conversation
+    returns that occurrence unchanged, even when it has ended since;
+  - while the conversation's latest occurrence is live, every further resume signal returns it;
+  - the id is the place in the chain, so recording the same resume from the same book gives the
+    same id.
+- `via` and `evidence` are what was observed, never inferred:
+  - `tool`: a tool call the kitchen had not seen before. `evidence` is its `tool_use_id`;
+  - `transcript`: a turn start beyond every turn already counted. `evidence` is the transcript
+    revision seen before it, or `terminal:<revision>` for a whole turn that started and finished
+    unseen (its terminal record);
+  - `hook`: a coordinator hook handled while its process is seen running ties that process to the
+    transcript the hook names. `evidence` is `null`. A saved transcript path plus a running process
+    is not enough, and neither is a hook handled while no process runs.
+    A worker's bare `SubagentStart` after an ending is ambiguous (it may be replayed), so the
+    runtime waits for its own fresh tool or transcript evidence before recording a continuation.
+
+#### How the runtime tells a turn from its own late bytes (09.3, repair rounds 2 and 3)
+
+A subagent transcript is a list of turns. The runtime counts **turn starts**. It never counts any
+other record.
+
+- A **prompt-shaped record** is a `user` record that is not only tool results and is not an
+  interrupt marker (text starting `[Request interrupted by user`).
+- A **terminal record** is an `assistant` record with `stop_reason: "end_turn"`, an API error
+  (`isApiErrorMessage`), or a `SubagentHandback` tool call.
+- A **turn start** is one of two records:
+  - the file's first prompt-shaped record. A forked subagent's file opens with records of its
+    inherited context, an assistant record among them, before it;
+  - the first prompt-shaped record after a terminal record, with no assistant record between them.
+    Records between the two (tool results, bookkeeping records, interrupt markers) change nothing.
+- Every other prompt-shaped record is inside a turn and is never counted. Real transcripts carry
+  many of them: a system reminder right after the first prompt, a skill body after a Skill tool
+  result, image notes, coordinator messages and task notifications delivered mid-turn. `isMeta`
+  says nothing either way, because a genuine resume prompt is often `isMeta` too.
+- `subagentTurns` in `server/transcripts.ts` is the one definition. Workers, helpers and restore all
+  use it. The readers of the latest turn (`subagentTerminalRevision`, `subagentReport`) stop at a
+  prompt-shaped record, and skip an interrupt marker.
+
+The rule was checked read-only against 159 real Claude Code subagent transcripts. It gives the same
+count as "the first prompt record, or a prompt record whose latest assistant record is terminal" in
+all 159. That is 189 turns in all, 25 files with more than one turn and 383 prompt-shaped records.
+No transcript content was copied.
+
+For each conversation the runtime keeps the number of turn starts the transcript holds once every
+turn seen so far is fully on disk. A turn opened by a tool call adds one to that number before its
+prompt is written.
+
+- **A later turn is a turn start beyond that count.** Nothing else in the transcript is a resume. A
+  turn's late tool records, its mid-turn records, its late terminal record and bookkeeping records
+  add no turn start.
+- **An ending never hides a later turn that starts after a terminal record.**
+  `terminalBoundary.pending` says the ended turn's own terminal record was not on disk when the
+  ending was recorded. It decides whose that record is when it arrives. It does not wait for it,
+  so it needs no expiry. A resume after the ended turn's terminal record is recorded at its prompt
+  record even when it makes no tool call, in the same kitchen run or after a restart.
+- **After an ending with no terminal record at all**, the rule puts every prompt-shaped record
+  inside the ended turn. This covers a stop hook mid-tool-call, a worker ended because its
+  coordinator stopped, and an ending read from `meta.json`. An interrupt marker or an unanswered
+  task notification appended then opens nothing and holds no robot. A genuine resume after such an
+  ending is recorded by its first fresh tool call.
+- **A task notification directly after a terminal record** is a turn start under the rule. It is
+  recorded as a resume, because real ones are answered. Its answer's terminal record ends it.
+- `terminalBoundary` is written once with a worker's ending and never rewritten:
+  - `revision`: the terminal record visible at that moment, which belongs to an earlier turn
+    while `pending`;
+  - `pending`: this turn's own terminal record was absent;
+  - `turns`: the turn-start count once this turn's own bytes are on disk;
+  - `tools`: tool calls of this turn that hooks showed and the transcript did not yet hold,
+    present only when there are some. After a restart a replayed hook for one of them is still a
+    replay.
+- Books from earlier versions load unchanged, and no ended occurrence is rewritten:
+  - `6552316` wrote `starts`, a count of every prompt-shaped record with mid-turn ones included. It
+    is never compared with a turn count. What that ending still owed is `starts` minus the
+    prompt-shaped records on disk now, when that is positive. The count is the turn starts on disk
+    plus that.
+  - For a pending ending with neither `turns` nor `starts` (`b085f0a`), the runtime counts one owed
+    turn start while the transcript still ends at `revision`.
+  - For an ending with no boundary at all (`87f8e46`), and any ending without `turns` or `starts`,
+    it also counts one when the ending belongs to a continuation opened by a tool call whose record
+    is not on disk while the transcript ends at a terminal record. Otherwise it counts none.
+- The ended turn's own terminal record, when it arrives, creates no occurrence and changes no
+  recorded outcome. For an ending that had no terminal evidence at all (restored from a
+  `finished` flag) it may fill an unknown outcome.
+- A whole turn that started and finished between two polls is one ended occurrence with its own
+  report, keyed by its terminal record. It no longer needs an earlier terminal record to exist.
+- **Helpers** follow the same counting, in memory. A helper's late or mid-turn bytes are not a
+  resume. A turn start that the poll which saw a helper's ending had not counted is a later turn,
+  recorded on the next poll. A `finished` flag in `meta.json` that was written before a recorded
+  resume does not end the resumed turn. A fresh helper tool call is recorded when the hook arrives,
+  before any byte. A whole helper turn between two polls is one ended occurrence. Every helper
+  resume also needs a coordinator that is running and has identified itself. Evidence that arrives
+  while it has not is dropped. Restarting a coordinator never revives a helper.
+- **Across a kitchen restart** the book says which occurrence is the latest and how it was
+  opened. For a worker or a helper:
+  - a continuation still live in the book is not ended by a `finished` flag written before it
+    began;
+  - a continuation opened by a tool call whose record is not in the transcript has none of its
+    bytes on disk. While the transcript still ends at a terminal record, that record is the
+    earlier turn's: it ends nothing, and the turn start the continuation still owes is not a
+    later turn, whether the continuation is still live or already ended.
+
+What this does not guarantee:
+
+- The rule trusts where a record sits. A prompt-shaped record that Claude Code writes directly after
+  a terminal record and that is not a new turn is read as one. None of the 159 real transcripts
+  had one. A genuine turn whose prompt follows a turn that ended with no terminal record is not a
+  turn start. It is recorded by its first fresh tool call, or not at all when it makes none. Its
+  terminal record is then read as the ended turn's own.
+- A task notification after a terminal record that is never answered leaves its occurrence live,
+  holding its robot. The subagent's stop hook ends it, and so does losing its coordinator.
+- A turn opened by a tool call is owed its turn start until one of its own tool records is on
+  disk while it runs or when it ends: records are appended in order, so the prompt is then on disk
+  or never will be. If the prompt never comes and none of its tool records reach disk before the
+  ending, the count stays one ahead. The same happens when the turn before it ended with no
+  terminal record, because that prompt is never a turn start. The next resume is then recorded by
+  its first tool call or its terminal record, not at its prompt.
+- Turns that started while the kitchen was down are counted as already seen at startup. They get
+  no occurrence of their own.
+- A helper has no ending evidence in the book, so its tool-call memory lasts one kitchen run. After
+  a restart, a replayed hook for a helper tool call whose record never reached disk is read as a
+  resume. A replay of a tool call that already opened a recorded continuation is not.
+- Hooks carry no process identity. A hook from an old coordinator process that is handled while a
+  newer process is already running is taken as the running one's.
+- A replayed `SubagentStop` has no identity either. It ends whichever turn of that subagent is
+  live.
+- An ending recorded before `tools` was kept (by `87f8e46` or `b085f0a`) holds no tool calls seen
+  only through hooks. After a restart, a replayed hook for a later tool call of that turn whose
+  record never reached disk is read as a resume.
+- `restoreSession` still never revives an ended occurrence. A restart that finds the transcript
+  unfinished records no resume. Only one of the three kinds of evidence above does.
+- A conversation the book has never seen is not a continuation: `continueSession` returns `null`
+  and the caller uses `startSession`.
+
+A crew book written before this amendment has neither field. It is read with `conversation` equal
+to `id` and `continuation` null, which is what those sessions were. The version stays 1.
 
 ## Lifecycle states (`CrewState`)
 
@@ -228,7 +395,8 @@ record, not a state (`retireCharacter`). A session that ends never beams the rob
    in a digit, so "Dash 2", "Dash2", "Dash-2" and "R2D2" are all refused. Renaming changes only the
    label, never the family or role.
 9. The registry changes sessions only through `startSession` (allocates once, and returns an id
-   that already exists unchanged), `endSession`, `restoreSession` and `reconcileAfterRestore`. It
+   that already exists unchanged), `continueSession` (a linked continuation of a conversation that
+   ended), `endSession`, `restoreSession` and `reconcileAfterRestore`. It
    changes characters only through `customizeCharacter` and `retireCharacter`. A new
    coordinator session ends any other live coordinator session, and moves any live
    non-coordinator session still on Basil (a legacy worker) to overflow with `reassignedFrom:
@@ -256,7 +424,7 @@ The file is `~/.controlroom/<key>/crew-book.json`, the `CrewBook` type, with sch
 { schema, version: 1, kitchen, updatedAt,
   characters: { <CrewCharacterId>: { id, family, name|null, color|null, sessionId|null,
                                      lastSessionId|null, availableSince|null, firstSeen, retired } },
-  sessions:   { <session id>: CrewSession },
+  sessions:   { <occurrence id>: CrewSession },   // each has conversation and continuation
   migrations: [ { from, fromVersion, at, backup, imported[], filled[], conflicts[] } ],
   restorePass: { firstSeq } | null }
 ```
@@ -391,8 +559,10 @@ the disk writes belong to the caller.
       loses the character (`reassignedFrom`, listed in the latest migration's `conflicts`) and joins
       the queue.
    6. The queue is those sessions plus every live session the pass recorded with no character. It
-      is allocated oldest first against the reconciled book. A session gets a free character of its
-      family when there is one, and otherwise it is overflow.
+      is allocated oldest first against the reconciled book. First each continuation takes back
+      the character its conversation wore last, when that character is free (Linked continuations).
+      Then a session gets a free character of its family when there is one, and otherwise it is
+      overflow.
 
    The result is the same allocation for every restore order. No live session is left without a
    character while its family has a free one. The exception is a session that was already overflow
@@ -442,7 +612,30 @@ The startup order for 09.3:
   shows instead of `config.team` rows.
 - `overflow: string[]`: ids of live sessions that have no character.
 
-A `CrewSessionView` is a `CrewSession` plus `characterName` and `state`.
+A `CrewSessionView` is a `CrewSession` plus `characterName` and `state`. It carries `conversation`
+and `continuation`, so History can show a continuation as the same conversation, linked to the
+occurrence before it.
+
+What 09.3's projection guarantees (`crewSnapshot` in `src/data/crewSnapshot.ts`, the one
+projection the server and the fixtures share):
+
+- every recorded character is listed once, in pool order, including an available one;
+- a character's `ticket`, `stage`, `role` and `telemetry` are those of the session it shows, and
+  are null when it is available, so a reused character never shows the last session's role;
+- `current` and `history` hold every session exactly once, in the orders above;
+- `lastOutcome` is the outcome of the character's ended session with the highest `seq`.
+
+`crewSnapshotProblems` checks the second item and the listing of sessions. Order, completeness and
+`lastOutcome` are asserted by `scripts/crew-registry-test.ts` and `scripts/crew-runtime-test.ts`.
+
+### Team rows in Pathfinder mode (09.3)
+
+`config.team` no longer gets a row per session. It holds the coordinator and one row per
+character: the session the character holds now, or held last, under that session's `hqId`. A
+character taken by a fresh session swaps its row, and the earlier session stays in `history`. Until
+09.5 draws the overflow layout, a session with no character is listed as the plain crew bot under
+its role name: every live one, and only the latest ended one of each family. `AgentStatus` entries
+stay keyed by `hqId`, one per conversation, in memory only.
 
 ### Transporter (decision for 09.5)
 

@@ -77,9 +77,10 @@ export function TopBar() {
   const look = usePrefs((s) => s.artStyle);
   if (!snap) return null;
   const setupIssues = snap.setup.checks.filter((c) => c.status !== "ok").length;
-  // A finished workflow session is history, not something to restart.
-  const finishedWorker = new Set(snap.config.team.filter((a) => a.crew?.session).map((a) => a.id));
-  const stopped = snap.agents.filter((a) => (a.session.state === "stopped" || a.session.state === "failed") && !finishedWorker.has(a.agentId));
+  // A workflow session is history, not something to restart. Its status may outlive its team row: a crew
+  // character's row moves on to its next session, so only a team member that is not a session can be started.
+  const startable = new Set(snap.config.team.filter((a) => !a.crew?.session).map((a) => a.id));
+  const stopped = snap.agents.filter((a) => (a.session.state === "stopped" || a.session.state === "failed") && startable.has(a.agentId));
 
   // Live: count real running sessions. Mock: every agent counts as running.
   const runningIds = new Set(snap.agents.filter((a) => a.session.state === "running").map((a) => a.agentId));
