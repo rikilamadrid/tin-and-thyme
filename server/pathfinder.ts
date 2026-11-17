@@ -1304,9 +1304,12 @@ export class PathfinderRun {
     const answered = new Set(items.filter((i) => requestShelf(i) === "awaiting").map((i) => i.request?.key ?? i.taskId));
     const rows = this.rows.filter((r) => r.state === "human-gate" && !this.settledGates.has(r.key)).map((r) => r.key);
     // A hidden Feature's gate stays open in Pathfinder, but it is not shown, so it never asks for attention (06.2).
-    // A ticket with a live session (or one whose liveness is unknown) is never hidden.
-    const hidden = (k: string) => this.hub.hiddenFeatures.has(featureOf(k)) && ![...this.workers.values()].some((w) => w.key === k && (w.live || w.livenessUnknown));
-    return [...new Set([...rows, ...items.map((i) => i.taskId ?? i.id.replace(/^gate-/, ""))])].filter((k) => !answered.has(k) && !hidden(k));
+    return [...new Set([...rows, ...items.map((i) => i.taskId ?? i.id.replace(/^gate-/, ""))])].filter((k) => !answered.has(k) && !this.hiddenTicket(k));
+  }
+
+  /** A ticket of a hidden Feature (06.2) with no live session, or one whose liveness is unknown: never a live one. */
+  private hiddenTicket(key: string): boolean {
+    return this.hub.hiddenFeatures.has(featureOf(key)) && ![...this.workers.values()].some((w) => w.key === key && (w.live || w.livenessUnknown));
   }
 
   /** The coordinator's attention once its turn ended: needs you for a real ask, else waiting on live workers. */
@@ -1423,7 +1426,10 @@ export class PathfinderRun {
     if (!this.hub.snap.workflow) return;
     this.hub.snap.workflow = { ...this.hub.snap.workflow, plan };
     this.emitWorkflow();
-    this.hub.activity("task.assigned", COORDINATOR_ID, `Dispatch plan: ${plan.dispatch.length ? `${plan.dispatch.join(", ")} eligible to claim` : "nothing to claim now"}${plan.deferred.length ? `; ${plan.deferred.map((d) => d.key).join(", ")} wait for a later round` : ""}`);
+    // The line names only tickets that are shown (06.2); the plan itself, kept above, is the engine's own.
+    const dispatch = plan.dispatch.filter((k) => !this.hiddenTicket(k));
+    const deferred = plan.deferred.map((d) => d.key).filter((k) => !this.hiddenTicket(k));
+    this.hub.activity("task.assigned", COORDINATOR_ID, `Dispatch plan: ${dispatch.length ? `${dispatch.join(", ")} eligible to claim` : "nothing to claim now"}${deferred.length ? `; ${deferred.join(", ")} wait for a later round` : ""}`);
   }
 
   private savedPlan(): PlanSeen | null {

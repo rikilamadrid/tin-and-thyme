@@ -271,6 +271,68 @@ eq("coordinator: not \"Needs you\" for a hidden gate while a worker runs", [raw.
   eq("restart: attention counts stay clear of Feature 02", selectAttention(after).items.length, 0);
 }
 
+// ================================================================ repair 1, F1: helpers are hidden through their parent
+
+/** A helper (not a Pathfinder worker) launched by `parent`, as Claude Code reports one. */
+function helper(w: World, parent: string, id: string, prompt: string) {
+  hook(w, "PreToolUse", { agent_id: parent, agent_type: "general-purpose", tool_name: "Agent", tool_use_id: `tu_${id}`, tool_input: { prompt, description: prompt, subagent_type: "Explore" } });
+  hook(w, "PostToolUse", { agent_id: parent, agent_type: "general-purpose", tool_name: "Agent", tool_use_id: `tu_${id}`, tool_input: { prompt }, tool_response: { status: "completed", agentId: id, prompt } });
+  writeFileSync(join(subDir(w), `agent-${id}.jsonl`), JSON.stringify({ parentUuid: null, isSidechain: true, agentId: id, type: "user", message: { role: "user", content: prompt }, timestamp: new Date().toISOString() }) + "\n");
+  writeFileSync(join(subDir(w), `agent-${id}.meta.json`), JSON.stringify({ agentType: "Explore", description: prompt, toolUseId: `tu_${id}`, parentAgentId: parent }));
+  hook(w, "SubagentStart", { agent_id: id, agent_type: "Explore" });
+}
+function helperDone(w: World, parent: string, id: string, prompt: string) {
+  writeFileSync(join(subDir(w), `agent-${id}.meta.json`), JSON.stringify({ agentType: "Explore", description: prompt, toolUseId: `tu_${id}`, parentAgentId: parent, finished: true }));
+  hook(w, "SubagentStop", { agent_id: id, agent_type: "Explore", agent_transcript_path: join(subDir(w), `agent-${id}.jsonl`), last_assistant_message: "found", stop_hook_active: false });
+}
+{
+  const hr = makeRepo("repo-helpers", ["02-harness-accounts.md", "10-x.md"]);
+  const wh = boot(hr, "tt-helpers", [row("02.1", "working"), row("10.1", "working")]);
+  (wh.run as unknown as { startedAt: number }).startedAt = 0;
+  await refresh(wh);
+  launch(wh, "b021", "02.1");
+  launch(wh, "b101", "10.1");
+  helper(wh, "b021", "hdone", "Search the harness account code");
+  helper(wh, "b021", "hlive", "Read the account settings");
+  helper(wh, "b101", "hother", "Search the delivery code");
+  await refresh(wh);
+  helperDone(wh, "b021", "hdone", "Search the harness account code");
+  helperDone(wh, "b101", "hother", "Search the delivery code");
+  stopWith(wh, "b021", "02.1", "GATE: which account?");
+  await refresh(wh);
+  const rawH = wh.hub.snap;
+  const seenH = view(wh);
+  const rawIds = JSON.stringify(rawH.workflow);
+  check("F1 setup: the kitchen's own state holds all three helpers", ["hdone", "hlive", "hother"].every((id) => rawIds.includes(id)), rawH.workflow?.helpers);
+  const crewIds = (s: OfficeSnapshot) => [...(s.workflow?.crew?.history ?? []), ...(s.workflow?.crew?.current ?? [])].map((x) => x.hqId ?? x.id);
+  check("F1: a finished helper of a hidden 02.1 session is absent everywhere a browser is sent", !JSON.stringify(seenH).includes("hdone"), { helpers: seenH.workflow?.helpers, crew: crewIds(seenH), chars: seenH.workflow?.crew?.characters.map((c) => [c.id, c.sessionId]) });
+  check("F1: no character shows the hidden helper's session", !(seenH.workflow?.crew?.characters ?? []).some((c) => c.sessionId && rawH.workflow?.crew?.history.some((x) => x.id === c.sessionId && x.hqId === "hdone")));
+  check("F1: a live helper of that hidden session is never hidden", (seenH.workflow?.helpers ?? []).some((x) => x.id === "hlive" && !x.finished) && crewIds(seenH).includes("hlive"), { helpers: seenH.workflow?.helpers, crew: crewIds(seenH) });
+  check("F1: a finished helper of an unrelated 10.1 session is unaffected", (seenH.workflow?.helpers ?? []).some((x) => x.id === "hother" && x.finished) && crewIds(seenH).includes("hother"), { helpers: seenH.workflow?.helpers, crew: crewIds(seenH) });
+  check("F1: the crew book keeps the hidden helper's session", rawIds.includes("hdone"));
+}
+
+// ================================================================ repair 1, F2: a line naming a visible ticket keeps it
+
+{
+  const hF = hiddenIn(w.hub.snap, w.hub.hiddenFeatures);
+  const sent = (text: string, agentId: string | null = COORDINATOR_ID) => {
+    const e = visibleEvent({ type: "activity", event: { id: "x", at: "", type: "task.assigned", agentId, text } }, hF, w.hub.snap);
+    return e?.type === "activity" ? e.event.text : null;
+  };
+  eq("F2: a mixed line is kept with the hidden key taken out", sent("Dispatch plan: 10.1, 02.2 eligible to claim"), "Dispatch plan: 10.1 eligible to claim");
+  eq("F2: a hidden key first in a list leaves cleanly", sent("Dispatch plan: 02.2, 10.1 eligible to claim; 02.1 wait for a later round"), "Dispatch plan: 10.1 eligible to claim; wait for a later round");
+  eq("F2: an engine argument list keeps its visible keys", sent("Coordinator ran engine `plan --live 09.1,02.1,10.3`"), "Coordinator ran engine `plan --live 09.1,10.3`");
+  eq("F2: a line naming only 02.x keys is dropped", [sent("02.1 needs your decision"), sent("02.1, 02.2 moved")], [null, null]);
+  eq("F2: a line with no ticket key is untouched", sent("Feature 02 board F02 changed"), "Feature 02 board F02 changed");
+  const shown = visibleSnapshot({ ...w.hub.snap, activity: [{ id: "y", at: "", type: "task.assigned", agentId: COORDINATOR_ID, text: "Dispatch plan: 10.1, 02.2 eligible to claim" }] }, hF).activity.map((e) => e.text);
+  eq("F2: the snapshot keeps the mixed line the same way", shown, ["Dispatch plan: 10.1 eligible to claim"]);
+  // At the source: the kitchen's plan line names only shown tickets; the plan it keeps is the engine's own.
+  (w.run as unknown as { notePlan(p: unknown): void }).notePlan({ at: new Date().toISOString(), outcome: "planned", dispatch: ["10.1", "02.2"], deferred: [{ key: "02.1", reason: "gate open" }] });
+  eq("F2 source: the plan line is built from the shown keys", w.hub.snap.activity[0]?.text, "Dispatch plan: 10.1 eligible to claim");
+  eq("F2 source: the engine's plan is kept as it was", [w.hub.snap.workflow?.plan?.dispatch, w.hub.snap.workflow?.plan?.deferred.map((d) => d.key)], [["10.1", "02.2"], ["02.1"]]);
+}
+
 // ================================================================ a project whose Feature 02 isn't suppressed
 
 {

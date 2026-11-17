@@ -94,8 +94,34 @@ export function hiddenIn(snap: OfficeSnapshot, features: ReadonlySet<string>): H
     ...Object.keys(snap.delivery?.byKey ?? {}),
   ];
   const tickets = new Set(keys.filter(hidden));
-  const sessions = new Set(finished.filter(([, t]) => hidden(t)).map(([id]) => id));
-  const crewSessions = new Set((crew?.history ?? []).filter((s) => hidden(s.ticket)).map((s) => s.id));
+  // A live session is never hidden, even when an earlier occurrence of its conversation shared its id.
+  const liveIds = new Set([
+    ...snap.agents.filter((a) => !FINISHED.has(a.session.state)).map((a) => a.agentId),
+    ...(crew?.current ?? []).flatMap((s) => (s.hqId ? [s.hqId] : [])),
+    ...(snap.workflow.helpers ?? []).filter((x) => !x.finished).map((x) => x.id),
+  ]);
+  const sessions = new Set(finished.filter(([id, t]) => hidden(t) && !liveIds.has(id)).map(([id]) => id));
+  const crewSessions = new Set<string>();
+  for (const s of crew?.history ?? []) {
+    if (!hidden(s.ticket)) continue;
+    crewSessions.add(s.id);
+    if (s.hqId && !liveIds.has(s.hqId)) sessions.add(s.hqId);
+  }
+  // A finished helper has no ticket of its own: it is hidden through its parent's identity, when the session that
+  // launched it is hidden (a helper of such a helper too). A running helper never is.
+  const helpers = [
+    ...(crew?.history ?? []).filter((s) => s.kind === "helper").map((s) => ({ id: s.hqId ?? s.id, crewId: s.id as string | null, parent: s.parent })),
+    ...(snap.workflow.helpers ?? []).filter((x) => x.finished).map((x) => ({ id: x.id, crewId: null as string | null, parent: x.parent ?? null })),
+  ];
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const x of helpers) {
+      if (!x.parent || !sessions.has(x.parent) || liveIds.has(x.id) || (sessions.has(x.id) && (!x.crewId || crewSessions.has(x.crewId)))) continue;
+      sessions.add(x.id);
+      if (x.crewId) crewSessions.add(x.crewId);
+      grew = true;
+    }
+  }
   const liveFeatures = new Set([...live].map(featureOf));
   const boards = new Set(snap.boards.filter((b) => /^F/.test(b.id) && features.has(featureOf(b.id.slice(1))) && !liveFeatures.has(featureOf(b.id.slice(1)))).map((b) => b.id));
   const sorted = (s: Set<string>) => [...s].sort();
@@ -106,13 +132,29 @@ export function hiddenIn(snap: OfficeSnapshot, features: ReadonlySet<string>): H
 /** Ticket keys an activity line names (`02.1`), read as written. */
 const KEY_IN_TEXT = /(?<![\w.])(\d{1,3})\.(\d{1,3})(?![\w]|\.\d)/g;
 
-function visibleActivity(e: ActivityEvent, h: Hidden): boolean {
-  if (e.agentId && h.sessions.has(e.agentId)) return false;
-  for (const m of e.text.matchAll(KEY_IN_TEXT)) {
-    const key = `${m[1]}.${m[2]}`;
-    if (h.features.has(m[1]) && !h.live.has(key)) return false;
+/**
+ * An activity line as a browser is sent it. A line from a hidden session, or one naming only hidden tickets, is
+ * not sent. A line that also names a visible ticket is kept with the hidden keys taken out of it.
+ */
+function visibleActivity(e: ActivityEvent, h: Hidden): ActivityEvent | null {
+  if (e.agentId && h.sessions.has(e.agentId)) return null;
+  const named = [...e.text.matchAll(KEY_IN_TEXT)];
+  const gone = named.filter((m) => h.features.has(m[1]) && !h.live.has(`${m[1]}.${m[2]}`));
+  if (!gone.length) return e;
+  if (gone.length === named.length) return null;
+  // Right to left, so the earlier keys' positions still hold. Each key leaves with one list separator beside it.
+  let text = e.text;
+  for (const m of gone.reverse()) {
+    let start = m.index!;
+    let end = start + m[0].length;
+    const after = /^\s*,\s*/.exec(text.slice(end));
+    const before = /\s*,\s*$/.exec(text.slice(0, start));
+    if (after) end += after[0].length;
+    else if (before) start -= before[0].length;
+    else if (/^\s/.test(text.slice(end))) end += 1;
+    text = text.slice(0, start) + text.slice(end);
   }
-  return true;
+  return { ...e, text };
 }
 
 function visibleItem(i: ActionItem, h: Hidden): boolean {
@@ -141,7 +183,7 @@ function visibleWorkflow(wf: WorkflowInfo, h: Hidden): WorkflowInfo {
   return {
     ...wf,
     ...(wf.handoffs ? { handoffs: Object.fromEntries(Object.entries(wf.handoffs).filter(([k]) => !h.tickets.has(k))) } : {}),
-    ...(wf.helpers ? { helpers: wf.helpers.filter((x) => !(x.finished && x.parent && h.sessions.has(x.parent))) } : {}),
+    ...(wf.helpers ? { helpers: wf.helpers.filter((x) => !(x.finished && (h.sessions.has(x.id) || (x.parent && h.sessions.has(x.parent))))) } : {}),
     ...(plan !== undefined ? { plan } : {}),
     ...(wf.crew ? { crew: visibleCrew(wf.crew, h) } : {}),
     hidden,
@@ -160,7 +202,7 @@ export function visibleSnapshot(snap: OfficeSnapshot, h: Hidden): OfficeSnapshot
     pullRequests: snap.pullRequests.filter((p) => !h.tickets.has(p.taskId)),
     environments: snap.environments.filter((e) => !(e.agentId && h.sessions.has(e.agentId))),
     messages: snap.messages.filter((m) => !h.sessions.has(m.fromId) && !h.sessions.has(m.toId)),
-    activity: snap.activity.filter((e) => visibleActivity(e, h)),
+    activity: snap.activity.flatMap((e) => visibleActivity(e, h) ?? []),
     ...(snap.actionItems ? { actionItems: snap.actionItems.filter((i) => visibleItem(i, h)) } : {}),
     workflow: visibleWorkflow(snap.workflow, h),
     ...(snap.delivery ? { delivery: { ...snap.delivery, byKey: Object.fromEntries(Object.entries(snap.delivery.byKey).filter(([k]) => !h.tickets.has(k))) } } : {}),
@@ -189,8 +231,10 @@ export function visibleEvent(e: OfficeEvent, h: Hidden, snap: OfficeSnapshot): O
       return e.env.agentId && h.sessions.has(e.env.agentId) ? null : e;
     case "message":
       return h.sessions.has(e.message.fromId) || h.sessions.has(e.message.toId) ? null : e;
-    case "activity":
-      return visibleActivity(e.event, h) ? e : null;
+    case "activity": {
+      const event = visibleActivity(e.event, h);
+      return event === e.event ? e : event ? { ...e, event } : null;
+    }
     case "action.updated":
       return visibleItem(e.item, h) ? e : null;
     case "workflow.updated":
