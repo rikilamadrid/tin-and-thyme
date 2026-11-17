@@ -203,6 +203,15 @@ const helpers = (w: World) => w.hub.snap.workflow?.helpers ?? [];
   eq("unit: VERDICT wins over a leading GATE line", readReport("GATE: none raised during this review.\n\nAll checks green.\n\nVERDICT: PASS")?.verdict, "PASS");
   eq("unit: VERDICT wins over the developer's quoted DONE line", readReport("DONE: 61cd56e8 was the developer's line.\n\nOne Medium finding.\n\nVERDICT: FINDINGS")?.verdict, "FINDINGS");
   eq("unit: without VERDICT, the last report line is the session's own", readReport("DONE: 61cd56e8 was the previous handoff.\n\nGATE: Which account should the live check use?"), { verdict: "GATE", text: "Which account should the live check use?" });
+  // 06.4: a review's own standalone headline, the bare verdict word on the report's first line.
+  eq("unit 06.4: a standalone PASS headline is the report's verdict, with its next line as the result", readReport("PASS\n\nNo blocking findings."), { verdict: "PASS", text: "No blocking findings." });
+  eq("unit 06.4: a standalone FINDINGS headline is the report's verdict", readReport("FINDINGS\n\nMedium: the replay regressed."), { verdict: "FINDINGS", text: "Medium: the replay regressed." });
+  eq("unit 06.4: a bold or heading headline counts, and a bare report keeps its own word", [readReport("**PASS**\n\nAll checks green.")?.verdict, readReport("## FINDINGS\n\n### Medium\n\nOne gap.")?.text, readReport("\n  PASS  \n")], ["PASS", "One gap.", { verdict: "PASS", text: "PASS" }]);
+  eq("unit 06.4: PASS or FINDINGS inside prose is no verdict", [readReport("The suite reports PASS on every check.\n\nNothing changed."), readReport("PASS on every check, but I stopped early."), readReport("I reviewed the repair.\n\nFINDINGS"), readReport("Pass\n\nlower case is prose")], [null, null, null, null]);
+  eq("unit 06.4: PASS or FINDINGS in a quotation is no verdict", [readReport("> PASS\n\nThe developer's summary, quoted."), readReport("\"PASS\"\n\nis what the fixture printed."), readReport("Earlier review said:\n\n> FINDINGS")], [null, null, null]);
+  eq("unit 06.4: PASS or FINDINGS in a fenced code block is no verdict", [readReport("```\nPASS\n```\n\nThat is the fixture's output."), readReport("Ran it:\n\n```text\nFINDINGS\n```"), readReport("~~~\nPASS\n~~~")], [null, null, null]);
+  eq("unit 06.4: an explicit VERDICT wins over a standalone headline that disagrees", [readReport("PASS\n\nOne Medium gap after all.\n\nVERDICT: FINDINGS")?.verdict, readReport("FINDINGS\n\nOnly a Low note.\n\nVERDICT: PASS")?.verdict], ["FINDINGS", "PASS"]);
+  eq("unit 06.4: a later report line still wins over the headline", readReport("FINDINGS\n\nOne blocker needs a decision.\n\nGATE: Which account should the live check use?"), { verdict: "GATE", text: "Which account should the live check use?" });
 }
 {
   const ended = sessionEnding("review", "**Result: PASS.** One Low finding deferred.\n\nVERDICT: PASS", { state: "review", last: "previous developer's DONE line", gate: null });
@@ -212,6 +221,8 @@ const helpers = (w: World) => w.hub.snap.workflow?.helpers ?? [];
   eq("unit: a review that reported FINDINGS is handed off", [f.outcome, f.verdict, f.next], ["handed-off", "FINDINGS", null]);
   eq("unit: no report and its own stage still recorded is interrupted", sessionEnding("review", null, { state: "review", last: null, gate: null }).outcome, "interrupted");
   eq("unit: GATE report", sessionEnding("implementation", "GATE: sign in", { state: "working", last: null, gate: null }).outcome, "gate");
+  const bare = sessionEnding("review", "PASS\n\nNo blocking findings.", { state: "review", last: "DONE: 4abe0b9 the developer's handoff", gate: null });
+  eq("unit 06.4: a review that reported a standalone PASS is handed off with its own result", [bare.outcome, bare.verdict, bare.next, bare.result], ["handed-off", "PASS", null, "No blocking findings."]);
 }
 {
   // Who raised a gate: only a session's own matching GATE report, made in this very gate occurrence. Never the
@@ -661,6 +672,71 @@ for (const ending of ["handback", "end-turn"] as const) for (const order of ["po
   eq(`${label}: another genuine turn adds exactly one occurrence`, chain(), [...resumed, [`${id}#3`, "ended", "FINDINGS", `${id}#2`]]);
   await refresh(w);
   eq(`${label}: …and reading it again adds none`, chain().length, 3);
+  w.run.stop();
+}
+
+// 06.4: a review whose own report opens with a bare PASS or FINDINGS line (the native 07.1 tester case). Its ticket's
+// checkpoint still says `review`, with the previous developer's DONE in Last; the handback is followed by its tool result.
+const DEV_DONE = "DONE: 4abe0b9 the developer's handoff";
+const handback = (id: string, toolId: string, message: string) => [
+  { isSidechain: true, agentId: id, type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: toolId, name: "SubagentHandback", input: { message } }] } },
+  { isSidechain: true, agentId: id, type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: toolId, content: "Handed back." }] } },
+].map((r) => JSON.stringify(r) + "\n").join("");
+/** A live review worker on 64.1, dispatched by the coordinator, whose turn ended. */
+async function liveReview(slug: string, id: string) {
+  const w = boot(makeRepo(`repo-${slug}`), `tt-${slug}`);
+  (w.run as unknown as { queueRefresh(ms: number): void }).queueRefresh = () => {};
+  stateFile(w, "64.1", { State: "review", Last: DEV_DONE });
+  setRows(w, [row("64.1", "review")]);
+  coordinatorTurn(w, true);
+  stopTurn(w);
+  preAgent(w, `tu_${id}`, brief("64.1", "review", "tester"), "64.1 review");
+  postAgent(w, `tu_${id}`, brief("64.1", "review", "tester"), id);
+  subStart(w, id);
+  writeSub(w, id, { prompt: brief("64.1", "review", "tester"), toolUseId: `tu_${id}` });
+  toolEvent(w, id);
+  await refresh(w);
+  return w;
+}
+for (const [verdict, report, own] of [["PASS", "PASS\n\nNo blocking findings.", "No blocking findings."], ["FINDINGS", "FINDINGS\n\nMedium: the replay regressed.", "Medium: the replay regressed."]] as const) for (const via of ["transcript", "stop"] as const) {
+  const label = `06.4 standalone ${verdict} via ${via}`;
+  const id = `r064-${verdict.toLowerCase()}-${via}`;
+  const w = await liveReview(`064-${verdict.toLowerCase()}-${via}`, id);
+  eq(`${label}: the review is live and the coordinator waits on it`, [workers(w).get(id)?.live, w.run.liveKeys(), coordinator(w).state], [true, ["64.1"], "waiting"]);
+  appendFileSync(join(subDir(w), `agent-${id}.jsonl`), handback(id, `handback-${id}`, report));
+  if (via === "stop") subStop(w, id, "");
+  await refresh(w);
+  const wk = workers(w).get(id)!;
+  eq(`${label}: stopped and handed off with its own verdict and result`, [wk.live, wk.ended?.outcome, wk.ended?.verdict, wk.ended?.result], [false, "handed-off", verdict, own]);
+  check(`${label}: never the previous developer's DONE`, wk.ended?.result !== DEV_DONE, wk.ended?.result);
+  eq(`${label}: shown as a report, not Interrupted`, [w.hub.status(wk.hqId)?.state, w.hub.status(wk.hqId)?.note], ["idle", `Reported ${verdict}`]);
+  eq(`${label}: no false "worker waiting"`, [w.run.liveKeys(), coordinator(w).state !== "waiting"], [[], true]);
+  eq(`${label}: the crew book records its own ending`, occurrences(w, id).map((s) => [s.phase, s.end?.outcome ?? null, s.end?.verdict ?? null]), [["ended", "handed-off", verdict]]);
+  await refresh(w);
+  eq(`${label}: a later poll keeps it`, [wk.live, wk.ended?.outcome, wk.ended?.verdict, wk.ended?.result], [false, "handed-off", verdict, own]);
+  w.run.stop();
+}
+// A later resumed turn with no report of its own never borrows the earlier standalone PASS.
+for (const end of ["coordinator", "stop"] as const) {
+  const label = `06.4 resumed turn without a report (${end})`;
+  const id = `r064-resume-${end}`;
+  const w = await liveReview(`064-resume-${end}`, id);
+  const file = join(subDir(w), `agent-${id}.jsonl`);
+  appendFileSync(file, handback(id, `handback-${id}`, "PASS\n\nold review"));
+  await refresh(w);
+  eq(`${label}: the first turn settles its own PASS`, [workers(w).get(id)?.live, workers(w).get(id)?.ended?.verdict, workers(w).get(id)?.ended?.result], [false, "PASS", "old review"]);
+  appendFileSync(file, JSON.stringify({ type: "user", message: { role: "user", content: "Review the new repair" } }) + "\n");
+  appendFileSync(file, JSON.stringify({ type: "assistant", message: { role: "assistant", stop_reason: "tool_use", content: [{ type: "tool_use", name: "Bash", id: `new-tool-${id}`, input: { command: "npm run typecheck" } }] } }) + "\n");
+  hook(w, "PostToolUse", { agent_id: id, tool_name: "Bash", tool_use_id: `new-tool-${id}`, tool_response: {} });
+  await refresh(w);
+  eq(`${label}: the resumed turn is live with no outcome`, [workers(w).get(id)?.live, workers(w).get(id)?.ended ?? null], [true, null]);
+  if (end === "coordinator") w.hub.setSession(COORDINATOR_ID, { state: "stopped" });
+  else subStop(w, id, "");
+  await refresh(w);
+  const ended = workers(w).get(id)?.ended;
+  eq(`${label}: interrupted, with no PASS inherited`, [workers(w).get(id)?.live, ended?.outcome, ended?.verdict ?? null], [false, "interrupted", null]);
+  check(`${label}: the earlier turn's result is not reused`, ended?.result !== "old review", ended?.result);
+  eq(`${label}: the earlier turn keeps its PASS`, occurrences(w, id).map((s) => [s.phase, s.end?.verdict ?? null]), [["ended", "PASS"], ["ended", null]]);
   w.run.stop();
 }
 
