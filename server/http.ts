@@ -11,6 +11,7 @@ import { timingSafeEqual } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { OfficeEvent } from "../src/data/source";
 import { handleHook } from "./hooks";
+import { visibleFeed } from "./hiddenFeatures";
 import type { Hub } from "./hub";
 import type { Inbox } from "./inbox";
 import { handleMcp } from "./mcp";
@@ -145,8 +146,8 @@ export function startHttp(o: Options) {
 
   function onClient(ws: WebSocket, origin: string) {
     const sendEvent = (e: OfficeEvent) => ws.readyState === ws.OPEN && ws.send(JSON.stringify(e));
-    sendEvent({ type: "snapshot", snapshot: o.hub.snap });
-    const unsub = o.hub.subscribe(sendEvent);
+    // What a browser sees: the snapshot and events less any hidden Feature (06.2), the same on every (re)connect.
+    const unsub = visibleFeed(o.hub, sendEvent);
     ws.on("message", async (raw) => {
       try {
         const msg = JSON.parse(String(raw)) as { cmd?: unknown; args?: unknown[]; rpc?: unknown };

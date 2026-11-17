@@ -494,6 +494,19 @@ export interface WorkflowInfo {
    * pass has closed, and when the crew book can't be opened.
    */
   crew?: CrewSnapshot;
+  /**
+   * Features hidden from the work surfaces (06.2), set only in what a browser is sent. Hidden is a view
+   * decision, never a lifecycle state: not Cancelled, not Complete. Its tickets, gates and history are unchanged.
+   */
+  hidden?: HiddenFeature[];
+}
+
+/** A Feature the kitchen leaves off its work surfaces. `state` is always "hidden", never a lifecycle status. */
+export interface HiddenFeature {
+  feature: string;
+  state: "hidden";
+  /** Its tickets left off the surfaces now (a ticket with a live session is never hidden). */
+  tickets: number;
 }
 
 export interface WorkflowHelper {
