@@ -4,6 +4,31 @@ Compact record of completed work.
 
 ## Completed
 
+### 2026-11-17 — Feature 11: Kitchen Delight
+
+- Outcome: A focused polish pass with seven changes.
+  - Finished boards and Served slips get a calm completed look.
+  - Cooks and the head chef's console show subtle cues only while they are actually working.
+  - The MAIN hatch gets a marquee, with a light chase and confetti only while a confirmed merge goes through.
+  - The crew panel folds to a remembered rail.
+  - Rare, seeded ambient objects pass outside the windows.
+  - Basil, the head chef, gets a relaxed idle, a stool and a mug.
+  - The fridge and water cooler are replaced by the transport pod, with beam timing and rules unchanged.
+  - Everything is static under reduced motion. Its only ticket, 11.1, is Complete.
+- Verification:
+  - Independent review of `546eac9`: nothing blocking.
+  - Bounded repair `fb2987c` (queue spot no longer covers a hangout): independent re-review PASS. The main-merge commit `cb1cb1f` is verified byte-equal on both sides.
+  - Checks: kitchen-delight 55/0, attention 505/0, crew suites, typecheck and build.
+  - Frame time showed no regression in the busy fixture.
+  - Before and after screenshots in both art styles, with the panel folded and unfolded, at wide and narrow widths. GitHub CI did not run.
+- Commit/PR: PR #34 (`7d87f9c`); the merged tree equals the reviewed `cb1cb1f`.
+- Follow-up:
+  - The human accepted the chef idle while the coordinator session runs.
+  - The Activity feed hides while the crew panel is folded.
+  - Cosmetic leftovers: a stale comment at `scene.ts:1178`, and the cel floor-tag text overlap, which predates this feature.
+  - Lifecycle placement and overflow rules stay with 09.5, the full reduced-motion pass (the delivery dish and shutter) with 09.6.
+  - Not tested: the live kitchen, real screen-reader speech, browsers other than Chrome.
+
 ### 2026-11-13 — Feature 07: Pathfinder Role Wiring
 
 - Outcome: Read-only resolved role/source/contract and evidence of actual receipt in Pathfinder Settings and crew details; existing canonical skill-based loading and native-team editing preserved. Its only ticket, 07.1, is Complete.
