@@ -47,6 +47,7 @@ import type { ActionAnswer, ActionRequest, DeliveryStage } from "../src/data/typ
 import { requestShelf } from "../src/data/requests";
 import { RoleContractObserver } from "./roleContracts";
 import { deliveryStageOf } from "../src/data/delivery";
+import { featureOf, hiddenFeaturesFor } from "./hiddenFeatures";
 
 export const COORDINATOR_ID = "coordinator";
 const ENGINE = join("skills", "orchestrate", "engine", "bin", "orchestrate.mjs");
@@ -1302,7 +1303,10 @@ export class PathfinderRun {
     const items = (this.hub.snap.actionItems ?? []).filter((i) => i.status === "open" && i.id.startsWith("gate-"));
     const answered = new Set(items.filter((i) => requestShelf(i) === "awaiting").map((i) => i.request?.key ?? i.taskId));
     const rows = this.rows.filter((r) => r.state === "human-gate" && !this.settledGates.has(r.key)).map((r) => r.key);
-    return [...new Set([...rows, ...items.map((i) => i.taskId ?? i.id.replace(/^gate-/, ""))])].filter((k) => !answered.has(k));
+    // A hidden Feature's gate stays open in Pathfinder, but it is not shown, so it never asks for attention (06.2).
+    // A ticket with a live session (or one whose liveness is unknown) is never hidden.
+    const hidden = (k: string) => this.hub.hiddenFeatures.has(featureOf(k)) && ![...this.workers.values()].some((w) => w.key === k && (w.live || w.livenessUnknown));
+    return [...new Set([...rows, ...items.map((i) => i.taskId ?? i.id.replace(/^gate-/, ""))])].filter((k) => !answered.has(k) && !hidden(k));
   }
 
   /** The coordinator's attention once its turn ended: needs you for a real ask, else waiting on live workers. */
@@ -1438,6 +1442,7 @@ export class PathfinderRun {
     this.unsubscribeDelivery = this.hub.subscribe((event) => {
       if (event.type === "delivery.updated") this.applyBoard();
     });
+    this.hub.hiddenFeatures = hiddenFeaturesFor(this.root);
     this.hub.snap.workflow = { kind: "pathfinder", mode: this.info.mode, store: "", roles: PathfinderRun.readRoles(this.root), contextAlertPct: this.loadSettings().contextAlertPct, handoffs: {}, plan: this.savedPlan() };
     if (this.crewProblem) this.hub.activity("config", null, `Crew book not opened, so no crew is shown or recorded: ${this.crewProblem}`);
     void this.refresh();

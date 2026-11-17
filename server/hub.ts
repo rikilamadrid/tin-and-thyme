@@ -19,6 +19,8 @@ export class Hub {
   persist = true;
   /** A workflow adapter's name for an id that has no team row (a past session of a reused crew character). */
   alias: ((id: string) => string | null) | null = null;
+  /** Features left off the browsers' work surfaces (06.2, server/hiddenFeatures.ts). Set by the workflow adapter; never changes this snapshot. */
+  hiddenFeatures: ReadonlySet<string> = new Set();
 
   constructor(readonly repo: RepoInfo, readonly slug: string, config: HqConfig, plan: PlanFile, setup: SetupState) {
     this.snap = {
