@@ -48,6 +48,7 @@ import type { ActionAnswer, ActionRequest, DeliveryStage } from "../src/data/typ
 import { requestShelf } from "../src/data/requests";
 import { RoleContractObserver } from "./roleContracts";
 import { deliveryStageOf } from "../src/data/delivery";
+import { featureOf, hiddenFeaturesFor } from "./hiddenFeatures";
 
 export const COORDINATOR_ID = "coordinator";
 const ENGINE = join("skills", "orchestrate", "engine", "bin", "orchestrate.mjs");
@@ -1312,7 +1313,13 @@ export class PathfinderRun {
     const items = (this.hub.snap.actionItems ?? []).filter((i) => i.status === "open" && i.id.startsWith("gate-"));
     const answered = new Set(items.filter((i) => requestShelf(i) === "awaiting").map((i) => i.request?.key ?? i.taskId));
     const rows = this.rows.filter((r) => r.state === "human-gate" && !this.settledGates.has(r.key)).map((r) => r.key);
-    return [...new Set([...rows, ...items.map((i) => i.taskId ?? i.id.replace(/^gate-/, ""))])].filter((k) => !answered.has(k));
+    // A hidden Feature's gate stays open in Pathfinder, but it is not shown, so it never asks for attention (06.2).
+    return [...new Set([...rows, ...items.map((i) => i.taskId ?? i.id.replace(/^gate-/, ""))])].filter((k) => !answered.has(k) && !this.hiddenTicket(k));
+  }
+
+  /** A ticket of a hidden Feature (06.2) with no live session, or one whose liveness is unknown: never a live one. */
+  private hiddenTicket(key: string): boolean {
+    return this.hub.hiddenFeatures.has(featureOf(key)) && ![...this.workers.values()].some((w) => w.key === key && (w.live || w.livenessUnknown));
   }
 
   /** The coordinator's attention once its turn ended: needs you for a real ask, else waiting on live workers. */
@@ -1429,7 +1436,10 @@ export class PathfinderRun {
     if (!this.hub.snap.workflow) return;
     this.hub.snap.workflow = { ...this.hub.snap.workflow, plan };
     this.emitWorkflow();
-    this.hub.activity("task.assigned", COORDINATOR_ID, `Dispatch plan: ${plan.dispatch.length ? `${plan.dispatch.join(", ")} eligible to claim` : "nothing to claim now"}${plan.deferred.length ? `; ${plan.deferred.map((d) => d.key).join(", ")} wait for a later round` : ""}`);
+    // The line names only tickets that are shown (06.2); the plan itself, kept above, is the engine's own.
+    const dispatch = plan.dispatch.filter((k) => !this.hiddenTicket(k));
+    const deferred = plan.deferred.map((d) => d.key).filter((k) => !this.hiddenTicket(k));
+    this.hub.activity("task.assigned", COORDINATOR_ID, `Dispatch plan: ${dispatch.length ? `${dispatch.join(", ")} eligible to claim` : "nothing to claim now"}${deferred.length ? `; ${deferred.join(", ")} wait for a later round` : ""}`);
   }
 
   private savedPlan(): PlanSeen | null {
@@ -1448,6 +1458,7 @@ export class PathfinderRun {
     this.unsubscribeDelivery = this.hub.subscribe((event) => {
       if (event.type === "delivery.updated") this.applyBoard();
     });
+    this.hub.hiddenFeatures = hiddenFeaturesFor(this.root);
     this.hub.snap.workflow = { kind: "pathfinder", mode: this.info.mode, store: "", roles: PathfinderRun.readRoles(this.root), contextAlertPct: this.loadSettings().contextAlertPct, handoffs: {}, plan: this.savedPlan() };
     if (this.crewProblem) this.hub.activity("config", null, `Crew book not opened, so no crew is shown or recorded: ${this.crewProblem}`);
     void this.refresh();

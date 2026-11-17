@@ -57,6 +57,12 @@ export function BoardsDrawer({ initialBoardId }: { initialBoardId?: string }) {
           </button>
         ))}
       </div>
+      {/* 06.2: a hidden Feature has no tab or cards. Say so, as Hidden: never Done, Cancelled or Complete. */}
+      {(snap.workflow?.hidden?.length ?? 0) > 0 && (
+        <p className="m-0 border-b-[3px] border-line px-3 py-1 text-[12px] text-muted" data-hidden-features={snap.workflow!.hidden!.map((h) => h.feature).join(",")}>
+          Hidden from view: {snap.workflow!.hidden!.map((h) => `Feature ${h.feature}`).join(", ")}. Hidden is not Cancelled or Complete: its tickets, gates and history are unchanged.
+        </p>
+      )}
       {board && (
         <div className="flex items-center gap-2 border-b-[3px] border-line bg-cream-2 px-3 py-1.5 text-[14px]">
           <span className="text-muted">Status</span>
