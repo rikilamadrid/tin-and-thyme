@@ -6,7 +6,7 @@ import { ui, useUi } from "../store/ui";
 import { makeBackend } from "./backend";
 import { buildGalley, type GalleyModel } from "./model";
 import { MarkIcon } from "../ui/hud/CrewPanel";
-import { ALERT, BEAM_BUSY_MS, BEAM_MS, drawGalley, HANGOUTS, route, sceneAnimating, SPOTS, targetFor, VIEW, type Actor, type Delivery, type Hit } from "./scene";
+import { ALERT, ambientInit, ambientStep, beamSlot, drawGalley, HANGOUTS, route, sceneAnimating, SPOTS, targetFor, VIEW, type Actor, type AmbientPass, type Delivery, type Hit } from "./scene";
 
 const SPEED = 70; // logical units per second
 const FRAME_MS = 50;
@@ -20,6 +20,8 @@ const ROAM_SPREAD_MS = 8000;
 
 /** Every beam the transporter ran (or queued), newest last. Read by the fixture checks; never replayed. */
 export const beamLog: { at: number; id: string; kind: "in" | "out" }[] = [];
+/** The ambient object on screen now, if any. Read by the fixture checks (screenshots); decoration only. */
+export const ambientNow: { pass: AmbientPass | null } = { pass: null };
 
 /** The tickets the workflow reports as delivered (integrated / done). */
 const deliveredSet = (snap: OfficeSnapshot) => new Set(snap.tasks.filter((t) => (t.pf ? t.pf.state === "integrated" : t.status === "done")).map((t) => t.id));
@@ -55,15 +57,15 @@ export function GalleyCanvas({ left, right }: { left: number; right: number }) {
     /** Each cook's pod, kept so a departure never shuffles the rest of the line. */
     const podOf = new Map<string, number>();
     /** When the transporter is next free: beams queue up, one at a time, and run shorter when they do. */
-    let tubeFree = 0;
+    const tube = { free: 0 };
     const slot = (now: number, kind: "in" | "out", id: string) => {
       beamLog.push({ at: Date.now(), id, kind });
       if (beamLog.length > 100) beamLog.shift();
-      const t0 = Math.max(now, tubeFree);
-      const dur = t0 > now ? BEAM_BUSY_MS : BEAM_MS;
-      tubeFree = t0 + dur;
-      return { kind, t0, dur };
+      return beamSlot(tube, now, kind);
     };
+    /** Ambient scenery (decoration): rare, one at a time, and never with reduced motion. */
+    const ambientState = ambientInit((Math.random() * 2 ** 32) >>> 0, performance.now());
+    let ambient: AmbientPass | null = null;
     const actors = new Map<string, Actor>();
     const spotOf = new Map<string, number>();
     const deliveries: Delivery[] = [];
@@ -290,7 +292,7 @@ export function GalleyCanvas({ left, right }: { left: number; right: number }) {
       const drawer = useUi.getState().drawer;
       const selected = drawer?.kind === "agent" ? drawer.id : null;
       while (deliveries.length && now - deliveries[0].t0 > 7000) deliveries.shift();
-      hits = drawGalley(B, model, { now, actors, selected, hover: hoverId, deliveries, spotOf, reduce, view: { x: v.x, y: v.y, w: v.w, h: v.h } });
+      hits = drawGalley(B, model, { now, actors, selected, hover: hoverId, deliveries, spotOf, reduce, view: { x: v.x, y: v.y, w: v.w, h: v.h }, ambient });
     };
 
     const loop = (now: number) => {
@@ -299,8 +301,11 @@ export function GalleyCanvas({ left, right }: { left: number; right: number }) {
       last = now;
       roam(now);
       const moving = step(dt, now);
-      // Busy scenes (walking, a delivery, a live scan) run at full rate; idle ones tick slowly.
-      const busy = moving || deliveries.length > 0 || (!reduce && !!model && sceneAnimating(model));
+      ambient = ambientStep(ambientState, now, reduce);
+      ambientNow.pass = ambient;
+      // Busy scenes (walking, a delivery, a live scan, an ambient object's short pass) run at full rate; idle
+      // ones tick slowly. Working cues and the chef's idle step in whole beats, so the slow tick carries them.
+      const busy = moving || deliveries.length > 0 || ambient !== null || (!reduce && !!model && sceneAnimating(model));
       const wantMs = busy ? FRAME_MS : reduce ? 1000 : 250;
       if (dirty || now - lastDraw >= wantMs) {
         draw(now);

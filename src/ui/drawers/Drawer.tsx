@@ -1,6 +1,6 @@
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { useEffect, useRef, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
-import { CREW_W } from "../hud/CrewPanel";
+import { useCrewWidth } from "../hud/CrewPanel";
 import { useDrawerLayout } from "./dock";
 import { DRAWER_DEFAULT, ui, useUi } from "../../store/ui";
 import { AgentDrawer } from "./AgentDrawer";
@@ -88,6 +88,7 @@ export function DrawerHost() {
   const width = useUi((s) => s.drawerWidth);
   const maximized = useUi((s) => s.drawerMaximized);
   const { docked } = useDrawerLayout();
+  const crewW = useCrewWidth();
   // Escape closes an overlay drawer, except while typing in a terminal or a field (Escape belongs to them).
   useEffect(() => {
     if (!drawer || docked || drawer.kind === "boards") return;
@@ -127,7 +128,7 @@ export function DrawerHost() {
     <>
       {/* Overlay mode (narrow window or maximized): a dim backdrop over the scene; click it or press Escape to close. */}
       {drawer && !docked && (
-        <div className="fixed bottom-0 right-0 top-[66px] z-[15] bg-[rgba(5,7,15,0.55)]" style={{ left: 16 + CREW_W }} aria-hidden onMouseDown={() => ui.closeDrawer()} />
+        <div className="fixed bottom-0 right-0 top-[66px] z-[15] bg-[rgba(5,7,15,0.55)]" style={{ left: 16 + crewW }} aria-hidden onMouseDown={() => ui.closeDrawer()} />
       )}
     <AnimatePresence mode="wait">
       {drawer && (

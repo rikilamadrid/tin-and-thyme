@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { cueLog, startCues } from "./audio/cues";
-import { beamLog } from "./galley/GalleyCanvas";
+import { ambientNow, beamLog } from "./galley/GalleyCanvas";
 import { FIXTURE_LABEL } from "./data/fixture/busyFixture";
 import { GalleyCanvas } from "./galley/GalleyCanvas";
 import { connectOffice, useOffice } from "./store/office";
@@ -12,7 +12,7 @@ import { ConnectionBanner } from "./ui/hud/ConnectionBanner";
 import { PreviewBanner } from "./ui/hud/PreviewBanner";
 import { SetupChecklist } from "./ui/setup/SetupChecklist";
 import { WelcomeModal } from "./ui/setup/WelcomeModal";
-import { CREW_W, CrewPanel } from "./ui/hud/CrewPanel";
+import { CrewPanel, useCrewWidth } from "./ui/hud/CrewPanel";
 import { useDrawerLayout } from "./ui/drawers/dock";
 import { Tooltip } from "./ui/hud/Tooltip";
 import { TopBar } from "./ui/hud/TopBar";
@@ -69,6 +69,7 @@ function useSetupPrompt() {
 
 export function App() {
   const dock = useDrawerLayout();
+  const crewW = useCrewWidth();
   useEffect(() => {
     startCues(); // before connecting, so the first snapshot is the silent baseline
     // Fixtures expose the chosen cues so a check can confirm what played and what stayed silent.
@@ -76,6 +77,7 @@ export function App() {
     if (fixture) {
       (window as unknown as { __thepassCues: typeof cueLog }).__thepassCues = cueLog;
       (window as unknown as { __thepassBeams: typeof beamLog }).__thepassBeams = beamLog;
+      (window as unknown as { __thepassAmbient: typeof ambientNow }).__thepassAmbient = ambientNow;
       document.title = `Tin & Thyme · Fixture: ${FIXTURE_LABEL[fixture]}`;
     }
     return connectOffice();
@@ -88,7 +90,7 @@ export function App() {
 
   return (
     <>
-      <GalleyCanvas left={16 + CREW_W + 16} right={dock.docked ? dock.width + 32 : 16} />
+      <GalleyCanvas left={16 + crewW + 16} right={dock.docked ? dock.width + 32 : 16} />
       <ConnectionBanner />
       <PreviewBanner />
       {ready && (
