@@ -286,20 +286,22 @@ test("a book written before occurrences reads unchanged; a broken link is refuse
 });
 
 test("terminal boundaries of every book shape load and are kept as written; an invalid one is refused", () => {
-  // The three shapes on disk: none (87f8e46), { revision, pending } (b085f0a), and with starts and tools.
-  const shapes = { none: undefined, round1: { revision: "10:abc", pending: true }, round2: { revision: null, pending: true, starts: 2, tools: ["t2", "t3"] } };
+  // The four shapes on disk: none (87f8e46), { revision, pending } (b085f0a), with starts and tools (6552316), and with
+  // turns and tools (repair round 3). A 6552316 `starts` is kept as written, never converted to `turns`.
+  const shapes = { none: undefined, round1: { revision: "10:abc", pending: true }, round2: { revision: null, pending: true, starts: 2, tools: ["t2", "t3"] }, round3: { revision: "20:def", pending: true, turns: 1, tools: ["t4"] } };
   const r = fresh("boundaries");
   for (const [id, terminalBoundary] of Object.entries(shapes)) { r.start(id, facts(`06.${id.length}`), t()); r.end(id, { ...ending(2), ...(terminalBoundary ? { terminalBoundary } : {}) }, t(2)); }
   r.save(); const file = join(r.directory, "crew-book.json"); const written = JSON.parse(readFileSync(file, "utf8")).sessions;
   const next = new CrewRegistry(r.directory, r.kitchen, t(5)); next.reconcile([], t(6));
   for (const [id, terminalBoundary] of Object.entries(shapes)) {
     assert.deepEqual((next.book.sessions[id].end as { terminalBoundary?: unknown }).terminalBoundary, terminalBoundary, `${id}: read as written, nothing added`);
-    next.end(id, { ...ending(9), terminalBoundary: { revision: "99:zzz", pending: false, starts: 9 } }, t(9));
+    next.end(id, { ...ending(9), terminalBoundary: { revision: "99:zzz", pending: false, turns: 9 } }, t(9));
   }
   next.save();
   assert.deepEqual(JSON.parse(readFileSync(file, "utf8")).sessions, written, "an ended occurrence and its boundary are never rewritten");
   assert.deepEqual(next.endings("round2").map((e) => e.terminalBoundary?.tools), [["t2", "t3"]]); assert.equal(existsSync(join(r.directory, "backups")), false);
-  for (const bad of [{ revision: null, pending: true, starts: -1 }, { revision: null, pending: true, starts: 1.5 }, { revision: null, pending: true, tools: "t2" }, { revision: null, pending: true, tools: [2] }]) {
+  assert.deepEqual(next.endings("round3").map((e) => e.terminalBoundary?.turns), [1]);
+  for (const bad of [{ revision: null, pending: true, turns: -1 }, { revision: null, pending: true, turns: "1" }, { revision: null, pending: true, starts: -1 }, { revision: null, pending: true, starts: 1.5 }, { revision: null, pending: true, tools: "t2" }, { revision: null, pending: true, tools: [2] }]) {
     const broken = new CrewRegistry(r.directory, r.kitchen, t(10)); broken.reconcile([], t(11)); const bytes = readFileSync(file, "utf8");
     (broken.book.sessions.round2.end as { terminalBoundary?: unknown }).terminalBoundary = bad;
     assert.throws(() => broken.save(), /Refusing to persist an invalid crew book/); assert.equal(readFileSync(file, "utf8"), bytes);

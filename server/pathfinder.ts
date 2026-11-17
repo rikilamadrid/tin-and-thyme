@@ -42,7 +42,7 @@ import { log } from "./lib/log";
 import { Attribution, readReport, type Evidence, type Identity } from "./attribution";
 import { coordinatorAttention, gateOwner, sameQuestion, sessionEnding, ticketView, type GateCandidate } from "./workflowState";
 import { gateRevision, isGateOccurrence, readGateHistory, type GateHistory } from "./gateRecord";
-import { subagentMeta, subagentPrompt, subagentReport, subagentTerminalRevision, subagentToolIds, subagentTurnStarts, transcriptRevision } from "./transcripts";
+import { subagentMeta, subagentPrompt, subagentReport, subagentTerminalRevision, subagentToolIds, subagentTurns, subagentTurnStarts, transcriptRevision } from "./transcripts";
 import type { ActionAnswer, ActionRequest, DeliveryStage } from "../src/data/types";
 import { requestShelf } from "../src/data/requests";
 import { RoleContractObserver } from "./roleContracts";
@@ -93,12 +93,12 @@ interface Worker {
   terminalRevision?: string | null;
   /**
    * The ended turn's own terminal record has not reached disk. It only says whose that record will be: it never
-   * hides a later turn, which is told apart by its own prompt record (`turnStarts`), so it needs no expiry.
+   * hides a later turn, which is told apart by its own turn start (`turnStarts`), so it needs no expiry.
    */
   awaitingTerminal?: boolean;
   /**
-   * Prompt records the transcript holds once every turn counted so far is on disk, the current or last one
-   * included even when its own bytes are late. A prompt beyond this count is a later turn.
+   * Turn starts (`subagentTurns`) the transcript holds once every turn counted so far is on disk, the current or
+   * last one included even when its own bytes are late. A turn start beyond this count is a later turn.
    */
   turnStarts: number;
   seenToolIds: Set<string>;
@@ -671,14 +671,18 @@ export class PathfinderRun {
     if (s?.phase === "ended") { finished = true; unknown = false; }
     const ended = finished ? this.restoredEnding(agentId, b.key, b.session, transcript, s) : null;
     const boundary = (s?.end as BookEntry | null)?.terminalBoundary;
-    const starts = transcript ? subagentTurnStarts(transcript) : 0;
+    const { turns: starts, legacy } = transcript ? subagentTurns(transcript) : { turns: 0, legacy: 0 };
     const terminalNow = transcript ? subagentTerminalRevision(transcript) : null;
     // Every turn already in the file is counted, so nothing on disk now can look like a resume. A pending
-    // ending also counts the prompt it was still owed (a book from before `starts` was kept: owed while the
-    // transcript still ends at the earlier turn's terminal record).
-    // So does a continuation opened by a tool call none of whose bytes are on disk yet, live or ended (an ending
-    // from before `terminalBoundary` was kept has nothing else to tell it by).
-    const counted = boundary?.starts ?? (boundary?.pending && boundary.revision !== null && terminalNow === boundary.revision ? starts + 1 : this.owesPrompt(agentId, transcript) ? starts + 1 : starts);
+    // ending also counts the turn starts it was still owed:
+    // - `turns` (this version) is the count itself;
+    // - `starts` (6552316) counted every prompt-shaped record, mid-turn ones included, so it is never compared with
+    //   a turn count. What it still owed is what the file lacks against it by that same measure (`legacy`);
+    // - a book from before either was kept: owed while the transcript still ends at the earlier turn's terminal
+    //   record, or for a continuation opened by a tool call none of whose bytes are on disk yet, live or ended (an
+    //   ending from before `terminalBoundary` was kept has nothing else to tell it by).
+    const counted = boundary?.turns ?? (boundary?.starts !== undefined ? starts + Math.max(0, boundary.starts - legacy)
+      : boundary?.pending && boundary.revision !== null && terminalNow === boundary.revision ? starts + 1 : this.owesPrompt(agentId, transcript) ? starts + 1 : starts);
     const seenToolIds = transcript ? subagentToolIds(transcript) : new Set<string>();
     // Tool calls a pending ending saw through hooks only: after a restart a replay of one is still a replay.
     for (const e of this.crew?.endings(agentId) ?? []) for (const id of e.terminalBoundary?.tools ?? []) seenToolIds.add(id);
@@ -839,7 +843,7 @@ export class PathfinderRun {
   /**
    * Helpers the kitchen has identified, in the crew book: a running one holds a helper character, a finished one
    * is history. A helper has no ending evidence of its own, so its turns are counted the way a worker's are: its
-   * own late bytes add no prompt record and are never a resume; a later prompt record, or a tool call no hook
+   * own late and mid-turn bytes add no turn start and are never a resume; a later turn start, or a tool call no hook
    * showed before, is. A `finished` flag written before a resume says nothing about the resumed turn.
    */
   private noteHelpers(recs: SubagentRecord[], coordAlive: boolean) {
@@ -865,7 +869,7 @@ export class PathfinderRun {
       if (latest?.phase === "ended") {
         const allowed = !parentGone && this.coordinatorIdentityObserved;
         const laterTurn = r.starts > turns.starts;
-        // A fresh tool call is recorded when it is seen, bytes or none. A later prompt record is a turn in
+        // A fresh tool call is recorded when it is seen, bytes or none. A later turn start is a turn in
         // progress, or, with its terminal record already there, a whole turn that ran between two polls.
         const resume: Pick<CrewContinuation, "via" | "evidence"> | null = !allowed ? null
           : toolEvidence ? { via: "tool", evidence: toolEvidence }
@@ -881,6 +885,9 @@ export class PathfinderRun {
       const ownTerminal = r.transcriptEnded && r.starts >= turns.starts;
       const flagged = seen.finished || (r.finished && !(turns.resumedAt && r.metaUpdatedAt < turns.resumedAt + 1000));
       const s = crew.restore(r.agentId, { kind: "helper", hqId: r.agentId, stage: "helper", parent: seen.parent, transcript: r.file, startedAt: r.startedAt || undefined, phase: ownTerminal || flagged || parentGone ? "ended" : "live" });
+      // Turn starts never count a record inside a turn, so a helper's own late or mid-turn bytes leave `r.starts`
+      // where it was. One the poll that saw the ending did not count is a later turn: it started after a terminal
+      // record, so the next poll records it, whole or in progress.
       if (s.phase !== "live") continue;
       turns.starts = Math.max(turns.starts, r.starts);
       this.liveHelpers.add(s.id);
@@ -911,7 +918,7 @@ export class PathfinderRun {
 
   private liveHelpers = new Set<string>();
   private helperRevisions = new Map<string, string>();
-  /** Per helper: the prompt records counted so far (as `Worker.turnStarts`), and when a resume was last recorded. */
+  /** Per helper: the turn starts counted so far (as `Worker.turnStarts`), and when a resume was last recorded. */
   private helperTurns = new Map<string, { starts: number; resumedAt: number }>();
   private helperActivity = new Map<string, string>();
   private helperToolIds = new Set<string>();
@@ -1097,7 +1104,7 @@ export class PathfinderRun {
     w.turnStarts = Math.max(w.turnStarts, starts);
     const written = pending && w.transcript ? subagentToolIds(w.transcript) : new Set<string>();
     const unwritten = pending ? [...w.turnToolIds].filter((id) => !written.has(id)) : [];
-    const ended = this.settleAs(w.agentId, w.key, ending, w.session, this.reportedIn(w, ending), undefined, { revision: terminal, pending, starts: w.turnStarts, ...(unwritten.length ? { tools: unwritten } : {}) });
+    const ended = this.settleAs(w.agentId, w.key, ending, w.session, this.reportedIn(w, ending), undefined, { revision: terminal, pending, turns: w.turnStarts, ...(unwritten.length ? { tools: unwritten } : {}) });
     w.awaitingTerminal = pending;
     w.turnToolIds.clear();
     if (w.transcript) {
@@ -1177,7 +1184,7 @@ export class PathfinderRun {
         }
         const advanced = !!known.transcriptRevision && rec.revision !== known.transcriptRevision;
         const settled = !known.live && !known.livenessUnknown;
-        // An ended session can resume without SubagentStart. A prompt record beyond every turn already counted
+        // An ended session can resume without SubagentStart. A turn start beyond every turn already counted
         // is a later turn. The ended turn's own late bytes never add one, however long they take and whether or
         // not its terminal record ever arrives, so they are not a resume and they hide none. A session whose
         // liveness was never observed needs only its transcript to move.
@@ -1208,7 +1215,7 @@ export class PathfinderRun {
             for (const id of subagentToolIds(rec.file)) known.seenToolIds.add(id);
           } else this.endWorker(known, `Session ended after ${known.tools} tool calls (transcript)`);
         }
-        // Fewer prompt records than counted: the ended turn's own bytes are still owed, and nothing is read from older ones.
+        // Fewer turn starts than counted: the ended turn's own bytes are still owed, and nothing is read from older ones.
         known.transcriptRevision = rec.revision;
       }
       const all: WorkflowHelper[] = recs

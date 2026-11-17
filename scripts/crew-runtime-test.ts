@@ -18,6 +18,7 @@ const { Hub } = await import("../server/hub");
 const { COORDINATOR_ID, PathfinderRun } = await import("../server/pathfinder");
 const { crewBookProblems, crewHistoryProblems, crewSnapshotProblems } = await import("../src/data/fixture/crewFixture");
 const { FAMILY_POOLS, occurrenceLabel } = await import("../src/data/crewContract");
+const { subagentTurns } = await import("../server/transcripts");
 type Run = InstanceType<typeof PathfinderRun>;
 type Book = import("../src/data/crewContract").CrewBook;
 
@@ -263,9 +264,10 @@ await test("coordinator replacement neither resumes the old conversation nor rev
     assert.equal(chain(w, "helper").length, 1);
     assert.equal(chain(w, "helper")[0].phase, "ended");
   }
-  // Genuine helper advancement under the same observed parent can still resume it once.
+  // Genuine helper advancement under the same observed parent can still resume it once. A later turn starts after
+  // a terminal record: the dead turn's late terminal record, then the next turn's prompt.
   hook(w, "UserPromptSubmit", {});
-  userTurn(w, "helper"); await refresh(w);
+  terminal(w, "helper", "found it", "helper-report"); userTurn(w, "helper"); await refresh(w);
   assert.equal(chain(w, "helper").length, 2);
   assert.equal(chain(w, "helper")[1].phase, "live");
   await refresh(w); assert.equal(chain(w, "helper").length, 2);
@@ -282,7 +284,7 @@ const toolCall = (w: World, id: string, toolId: string) => appendRecord(w, id, {
 const toolResult = (w: World, id: string, toolId: string) => appendRecord(w, id, { isSidechain: true, agentId: id, type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: toolId, content: "ok" }] } });
 const say = (w: World, id: string, text: string) => appendRecord(w, id, { isSidechain: true, agentId: id, type: "assistant", message: { role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text }] } });
 const outcomes = (w: World, id: string) => chain(w, id).map((s) => [s.id, s.phase, s.end?.verdict ?? s.end?.outcome ?? null]);
-const boundaryOf = (w: World, id: string) => (book(w).sessions[id].end as { terminalBoundary?: { revision: string | null; pending: boolean; starts?: number; tools?: string[] } } | null)?.terminalBoundary;
+const boundaryOf = (w: World, id: string) => (book(w).sessions[id].end as { terminalBoundary?: { revision: string | null; pending: boolean; turns?: number; starts?: number; tools?: string[] } } | null)?.terminalBoundary;
 const setMeta = (w: World, id: string, meta: Record<string, unknown>) => writeFileSync(join(subDir(w), `agent-${id}.meta.json`), JSON.stringify({ toolUseId: `tu_${id}`, description: "", agentType: "general-purpose", ...meta }));
 function launchHelper(w: World, id: string) {
   const text = `Search the repository for ${id}`;
@@ -295,7 +297,7 @@ const helperTool = (w: World, id: string, toolId: string, event = "PreToolUse") 
 const helperStop = (w: World, id: string) => hook(w, "SubagentStop", { agent_id: id, agent_type: "Explore" });
 const liveOn = (w: World, character: string) => Object.values(book(w).sessions).filter((s) => s.phase === "live" && s.characterId === character).map((s) => s.id);
 
-await test("N1: an ending with no terminal record never hides a later turn, however it ended and across a restart", async () => {
+await test("N1: an ending with no terminal record hides no later turn, however it ended and across a restart", async () => {
   for (const how of ["stop hook, no terminal record", "coordinator lost", "meta.json finished"] as const) for (const restart of [false, true]) {
     const repo = makeRepo(`repo-n1-${how.length}-${restart}`); const slug = `tt-n1-${how.length}-${restart}`;
     let w = boot(repo, slug);
@@ -305,22 +307,28 @@ await test("N1: an ending with no terminal record never hides a later turn, howe
     if (how === "meta.json finished") setMeta(w, "conv", { finished: true });
     await refresh(w);
     assert.deepEqual(outcomes(w, "conv"), [["conv", "ended", "interrupted"]], how);
-    assert.deepEqual(boundaryOf(w, "conv"), { revision: null, pending: true, starts: 1 });
+    assert.deepEqual(boundaryOf(w, "conv"), { revision: null, pending: true, turns: 1 });
     const first = structuredClone(book(w).sessions.conv);
     // No late flush ever comes. Polls, bookkeeping bytes and a bare start are not a resume.
     await refresh(w); await refresh(w);
     if (restart) { w = boot(repo, slug); hook(w, "Notification", {}); await refresh(w); await refresh(w); }
     appendRecord(w, "conv", { type: "progress", note: "bookkeeping" }); subStart(w, "conv"); await refresh(w);
     assert.equal(chain(w, "conv").length, 1, `${how}: nothing but a later prompt is a later turn`);
-    // A genuine resume that makes no tool call: seen mid-turn by its own prompt record.
+    // No terminal record: a prompt-shaped record after the turn's last one is inside that turn by the turn-start rule
+    // (a task notification nobody answers has this shape). It opens nothing and holds no robot.
     prompt(w, "conv", "Please continue and report"); await refresh(w); await refresh(w);
+    assert.deepEqual([outcomes(w, "conv"), workers(w).get("conv")!.live, liveOn(w, "pepper")], [[["conv", "ended", "interrupted"]], false, []], `${how}, restart ${restart}: inside the ended turn`);
+    // A genuine resume after such an ending is recorded by its first fresh tool call.
+    tool(w, "conv", "n1-resume"); await refresh(w);
     assert.deepEqual([outcomes(w, "conv"), workers(w).get("conv")!.live, liveOn(w, "pepper")], [[["conv", "ended", "interrupted"], ["conv#2", "live", null]], true, ["conv#2"]], `${how}, restart ${restart}`);
     assert.equal(w.hub.status(workers(w).get("conv")!.hqId)?.session.state, "running");
+    toolCall(w, "conv", "n1-resume"); toolResult(w, "conv", "n1-resume"); await refresh(w);
     say(w, "conv", "DONE: resumed work"); subStop(w, "conv", "DONE: resumed work"); await refresh(w); await refresh(w);
     assert.deepEqual(outcomes(w, "conv"), [["conv", "ended", "interrupted"], ["conv#2", "ended", "DONE"]]);
     assert.equal(book(w).sessions["conv#2"].end?.result, "resumed work"); assert.equal(w.hub.status(workers(w).get("conv")!.hqId)?.ended?.verdict, "DONE");
     assert.deepEqual(book(w).sessions.conv, first, "the ended occurrence is never rewritten");
-    // A whole further text-only turn between two polls, with its stop hook: its own record, once.
+    // A whole further text-only turn between two polls, with its stop hook: its prompt follows a terminal record, so it
+    // is its own record, once.
     subStart(w, "conv"); prompt(w, "conv", "Again"); say(w, "conv", "FAILED: third"); subStop(w, "conv", "FAILED: third"); await refresh(w); await refresh(w);
     assert.deepEqual(outcomes(w, "conv"), [["conv", "ended", "interrupted"], ["conv#2", "ended", "DONE"], ["conv#3", "ended", "FAILED"]]);
     const settled = structuredClone(book(w).sessions);
@@ -330,27 +338,37 @@ await test("N1: an ending with no terminal record never hides a later turn, howe
 });
 
 await test("N1/M2: a pending turn's late bytes are still its own; the turn after them is a later turn", async () => {
-  for (const restart of [false, true]) {
-    const repo = makeRepo(`repo-n1-late-${restart}`); const slug = `tt-n1-late-${restart}`;
+  for (const restart of [false, true]) for (const late of ["terminal record arrives", "terminal record never arrives"] as const) {
+    const repo = makeRepo(`repo-n1-late-${restart}-${late.length}`); const slug = `tt-n1-late-${restart}-${late.length}`;
     let w = boot(repo, slug);
     setRows(w, [row("11.2", "working")]); await refresh(w); launch(w, "conv", "11.2"); await refresh(w);
     terminal(w, "conv", "DONE: first", "t1"); subStop(w, "conv", "DONE: first"); await refresh(w);
     tool(w, "conv", "t2"); subStop(w, "conv", "DONE: second"); // resumed by a tool call, stopped before any byte of the turn is on disk
-    assert.equal(boundaryOf(w, "conv#2")?.pending, true); assert.equal(boundaryOf(w, "conv#2")?.starts, 2);
+    assert.equal(boundaryOf(w, "conv#2")?.pending, true); assert.equal(boundaryOf(w, "conv#2")?.turns, 2);
     const ended = structuredClone(book(w).sessions["conv#2"]);
     if (restart) { w = boot(repo, slug); hook(w, "Notification", {}); await refresh(w); }
     prompt(w, "conv"); await refresh(w); toolCall(w, "conv", "t2"); toolResult(w, "conv", "t2"); await refresh(w);
     assert.deepEqual([chain(w, "conv").length, workers(w).get("conv")!.live], [2, false], "its own prompt and tool records are not a resume");
-    // The genuine next turn begins before the pending turn's terminal record ever arrives.
-    prompt(w, "conv", "One more thing"); await refresh(w);
-    assert.deepEqual(outcomes(w, "conv"), [["conv", "ended", "DONE"], ["conv#2", "ended", "DONE"], ["conv#3", "live", null]]);
+    if (late === "terminal record arrives") {
+      // The pending turn's own terminal record is consumed; the prompt after it opens the genuine next turn.
+      terminal(w, "conv", "DONE: second", "t3"); await refresh(w);
+      assert.deepEqual([chain(w, "conv").length, workers(w).get("conv")!.live], [2, false], "its own terminal record is not a resume");
+      prompt(w, "conv", "One more thing"); await refresh(w);
+    } else {
+      // No terminal record: a prompt-shaped record is inside the pending turn by the turn-start rule (a mid-turn
+      // coordinator message has this shape), so the genuine next turn is recorded by its first fresh tool call.
+      prompt(w, "conv", "One more thing"); await refresh(w);
+      assert.deepEqual([chain(w, "conv").length, workers(w).get("conv")!.live], [2, false], "a prompt-shaped record inside the pending turn is not a resume");
+      tool(w, "conv", "t5"); await refresh(w); toolCall(w, "conv", "t5"); toolResult(w, "conv", "t5"); await refresh(w);
+    }
+    assert.deepEqual(outcomes(w, "conv"), [["conv", "ended", "DONE"], ["conv#2", "ended", "DONE"], ["conv#3", "live", null]], `${late}, restart ${restart}`);
     assert.deepEqual(book(w).sessions["conv#2"], ended, "late bytes rewrite nothing");
     say(w, "conv", "DONE: third"); subStop(w, "conv", "DONE: third"); await refresh(w); await refresh(w);
     assert.deepEqual(chain(w, "conv").map((s) => s.end?.result), ["first", "second", "third"]); sound(w);
   }
 });
 
-await test("a book written before boundaries kept `starts` and `tools`, or before they existed, still consumes its pending turn's late flush", async () => {
+await test("a book written before boundaries kept `turns` and `tools`, or before they existed, still consumes its pending turn's late flush", async () => {
   for (const [owed, shape] of [["whole turn", "b085f0a"], ["terminal only", "b085f0a"], ["whole turn", "87f8e46"]] as const) {
     const repo = makeRepo(`repo-old-boundary-${owed.length}-${shape}`); const slug = `tt-old-boundary-${owed.length}-${shape}`;
     const w = boot(repo, slug);
@@ -360,7 +378,7 @@ await test("a book written before boundaries kept `starts` and `tools`, or befor
     // As b085f0a wrote it: { revision, pending } only. As 87f8e46 wrote it: no boundary at all.
     const file = join(tmp, ".controlroom", slug, "crew-book.json"); const old = JSON.parse(readFileSync(file, "utf8"));
     for (const s of Object.values(old.sessions) as { end: { terminalBoundary?: Record<string, unknown> } | null }[]) if (s.end?.terminalBoundary) {
-      if (shape === "87f8e46") delete s.end.terminalBoundary; else { delete s.end.terminalBoundary.starts; delete s.end.terminalBoundary.tools; }
+      if (shape === "87f8e46") delete s.end.terminalBoundary; else { delete s.end.terminalBoundary.turns; delete s.end.terminalBoundary.tools; }
     }
     writeFileSync(file, JSON.stringify(old, null, 2) + "\n");
     const w2 = boot(repo, slug); hook(w2, "Notification", {}); await refresh(w2);
@@ -454,7 +472,7 @@ await test("a worker continuation live at a restart keeps its occurrence; a stal
     const first = structuredClone(book(w).sessions.conv);
     w = boot(repo, slug); hook(w, "Notification", {}); await refresh(w); await refresh(w);
     assert.deepEqual([outcomes(w, "conv"), liveOn(w, "pepper")], [[["conv", "ended", "DONE"], ["conv#2", "live", null]], ["conv#2"]], `stop first ${stopFirst}: still the same live occurrence`);
-    if (stopFirst) { subStop(w, "conv", "DONE: second"); await refresh(w); assert.deepEqual(boundaryOf(w, "conv#2"), { revision: boundaryOf(w, "conv")!.revision, pending: true, starts: 2 }); }
+    if (stopFirst) { subStop(w, "conv", "DONE: second"); await refresh(w); assert.deepEqual(boundaryOf(w, "conv#2"), { revision: boundaryOf(w, "conv")!.revision, pending: true, turns: 2 }); }
     prompt(w, "conv"); toolCall(w, "conv", "t2"); toolResult(w, "conv", "t2"); await refresh(w);
     if (!stopFirst) { tool(w, "conv", "t3"); await refresh(w); } // after its stop a fresh tool call would be a later turn
     terminal(w, "conv", "DONE: second", "t4"); if (!stopFirst) subStop(w, "conv", "DONE: second"); await refresh(w); await refresh(w);
@@ -733,6 +751,158 @@ await test("a crew book this kitchen can't open is left byte-identical, and the 
   assert.equal(w.hub.snap.workflow?.crew, undefined); assert.equal(workerRows(w).length, 0);
   assert.equal(w.hub.snap.activity.some((a) => /Crew book not opened.*newer than supported/.test(a.text)), true);
   assert.match(w.run.customizeCrew("pepper", { name: "X" }) ?? "", /can't be opened/);
+});
+
+// Repair round 3 (R3-1 to R3-3). Real Claude Code subagent transcripts hold prompt-shaped `user` records inside a turn.
+// These are synthetic records of the same shapes (no real content): a system reminder (isMeta, string) right after the
+// first prompt, a skill body (isMeta, text part) after a Skill tool result, an image note, a coordinator message and a
+// task notification delivered mid-turn, and an interrupt marker. A genuine resume prompt is often isMeta too.
+type Shape = "reminder" | "skill" | "image" | "coordinator" | "notification" | "interrupt";
+const SHAPES: Shape[] = ["reminder", "skill", "image", "coordinator", "notification", "interrupt"];
+const shaped = (w: World, id: string, kind: Shape) => {
+  const text = { reminder: "<system-reminder>\nSynthetic context.\n</system-reminder>", skill: "Base directory for this skill: /synthetic/skills/x\n\n# X", image: "[Image: synthetic 10x10]",
+    coordinator: "Message from the coordinator: synthetic", notification: "<task-notification>synthetic</task-notification>", interrupt: "[Request interrupted by user]" }[kind];
+  appendRecord(w, id, { isSidechain: true, agentId: id, type: "user", ...(kind === "interrupt" ? {} : { isMeta: true }),
+    message: { role: "user", content: kind === "reminder" || kind === "coordinator" ? text : [{ type: "text", text }] } });
+};
+/** A genuine resume prompt as Claude Code writes one for a message sent to a finished subagent: isMeta, after a terminal record. */
+const metaPrompt = (w: World, id: string) => appendRecord(w, id, { isSidechain: true, agentId: id, type: "user", isMeta: true, message: { role: "user", content: "Message from the coordinator: continue" } });
+/** One turn's bytes after its prompt, with the mid-turn record where real transcripts carry it. */
+const turnBody = (w: World, id: string, kind: Shape, toolId: string) => {
+  if (kind === "reminder") shaped(w, id, kind);
+  toolCall(w, id, toolId); toolResult(w, id, toolId);
+  if (kind !== "reminder") shaped(w, id, kind);
+};
+
+await test("R3: turn starts are a file's first prompt and a prompt directly after a terminal record, never a record inside a turn", async () => {
+  const w = boot(makeRepo("repo-r3-count"), "tt-r3-count");
+  launchHelper(w, "c");
+  const file = join(subDir(w), "agent-c.jsonl");
+  const count = () => subagentTurns(file);
+  for (const kind of SHAPES) turnBody(w, "c", kind, `c-${kind}`);
+  assert.deepEqual(count(), { turns: 1, legacy: 1 + SHAPES.length }, "every mid-turn shape is inside the first turn");
+  say(w, "c", "done"); metaPrompt(w, "c");
+  assert.equal(count().turns, 2, "an isMeta prompt directly after a terminal record starts a turn");
+  shaped(w, "c", "reminder"); shaped(w, "c", "coordinator");
+  assert.equal(count().turns, 2, "records right after that prompt are inside its turn");
+  terminal(w, "c", "DONE: x", "c-h"); toolResult(w, "c", "c-h"); appendRecord(w, "c", { type: "progress" }); shaped(w, "c", "interrupt");
+  assert.equal(count().turns, 2, "an interrupt marker after a terminal record is not a turn start");
+  prompt(w, "c", "next"); assert.equal(count().turns, 3, "tool results, bookkeeping and an interrupt marker between a terminal record and a prompt change nothing");
+  toolCall(w, "c", "c-t"); shaped(w, "c", "interrupt"); prompt(w, "c", "after an interrupt");
+  assert.equal(count().turns, 3, "a prompt after a turn cut short with no terminal record is inside that turn (rule)");
+  // A forked subagent's file opens with its inherited context, an assistant record among it, before its first prompt.
+  const fork = join(subDir(w), "agent-fork.jsonl");
+  writeFileSync(fork, [{ type: "fork-context-ref" }, { type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: "k0", name: "Agent", input: {} }] } },
+    { type: "user", message: { role: "user", content: "fork brief" } }, { type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: "k1", name: "Bash", input: {} }] } }].map((r) => JSON.stringify(r)).join("\n") + "\n");
+  assert.equal(subagentTurns(fork).turns, 1, "a fork's first prompt starts its first turn");
+  appendRecord(w, "fork", { type: "user", isMeta: true, message: { role: "user", content: "<system-reminder>x</system-reminder>" } }); say(w, "fork", "done"); metaPrompt(w, "fork");
+  assert.equal(subagentTurns(fork).turns, 2);
+  // An incremental read agrees with a fresh read of the whole file.
+  const whole = readFileSync(file, "utf8"); writeFileSync(file, ""); count(); writeFileSync(file, whole);
+  assert.deepEqual(count(), { turns: 3, legacy: 1 + SHAPES.length + 1 + 2 + 1 + 1 + 1 + 1 });
+});
+
+await test("R3-1: a late flush holding mid-turn records adds no occurrence and holds no robot; a genuine later turn still does", async () => {
+  for (const kind of SHAPES) for (const restart of [false, true]) {
+    const repo = makeRepo(`repo-r3-1-${kind}-${restart}`); const slug = `tt-r3-1-${kind}-${restart}`;
+    let w = boot(repo, slug);
+    setRows(w, [row("12.1", "working"), row("12.2", "working")]); await refresh(w); launch(w, "conv", "12.1"); await refresh(w);
+    turnBody(w, "conv", kind, "s1"); terminal(w, "conv", "DONE: first", "t1"); subStop(w, "conv", "DONE: first"); await refresh(w);
+    tool(w, "conv", "t2"); tool(w, "conv", "t2", "PostToolUse"); await refresh(w); subStop(w, "conv", "DONE: second"); // before any byte of the turn
+    const before = structuredClone(book(w).sessions);
+    if (restart) { w = boot(repo, slug); hook(w, "Notification", {}); await refresh(w); await refresh(w); }
+    // The late flush stops before its terminal record (R3-1 T2), then the terminal record arrives (T1).
+    prompt(w, "conv"); turnBody(w, "conv", kind, "t2"); await refresh(w); await refresh(w);
+    assert.deepEqual([outcomes(w, "conv"), workers(w).get("conv")!.live, liveOn(w, "pepper")], [[["conv", "ended", "DONE"], ["conv#2", "ended", "DONE"]], false, []], `${kind}, restart ${restart}: before the terminal record`);
+    terminal(w, "conv", "DONE: second", "t3"); await refresh(w); await refresh(w);
+    assert.deepEqual(book(w).sessions, before, `${kind}, restart ${restart}: the late flush adds and rewrites nothing`);
+    launch(w, "other", "12.2"); await refresh(w);
+    assert.equal(book(w).sessions.other.characterId, book(w).sessions.conv.characterId, "no robot is held by a fabricated turn");
+    // A genuine later turn, its prompt isMeta, recorded at that prompt; its mid-turn records add nothing.
+    metaPrompt(w, "conv"); await refresh(w); turnBody(w, "conv", kind, "t4"); await refresh(w);
+    assert.deepEqual(outcomes(w, "conv").map((o) => o.slice(0, 2)), [["conv", "ended"], ["conv#2", "ended"], ["conv#3", "live"]], `${kind}: a genuine resume`);
+    say(w, "conv", "DONE: third"); subStop(w, "conv", "DONE: third"); await refresh(w); await refresh(w);
+    // A whole unseen turn between two polls, mid-turn records included: exactly one more occurrence.
+    metaPrompt(w, "conv"); turnBody(w, "conv", kind, "t5"); say(w, "conv", "DONE: fourth"); await refresh(w); await refresh(w); await refresh(w);
+    assert.deepEqual(outcomes(w, "conv"), [["conv", "ended", "DONE"], ["conv#2", "ended", "DONE"], ["conv#3", "ended", "DONE"], ["conv#4", "ended", "DONE"]], `${kind}, restart ${restart}`);
+    sound(w);
+  }
+});
+
+await test("R3-1: a first turn's late flush that starts with a reminder or carries a mid-turn record adds no occurrence", async () => {
+  for (const kind of SHAPES) {
+    const w = boot(makeRepo(`repo-r3-1-first-${kind}`), `tt-r3-1-first-${kind}`);
+    setRows(w, [row("12.3", "working")]); await refresh(w); launch(w, "conv", "12.3"); await refresh(w);
+    tool(w, "conv", "f1"); tool(w, "conv", "f1", "PostToolUse"); subStop(w, "conv", "DONE: first"); await refresh(w);
+    const before = structuredClone(book(w).sessions);
+    turnBody(w, "conv", kind, "f1"); await refresh(w);
+    terminal(w, "conv", "DONE: first", "f2"); await refresh(w); await refresh(w);
+    assert.deepEqual([book(w).sessions, workers(w).get("conv")!.live], [before, false], kind); sound(w);
+  }
+});
+
+await test("R3-2: a helper's own mid-turn records are not a later turn, with or without its stop hook; a genuine one is", async () => {
+  for (const kind of SHAPES) for (const stop of [true, false]) {
+    const w = boot(makeRepo(`repo-r3-2-${kind}-${stop}`), `tt-r3-2-${kind}-${stop}`);
+    hook(w, "Notification", {}); await refresh(w);
+    launchHelper(w, "h"); await refresh(w); await refresh(w);
+    turnBody(w, "h", kind, "g1"); say(w, "h", "found it"); if (stop) helperStop(w, "h");
+    await refresh(w); await refresh(w); await refresh(w);
+    assert.deepEqual(chain(w, "h").map((s) => [s.id, s.phase]), [["h", "ended"]], `${kind}, stop hook ${stop}`);
+    metaPrompt(w, "h"); turnBody(w, "h", kind, "g2"); say(w, "h", "found more"); await refresh(w); await refresh(w);
+    assert.deepEqual(chain(w, "h").map((s) => [s.id, s.phase]), [["h", "ended"], ["h#2", "ended"]], `${kind}: a whole genuine later turn is one more`);
+    assert.deepEqual(liveOn(w, "whisk"), []); sound(w);
+  }
+  // First sight saw only the brief; the reminder and the whole rest of the turn land before the next poll (T6).
+  const w = boot(makeRepo("repo-r3-2-first-sight"), "tt-r3-2-first-sight");
+  hook(w, "Notification", {}); await refresh(w);
+  launchHelper(w, "h"); await refresh(w);
+  turnBody(w, "h", "reminder", "g1"); say(w, "h", "found it"); await refresh(w); await refresh(w); await refresh(w);
+  assert.deepEqual(chain(w, "h").map((s) => [s.id, s.phase]), [["h", "ended"]]); sound(w);
+});
+
+await test("R3-3: an interrupt marker after an ending is never a resume; a task notification is one only directly after a terminal record", async () => {
+  for (const kind of ["interrupt", "notification"] as const) for (const ended of ["stop hook, no terminal record", "terminal record"] as const) {
+    const w = boot(makeRepo(`repo-r3-3-${kind}-${ended.length}`), `tt-r3-3-${kind}-${ended.length}`);
+    setRows(w, [row("12.4", "working")]); await refresh(w); launch(w, "conv", "12.4"); await refresh(w);
+    tool(w, "conv", "i1"); toolCall(w, "conv", "i1"); toolResult(w, "conv", "i1");
+    if (ended === "terminal record") terminal(w, "conv", "DONE: first", "i2");
+    subStop(w, "conv", ended === "terminal record" ? "DONE: first" : ""); await refresh(w);
+    shaped(w, "conv", kind); await refresh(w); await refresh(w);
+    if (kind === "notification" && ended === "terminal record") {
+      // Decided by the turn-start rule: it may be a genuine resume (real ones are answered), so it is recorded, and the
+      // answer's terminal record ends it.
+      assert.deepEqual([outcomes(w, "conv"), liveOn(w, "pepper")], [[["conv", "ended", "DONE"], ["conv#2", "live", null]], ["conv#2"]]);
+      say(w, "conv", "DONE: answered"); await refresh(w); await refresh(w);
+      assert.deepEqual([outcomes(w, "conv"), liveOn(w, "pepper")], [[["conv", "ended", "DONE"], ["conv#2", "ended", "DONE"]], []]);
+    } else assert.deepEqual([chain(w, "conv").length, workers(w).get("conv")!.live, liveOn(w, "pepper")], [1, false, []], `${kind} after ${ended}`);
+    sound(w);
+  }
+});
+
+await test("R3: a 6552316 book's `starts` counted mid-turn records; after the upgrade it neither fabricates nor swallows a turn", async () => {
+  for (const flush of ["after the restart", "before the restart"] as const) {
+    const repo = makeRepo(`repo-r3-upgrade-${flush.length}`); const slug = `tt-r3-upgrade-${flush.length}`;
+    const w = boot(repo, slug);
+    setRows(w, [row("12.5", "working")]); await refresh(w); launch(w, "conv", "12.5"); await refresh(w);
+    turnBody(w, "conv", "reminder", "u1"); shaped(w, "conv", "skill"); terminal(w, "conv", "DONE: first", "u2"); subStop(w, "conv", "DONE: first"); await refresh(w);
+    tool(w, "conv", "u3"); subStop(w, "conv", "DONE: second"); await refresh(w); // before any byte of the turn
+    assert.deepEqual([boundaryOf(w, "conv")?.turns, boundaryOf(w, "conv#2")?.turns], [1, 2]);
+    // As 6552316 wrote it: every prompt-shaped record on disk (brief, reminder, skill body = 3), plus the one owed.
+    const file = join(tmp, ".controlroom", slug, "crew-book.json"); const old = JSON.parse(readFileSync(file, "utf8"));
+    for (const [id, starts] of [["conv", 3], ["conv#2", 4]] as const) { const b = old.sessions[id].end.terminalBoundary; delete b.turns; b.starts = starts; }
+    writeFileSync(file, JSON.stringify(old, null, 2) + "\n");
+    const flushTurn = (x: World) => { prompt(x, "conv"); turnBody(x, "conv", "reminder", "u3"); shaped(x, "conv", "skill"); terminal(x, "conv", "DONE: second", "u4"); };
+    if (flush === "before the restart") flushTurn(w);
+    const w2 = boot(repo, slug); hook(w2, "Notification", {}); await refresh(w2); await refresh(w2);
+    const loaded = structuredClone(book(w2).sessions);
+    assert.deepEqual(Object.values(loaded).filter((s) => s.phase === "ended").map((s) => JSON.stringify(s)), Object.values(old.sessions as Record<string, object>).filter((s) => (s as { phase: string }).phase === "ended").map((s) => JSON.stringify(s)), "loaded as written");
+    if (flush === "after the restart") { flushTurn(w2); await refresh(w2); await refresh(w2); }
+    assert.deepEqual(book(w2).sessions, loaded, `${flush}: the late flush adds and rewrites nothing`);
+    metaPrompt(w2, "conv"); await refresh(w2);
+    assert.deepEqual(outcomes(w2, "conv"), [["conv", "ended", "DONE"], ["conv#2", "ended", "DONE"], ["conv#3", "live", null]], `${flush}: the genuine next turn is not swallowed`);
+    sound(w2);
+  }
 });
 
 console.log(`${passed} crew runtime scenarios passed (synthetic hooks and transcripts, temporary HOME; no native session). Artifacts: ${tmp}`);

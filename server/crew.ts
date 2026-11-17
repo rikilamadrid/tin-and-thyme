@@ -15,14 +15,19 @@ import type { SessionEnd } from "../src/data/types";
 export type EndingEvidence = SessionEnd & { key?: string; session?: string; occurrence?: string; consumed?: string; terminalBoundary?: TerminalBoundary };
 /**
  * Where a worker's ended turn stood in its transcript when the ending was recorded. Written once with the
- * ending, never rewritten. `starts` and `tools` are absent in books written before they were kept.
+ * ending, never rewritten. `turns`, `starts` and `tools` are absent in books written before they were kept.
  */
 export interface TerminalBoundary {
   /** The terminal record visible in the transcript at that moment (an earlier turn's while `pending`). */
   revision: string | null;
   /** This turn's own terminal record was not on disk yet. */
   pending: boolean;
-  /** Prompt records the transcript holds once this turn's own bytes are all on disk: a later one is a later turn. */
+  /** Turn starts the transcript holds once this turn's own bytes are all on disk: a later one is a later turn. */
+  turns?: number;
+  /**
+   * Written by `6552316` only, never now: every prompt-shaped record then on disk or owed, mid-turn ones included.
+   * It is not a turn count. Read only for what the ended turn still owed (docs/crew-contract.md).
+   */
   starts?: number;
   /** Tool calls of this turn seen through hooks whose records were not on disk yet: a replay of one is not a resume. */
   tools?: string[];
@@ -51,6 +56,7 @@ function endingProblem(value: unknown, legacy = false): string | null {
     if (value[field] !== undefined && typeof value[field] !== "string") return `${field} must be a string when present`;
   const b = value.terminalBoundary;
   if (b !== undefined && (!record(b) || !nullableString(b.revision) || typeof b.pending !== "boolean" ||
+    (b.turns !== undefined && !(Number.isInteger(b.turns) && b.turns >= 0)) ||
     (b.starts !== undefined && !(Number.isInteger(b.starts) && b.starts >= 0)) ||
     (b.tools !== undefined && !(Array.isArray(b.tools) && b.tools.every((id: unknown) => typeof id === "string"))))) return "terminalBoundary is invalid";
   return null;

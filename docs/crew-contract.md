@@ -191,7 +191,7 @@ records it:
     same id.
 - `via` and `evidence` are what was observed, never inferred:
   - `tool`: a tool call the kitchen had not seen before. `evidence` is its `tool_use_id`;
-  - `transcript`: a prompt record beyond every turn already counted. `evidence` is the transcript
+  - `transcript`: a turn start beyond every turn already counted. `evidence` is the transcript
     revision seen before it, or `terminal:<revision>` for a whole turn that started and finished
     unseen (its terminal record);
   - `hook`: a coordinator hook handled while its process is seen running ties that process to the
@@ -200,64 +200,106 @@ records it:
     A worker's bare `SubagentStart` after an ending is ambiguous (it may be replayed), so the
     runtime waits for its own fresh tool or transcript evidence before recording a continuation.
 
-#### How the runtime tells a turn from its own late bytes (09.3, repair round 2)
+#### How the runtime tells a turn from its own late bytes (09.3, repair rounds 2 and 3)
 
-A subagent transcript is a list of turns. A turn opens with a prompt record (a `user` record that
-is not only tool results) and closes with a terminal record. The runtime counts prompt records.
-For each conversation it keeps the number the transcript holds once every turn seen so far is
-fully on disk. A turn opened by a tool call adds one to that number before its prompt is written.
+A subagent transcript is a list of turns. The runtime counts **turn starts**. It never counts any
+other record.
 
-- **A later turn is a prompt record beyond that count.** Nothing else in the transcript is a
-  resume. A turn's late tool records, late terminal record and bookkeeping records add no prompt.
-- **An ending never hides a later turn.** `terminalBoundary.pending` says the ended turn's own
-  terminal record was not on disk when the ending was recorded. It decides whose that record is
-  when it arrives. It does not wait for it, so it needs no expiry. This holds for a stop hook
-  with no terminal record, a worker ended because its coordinator stopped, and an ending read
-  from `meta.json`. A resume with no tool call is recorded at its prompt record, in the same
-  kitchen run or after a restart.
+- A **prompt-shaped record** is a `user` record that is not only tool results and is not an
+  interrupt marker (text starting `[Request interrupted by user`).
+- A **terminal record** is an `assistant` record with `stop_reason: "end_turn"`, an API error
+  (`isApiErrorMessage`), or a `SubagentHandback` tool call.
+- A **turn start** is one of two records:
+  - the file's first prompt-shaped record. A forked subagent's file opens with records of its
+    inherited context, an assistant record among them, before it;
+  - the first prompt-shaped record after a terminal record, with no assistant record between them.
+    Records between the two (tool results, bookkeeping records, interrupt markers) change nothing.
+- Every other prompt-shaped record is inside a turn and is never counted. Real transcripts carry
+  many of them: a system reminder right after the first prompt, a skill body after a Skill tool
+  result, image notes, coordinator messages and task notifications delivered mid-turn. `isMeta`
+  says nothing either way, because a genuine resume prompt is often `isMeta` too.
+- `subagentTurns` in `server/transcripts.ts` is the one definition. Workers, helpers and restore all
+  use it. The readers of the latest turn (`subagentTerminalRevision`, `subagentReport`) stop at a
+  prompt-shaped record, and skip an interrupt marker.
+
+The rule was checked read-only against 159 real Claude Code subagent transcripts. It gives the same
+count as "the first prompt record, or a prompt record whose latest assistant record is terminal" in
+all 159. That is 189 turns in all, 25 files with more than one turn and 383 prompt-shaped records.
+No transcript content was copied.
+
+For each conversation the runtime keeps the number of turn starts the transcript holds once every
+turn seen so far is fully on disk. A turn opened by a tool call adds one to that number before its
+prompt is written.
+
+- **A later turn is a turn start beyond that count.** Nothing else in the transcript is a resume. A
+  turn's late tool records, its mid-turn records, its late terminal record and bookkeeping records
+  add no turn start.
+- **An ending never hides a later turn that starts after a terminal record.**
+  `terminalBoundary.pending` says the ended turn's own terminal record was not on disk when the
+  ending was recorded. It decides whose that record is when it arrives. It does not wait for it,
+  so it needs no expiry. A resume after the ended turn's terminal record is recorded at its prompt
+  record even when it makes no tool call, in the same kitchen run or after a restart.
+- **After an ending with no terminal record at all**, the rule puts every prompt-shaped record
+  inside the ended turn. This covers a stop hook mid-tool-call, a worker ended because its
+  coordinator stopped, and an ending read from `meta.json`. An interrupt marker or an unanswered
+  task notification appended then opens nothing and holds no robot. A genuine resume after such an
+  ending is recorded by its first fresh tool call.
+- **A task notification directly after a terminal record** is a turn start under the rule. It is
+  recorded as a resume, because real ones are answered. Its answer's terminal record ends it.
 - `terminalBoundary` is written once with a worker's ending and never rewritten:
   - `revision`: the terminal record visible at that moment, which belongs to an earlier turn
     while `pending`;
   - `pending`: this turn's own terminal record was absent;
-  - `starts`: the prompt count once this turn's own bytes are on disk;
+  - `turns`: the turn-start count once this turn's own bytes are on disk;
   - `tools`: tool calls of this turn that hooks showed and the transcript did not yet hold,
     present only when there are some. After a restart a replayed hook for one of them is still a
     replay.
-  A book from before `starts` and `tools` loads unchanged. For such a pending ending the runtime
-  counts one owed prompt while the transcript still ends at `revision`. For any ending without
-  `starts`, including one with no boundary at all (written by `87f8e46`), it also counts one when
-  the ending belongs to a continuation opened by a tool call whose record is not on disk while
-  the transcript ends at a terminal record. Otherwise it counts none.
+- Books from earlier versions load unchanged, and no ended occurrence is rewritten:
+  - `6552316` wrote `starts`, a count of every prompt-shaped record with mid-turn ones included. It
+    is never compared with a turn count. What that ending still owed is `starts` minus the
+    prompt-shaped records on disk now, when that is positive. The count is the turn starts on disk
+    plus that.
+  - For a pending ending with neither `turns` nor `starts` (`b085f0a`), the runtime counts one owed
+    turn start while the transcript still ends at `revision`.
+  - For an ending with no boundary at all (`87f8e46`), and any ending without `turns` or `starts`,
+    it also counts one when the ending belongs to a continuation opened by a tool call whose record
+    is not on disk while the transcript ends at a terminal record. Otherwise it counts none.
 - The ended turn's own terminal record, when it arrives, creates no occurrence and changes no
   recorded outcome. For an ending that had no terminal evidence at all (restored from a
   `finished` flag) it may fill an unknown outcome.
 - A whole turn that started and finished between two polls is one ended occurrence with its own
   report, keyed by its terminal record. It no longer needs an earlier terminal record to exist.
-- **Helpers** follow the same counting, in memory. A helper's late bytes are not a resume. A
-  `finished` flag in `meta.json` that was written before a recorded resume does not end the
-  resumed turn. A fresh helper tool call is recorded when the hook arrives, before any byte. A
-  whole helper turn between two polls is one ended occurrence. Every helper resume also needs a
-  coordinator that is running and has identified itself. Evidence that arrives while it has not
-  is dropped. Restarting a coordinator never revives a helper.
+- **Helpers** follow the same counting, in memory. A helper's late or mid-turn bytes are not a
+  resume. A turn start that the poll which saw a helper's ending had not counted is a later turn,
+  recorded on the next poll. A `finished` flag in `meta.json` that was written before a recorded
+  resume does not end the resumed turn. A fresh helper tool call is recorded when the hook arrives,
+  before any byte. A whole helper turn between two polls is one ended occurrence. Every helper
+  resume also needs a coordinator that is running and has identified itself. Evidence that arrives
+  while it has not is dropped. Restarting a coordinator never revives a helper.
 - **Across a kitchen restart** the book says which occurrence is the latest and how it was
   opened. For a worker or a helper:
   - a continuation still live in the book is not ended by a `finished` flag written before it
     began;
   - a continuation opened by a tool call whose record is not in the transcript has none of its
     bytes on disk. While the transcript still ends at a terminal record, that record is the
-    earlier turn's: it ends nothing, and the prompt record the continuation still owes is not a
+    earlier turn's: it ends nothing, and the turn start the continuation still owes is not a
     later turn, whether the continuation is still live or already ended.
 
 What this does not guarantee:
 
-- The count trusts the transcript reader's one definition of a prompt record. If Claude Code
-  writes a non-tool-result `user` record in the middle of a turn, and that record reaches disk
-  after the turn's ending was recorded, the runtime reads it as a later turn.
-- A turn opened by a tool call is owed its prompt record until one of its own tool records is on
+- The rule trusts where a record sits. A prompt-shaped record that Claude Code writes directly after
+  a terminal record and that is not a new turn is read as one. None of the 159 real transcripts
+  had one. A genuine turn whose prompt follows a turn that ended with no terminal record is not a
+  turn start. It is recorded by its first fresh tool call, or not at all when it makes none. Its
+  terminal record is then read as the ended turn's own.
+- A task notification after a terminal record that is never answered leaves its occurrence live,
+  holding its robot. The subagent's stop hook ends it, and so does losing its coordinator.
+- A turn opened by a tool call is owed its turn start until one of its own tool records is on
   disk while it runs or when it ends: records are appended in order, so the prompt is then on disk
   or never will be. If the prompt never comes and none of its tool records reach disk before the
-  ending, the count stays one ahead. The next resume is then recorded by its first tool call or
-  its terminal record, not at its prompt.
+  ending, the count stays one ahead. The same happens when the turn before it ended with no
+  terminal record, because that prompt is never a turn start. The next resume is then recorded by
+  its first tool call or its terminal record, not at its prompt.
 - Turns that started while the kitchen was down are counted as already seen at startup. They get
   no occurrence of their own.
 - A helper has no ending evidence in the book, so its tool-call memory lasts one kitchen run. After
