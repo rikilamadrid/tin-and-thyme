@@ -290,7 +290,10 @@ check("beam lengths unchanged (520 ms, 300 ms when queued)", BEAM_MS === 520 && 
   check("a finished session's target is the pod", t.x === SPOTS.tube.x && t.y === SPOTS.tube.y);
   check("the pod stands in the top band, off the aisle", TUBE.y <= TOP_BAND_END && TUBE.y + 7 < AISLE_Y - 20 && SPOTS.tube.y < TOP_BAND_END);
   check("the pod (pad included) fits between the office (x ≤ 330) and the lounge (x ≥ 384)", TUBE.cx - TUBE.w / 2 - 7 > 330 && TUBE.cx + TUBE.w / 2 + 7 < 384);
-  check("the queue spot is in front of the pod, under the top band and above the aisle", SPOTS.tubeQueue.x === TUBE.cx && SPOTS.tubeQueue.y > TUBE.y + 6 && SPOTS.tubeQueue.y < AISLE_Y);
+  check(
+    "the queue spot stands beside the pod (just right of its pad), under the top band and above the aisle",
+    SPOTS.tubeQueue.x > TUBE.cx + TUBE.w / 2 && SPOTS.tubeQueue.x - TUBE.cx <= 40 && SPOTS.tubeQueue.y > TUBE.y + 6 && SPOTS.tubeQueue.y < AISLE_Y,
+  );
   const stations: [string, { x: number; y: number }][] = [
     ["island", SPOTS.island], ["door", SPOTS.door], ["passQueue", SPOTS.passQueue], ["tubeQueue", SPOTS.tubeQueue],
     ...[0, 1, 2, 3, 4].map((i) => [`pod ${i}`, SPOTS.pod(i)] as [string, { x: number; y: number }]),
@@ -313,6 +316,76 @@ check("beam lengths unchanged (520 ms, 300 ms when queued)", BEAM_MS === 520 && 
     }
   }
   check(`walk paths reach the pod from every station and back (${stations.length} stations, both ways), along the aisle and up its column`, bad.length === 0, bad.slice(0, 5));
+
+  const toQueue: string[] = [];
+  for (const [name, p] of stations) {
+    if (name === "tubeQueue") continue;
+    for (const [from, to] of [[p, SPOTS.tubeQueue], [SPOTS.tubeQueue, p]] as const) {
+      const path = route(from, to);
+      const end = path[path.length - 1];
+      if (end.x !== to.x || end.y !== to.y) toQueue.push(`${name}: ends at ${end.x},${end.y}`);
+      let prev = from;
+      for (const q of path) {
+        if (q.x !== prev.x && q.y !== prev.y) toQueue.push(`${name}: diagonal step ${prev.x},${prev.y} → ${q.x},${q.y}`);
+        prev = q;
+      }
+    }
+  }
+  check(`walk paths reach the queue spot from every station and back (${stations.length - 1} stations, both ways), no diagonal steps`, toQueue.length === 0, toQueue.slice(0, 5));
+}
+{
+  // A session queued to beam out never stands on a robot parked at a hangout (review of 546eac9, F1).
+  // Every hangout taken and one robot queued, for every pair of robot sizes; boxes read from the drawn hits.
+  const { CREW_CHARACTERS } = await import("../src/data/crew");
+  const { robotSize } = await import("../src/galley/robots");
+  type CrewMember = import("../src/galley/model").CrewMember;
+  type Hit = import("../src/galley/scene").Hit;
+  const bySize = new Map<string, CrewMember["character"]>();
+  for (const id of Object.keys(CREW_CHARACTERS) as CrewMember["character"][]) {
+    const s = robotSize(id);
+    bySize.set(`${s.w}x${s.h}`, id);
+  }
+  const kinds = [...bySize.values()];
+  const cook = busy.crew.find((c) => c.place === "pod")!;
+  // agentHit pads the robot's box by 2 on every side
+  const robot = (h: Hit) => ({ x: h.x + 2, y: h.y + 2, w: h.w - 4, h: h.h - 4 });
+  const area = (a: Hit, b: Hit) => {
+    const [p, q] = [robot(a), robot(b)];
+    return Math.max(0, Math.min(p.x + p.w, q.x + q.w) - Math.max(p.x, q.x)) * Math.max(0, Math.min(p.y + p.h, q.y + q.h) - Math.max(p.y, q.y));
+  };
+  const bad: string[] = [];
+  let pairs = 0;
+  for (const parkedAs of kinds)
+    for (const queuedAs of kinds) {
+      const parked: CrewMember[] = HANGOUTS.map((_h, i) => ({ ...cook, id: `park-${i}`, place: "lounge", running: false, ticket: null, character: parkedAs }));
+      const queued: CrewMember = { ...cook, id: "queued", character: queuedAs };
+      const m: GalleyModel = { ...busy, lounge: parked, crew: [...busy.crew.filter((c) => c.place !== "lounge"), queued, ...parked] };
+      const actors = standing(busy);
+      const spotOf = new Map<string, number>();
+      parked.forEach((c, i) => {
+        spotOf.set(c.id, i);
+        actors.set(c.id, { x: HANGOUTS[i].x, y: HANGOUTS[i].y, moving: false, seated: HANGOUTS[i].kind !== "floor", alpha: 1 });
+      });
+      actors.set(queued.id, { x: SPOTS.tube.x, y: SPOTS.tube.y, moving: false, seated: false, alpha: 1, beam: { kind: "out", t0: 99_999, dur: BEAM_BUSY_MS } });
+      const hits = drawGalley(recorder(), m, { now: 1000, actors, selected: null, hover: null, deliveries: [], spotOf, reduce: false, view: { ...VIEW }, ambient: null });
+      const q = hits.find((h) => h.id === queued.id && h.sub?.startsWith("about to beam out"));
+      if (!q) {
+        bad.push(`${queuedAs}: no queued robot drawn`);
+        continue;
+      }
+      for (const c of parked) {
+        // a parked robot's own box is the last hit it pushes (after its badge, plate or tag)
+        const h = hits.filter((x) => x.id === c.id).pop();
+        if (!h) {
+          bad.push(`${c.id} (${parkedAs}): not drawn`);
+          continue;
+        }
+        pairs++;
+        const o = area(q, h);
+        if (o > 0) bad.push(`queued ${queuedAs} overlaps ${parkedAs} at ${c.id} (${HANGOUTS[Number(c.id.slice(5))].kind}) by ${o.toFixed(1)}`);
+      }
+    }
+  check(`the queue spot's robot box overlaps no hangout's (${kinds.length} robot sizes × ${HANGOUTS.length} hangouts, ${pairs} pairs)`, bad.length === 0 && pairs === kinds.length * kinds.length * HANGOUTS.length, bad.slice(0, 5));
 }
 
 // ---------------------------------------------------------------- crew panel collapse

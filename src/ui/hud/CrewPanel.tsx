@@ -41,13 +41,15 @@ function CrewRail({ onShift, needs }: { onShift: CrewMember[]; needs: number }) 
   return (
     <section aria-label="Crew (folded)" className="fixed bottom-4 left-4 top-[74px] z-10 flex flex-col items-center gap-2 font-[system-ui]" style={{ width: CREW_RAIL_W }}>
       <CrewToggle collapsed />
-      <span className="text-[11px] font-extrabold tabular-nums text-[#a8b8d8]" title={`${onShift.length} on shift`} aria-label={`${onShift.length} on shift`}>
-        {onShift.length}
+      <span className="text-[11px] font-extrabold tabular-nums text-[#a8b8d8]" title={`${onShift.length} on shift`}>
+        <span aria-hidden>{onShift.length}</span>
+        <span className="sr-only">{`${onShift.length} on shift`}</span>
       </span>
       {needs > 0 && (
-        <span className="inline-flex items-center gap-0.5 text-[11px] font-extrabold text-[#ff4f7b]" title={`${needs} need you`} aria-label={`${needs} need you`}>
+        <span className="inline-flex items-center gap-0.5 text-[11px] font-extrabold text-[#ff4f7b]" title={`${needs} need you`}>
           <MarkIcon k="needs" color="#ff4f7b" />
-          {needs}
+          <span aria-hidden>{needs}</span>
+          <span className="sr-only">{`${needs} need you`}</span>
         </span>
       )}
       <ul className="scroll-thin m-0 flex min-h-0 list-none flex-col items-center gap-1.5 overflow-y-auto p-0">

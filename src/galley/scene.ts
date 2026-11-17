@@ -239,8 +239,11 @@ export const SPOTS = {
   door: { x: 38, y: AISLE_Y - 8 },
   /** Inside the transport pod (feet). */
   tube: { x: TUBE.cx, y: TUBE.y - 2 },
-  /** In front of the pod, just off its pad: a session waiting its turn to beam out stands here. */
-  tubeQueue: { x: TUBE.cx, y: TOP_BAND_END + 22 },
+  /**
+   * Beside the pod, just right of its pad: a session waiting its turn to beam out stands here. Far enough
+   * right that it never stands on a robot at the floor hangout under the pod.
+   */
+  tubeQueue: { x: TUBE.cx + 36, y: TOP_BAND_END + 22 },
 };
 
 export type HangoutKind = "couch" | "stool" | "floor";
@@ -1241,7 +1244,7 @@ function line(B: Backend, m: GalleyModel, f: FrameState, P: boolean, hits: Hit[]
       const sub = `${member.role} · ${member.ticket ?? "no ticket"} · ${member.status}`;
       if (box) {
         if (f.selected === member.id) brackets(B, box);
-        const b = badge(B, cx, box.y - bob - 16,member.state === "needs" ? "needs" : "work", member.ticket, "", { alert: member.state === "needs" });
+        const b = badge(B, cx, box.y - bob - 16, member.state === "needs" ? "needs" : "work", member.ticket, "", { alert: member.state === "needs" });
         hits.push({ ...b, kind: "agent", id: member.id, title: `${member.name} · ${member.job}`, sub });
         hits.push(agentHit(box, member, sub));
       }
